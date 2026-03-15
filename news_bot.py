@@ -2,6 +2,7 @@ import asyncio
 import json
 import os
 import re
+import time
 import unicodedata
 from pathlib import Path
 from typing import Dict, List, Optional, Set, Tuple
@@ -10,16 +11,21 @@ import discord
 import feedparser
 
 os.makedirs("state", exist_ok=True)
+os.makedirs("state/player_profiles", exist_ok=True)
 
 BASE_DIR = Path(__file__).resolve().parent
 SOURCES_FILE = BASE_DIR / "news_sources.json"
 STATE_FILE = "state/news_posted_ids.json"
+DUPES_FILE = "state/news_recent_fingerprints.json"
 THREAD_MAP_FILE = BASE_DIR / "state/player_profiles/player_threads.json"
 
 DISCORD_TOKEN = os.getenv("NEWS_BOT_TOKEN") or os.getenv("DISCORD_TOKEN")
 NEWS_CHANNEL_ID = int(os.getenv("NEWS_CHANNEL_ID", "0"))
 NEWS_POLL_SECONDS = int(os.getenv("NEWS_POLL_SECONDS", "300"))
-MAX_ENTRIES_PER_FEED = int(os.getenv("NEWS_MAX_ENTRIES_PER_FEED", "5"))
+MAX_ENTRIES_PER_FEED = int(os.getenv("NEWS_MAX_ENTRIES_PER_FEED", "10"))
+
+# how long to treat matching stories as duplicates
+DUPLICATE_WINDOW_SECONDS = int(os.getenv("NEWS_DUPLICATE_WINDOW_SECONDS", str(12 * 60 * 60)))
 
 INCLUDE_PATTERNS: Dict[str, List[str]] = {
     "INJURY": [
@@ -32,7 +38,8 @@ INCLUDE_PATTERNS: Dict[str, List[str]] = {
     "LINEUP": [
         "starting", "starts tonight", "in the lineup", "not in the lineup",
         "batting", "leading off", "gets the start", "starting at", "will start",
-        "lineup", "rest day", "off day", "bench", "scratched from the lineup"
+        "lineup", "rest day", "off day", "bench", "scratched from the lineup",
+        "out of the lineup"
     ],
     "CALL-UP": [
         "called up", "recalled", "selected the contract", "promotion",
@@ -135,6 +142,9 @@ TEAM_COLORS = {
 
 WHITESPACE_RE = re.compile(r"\s+")
 URL_RE = re.compile(r"https?://\S+")
+HANDLE_RE = re.compile(r"@\w+")
+NON_ALNUM_RE = re.compile(r"[^a-z0-9\s]")
+MULTISPACE_RE = re.compile(r"\s+")
 
 
 def strip_accents(text: str) -> str:
@@ -148,24 +158,43 @@ def normalize_for_match(text: str) -> str:
     text = strip_accents(text or "").lower()
     text = text.replace("&amp;", "&")
     text = URL_RE.sub(" ", text)
-    text = re.sub(r"[^a-z0-9\s]", " ", text)
+    text = NON_ALNUM_RE.sub(" ", text)
     text = WHITESPACE_RE.sub(" ", text).strip()
     return f" {text} " if text else " "
+
+
+def normalize_text(text: str) -> str:
+    text = text or ""
+    text = URL_RE.sub("", text)
+    text = text.replace("&amp;", "&")
+    text = WHITESPACE_RE.sub(" ", text).strip()
+    return text
+
+
+def load_json_file(path: str, default):
+    try:
+        if not os.path.exists(path):
+            return default
+        with open(path, "r", encoding="utf-8") as f:
+            return json.load(f)
+    except Exception:
+        return default
+
+
+def save_json_file(path: str, data) -> None:
+    with open(path, "w", encoding="utf-8") as f:
+        json.dump(data, f, indent=2)
 
 
 def load_posted_ids() -> Set[str]:
     try:
         if not os.path.exists(STATE_FILE):
-            with open(STATE_FILE, "w", encoding="utf-8") as f:
-                json.dump([], f)
+            save_json_file(STATE_FILE, [])
             return set()
 
-        with open(STATE_FILE, "r", encoding="utf-8") as f:
-            data = json.load(f)
-
+        data = load_json_file(STATE_FILE, [])
         if isinstance(data, list):
             return set(str(x) for x in data)
-
         return set()
     except Exception as e:
         print(f"[NEWS] Failed loading state file: {e}")
@@ -174,10 +203,37 @@ def load_posted_ids() -> Set[str]:
 
 def save_posted_ids(posted_ids: Set[str]) -> None:
     try:
-        with open(STATE_FILE, "w", encoding="utf-8") as f:
-            json.dump(sorted(posted_ids), f)
+        save_json_file(STATE_FILE, sorted(posted_ids))
     except Exception as e:
         print(f"[NEWS] Failed saving state file: {e}")
+
+
+def load_recent_fingerprints() -> Dict[str, float]:
+    try:
+        data = load_json_file(DUPES_FILE, {})
+        cleaned: Dict[str, float] = {}
+        if isinstance(data, dict):
+            for key, value in data.items():
+                try:
+                    cleaned[str(key)] = float(value)
+                except Exception:
+                    continue
+        return cleaned
+    except Exception as e:
+        print(f"[NEWS] Failed loading duplicate fingerprint file: {e}")
+        return {}
+
+
+def save_recent_fingerprints(fingerprints: Dict[str, float]) -> None:
+    try:
+        save_json_file(DUPES_FILE, fingerprints)
+    except Exception as e:
+        print(f"[NEWS] Failed saving duplicate fingerprint file: {e}")
+
+
+def prune_recent_fingerprints(fingerprints: Dict[str, float]) -> Dict[str, float]:
+    cutoff = time.time() - DUPLICATE_WINDOW_SECONDS
+    return {k: v for k, v in fingerprints.items() if v >= cutoff}
 
 
 def load_sources() -> List[dict]:
@@ -245,14 +301,6 @@ def build_player_match_index(player_threads: Dict[str, int]) -> List[Tuple[str, 
     return indexed
 
 
-def normalize_text(text: str) -> str:
-    text = text or ""
-    text = URL_RE.sub("", text)
-    text = text.replace("&amp;", "&")
-    text = WHITESPACE_RE.sub(" ", text).strip()
-    return text
-
-
 def get_entry_text(entry) -> Tuple[str, str]:
     title = normalize_text(getattr(entry, "title", "") or "")
     summary = normalize_text(getattr(entry, "summary", "") or "")
@@ -318,7 +366,7 @@ def extract_team_from_thread_name(thread_name: str) -> Optional[str]:
     return None
 
 
-async def resolve_player_thread(client: discord.Client, thread_id: Optional[int]) -> Optional[discord.abc.GuildChannel]:
+async def resolve_player_thread(client: discord.Client, thread_id: Optional[int]):
     if not thread_id:
         return None
 
@@ -327,8 +375,7 @@ async def resolve_player_thread(client: discord.Client, thread_id: Optional[int]
         return thread
 
     try:
-        fetched = await client.fetch_channel(thread_id)
-        return fetched
+        return await client.fetch_channel(thread_id)
     except Exception:
         return None
 
@@ -336,7 +383,6 @@ async def resolve_player_thread(client: discord.Client, thread_id: Optional[int]
 async def infer_team(
     client: discord.Client,
     source_team: str,
-    player_name: Optional[str],
     player_thread_id: Optional[int],
 ) -> str:
     if source_team and source_team != "MLB":
@@ -349,6 +395,54 @@ async def infer_team(
             return inferred
 
     return "MLB"
+
+
+def build_story_fingerprint(title: str, summary: str, tag: str, team: str) -> str:
+    text = f"{title} {summary}".lower()
+    text = strip_accents(text)
+    text = URL_RE.sub(" ", text)
+    text = HANDLE_RE.sub(" ", text)
+
+    replacements = {
+        "according to": " ",
+        "reports": " ",
+        "reportedly": " ",
+        "per source": " ",
+        "source says": " ",
+        "source said": " ",
+        "manager said": " ",
+        "told reporters": " ",
+        "said": " ",
+        "expected to": " ",
+    }
+    for old, new in replacements.items():
+        text = text.replace(old, new)
+
+    text = NON_ALNUM_RE.sub(" ", text)
+    words = [w for w in MULTISPACE_RE.sub(" ", text).strip().split(" ") if w]
+
+    stop_words = {
+        "the", "a", "an", "and", "or", "to", "of", "for", "in", "on", "with",
+        "at", "from", "by", "is", "are", "was", "were", "be", "as", "that",
+        "this", "it", "his", "her", "their", "they", "he", "she", "will",
+        "would", "could", "should", "has", "have", "had", "after", "before",
+        "today", "tonight", "tomorrow", "yesterday"
+    }
+    words = [w for w in words if w not in stop_words]
+
+    base = " ".join(words[:18]).strip()
+    return f"{tag}|{team}|{base}"
+
+
+def is_recent_duplicate(fingerprints: Dict[str, float], fingerprint: str) -> bool:
+    ts = fingerprints.get(fingerprint)
+    if ts is None:
+        return False
+    return (time.time() - ts) <= DUPLICATE_WINDOW_SECONDS
+
+
+def remember_fingerprint(fingerprints: Dict[str, float], fingerprint: str) -> None:
+    fingerprints[fingerprint] = time.time()
 
 
 def build_embed(
@@ -405,6 +499,7 @@ class NewsBot(discord.Client):
         super().__init__(intents=intents)
         self.bg_task: Optional[asyncio.Task] = None
         self.posted_ids: Set[str] = load_posted_ids()
+        self.recent_fingerprints: Dict[str, float] = prune_recent_fingerprints(load_recent_fingerprints())
         self.sources: List[dict] = []
         self.started_loop = False
         self.player_threads: Dict[str, int] = {}
@@ -429,6 +524,7 @@ class NewsBot(discord.Client):
         print(f"[NEWS] Loaded {len(self.player_threads)} player thread mappings")
         print(f"[NEWS] Poll interval: {NEWS_POLL_SECONDS} seconds")
         print(f"[NEWS] State file: {STATE_FILE}")
+        print(f"[NEWS] Duplicate file: {DUPES_FILE}")
 
         self.bg_task = asyncio.create_task(self.news_loop())
 
@@ -438,6 +534,7 @@ class NewsBot(discord.Client):
         while not self.is_closed():
             try:
                 self.refresh_player_threads()
+                self.recent_fingerprints = prune_recent_fingerprints(self.recent_fingerprints)
                 await self.check_news_feeds()
             except Exception as e:
                 print(f"[NEWS] Loop error: {e}")
@@ -460,6 +557,7 @@ class NewsBot(discord.Client):
         print("[NEWS] Checking RSS feeds")
 
         new_posts = 0
+        dupes_skipped = 0
 
         for source in self.sources:
             handle = source["handle"]
@@ -498,9 +596,15 @@ class NewsBot(discord.Client):
                     team = await infer_team(
                         client=self,
                         source_team=source["team"],
-                        player_name=player_name,
                         player_thread_id=player_thread_id,
                     )
+
+                    fingerprint = build_story_fingerprint(title, summary, tag, team)
+                    if is_recent_duplicate(self.recent_fingerprints, fingerprint):
+                        dupes_skipped += 1
+                        self.posted_ids.add(uid)
+                        print(f"[NEWS] Duplicate skipped [{team}] [{tag}] @{handle}: {title[:100]}")
+                        continue
 
                     embed = build_embed(
                         source=source,
@@ -523,6 +627,7 @@ class NewsBot(discord.Client):
                             print(f"[NEWS] Failed posting to player thread for {player_name}: {e}")
 
                     self.posted_ids.add(uid)
+                    remember_fingerprint(self.recent_fingerprints, fingerprint)
                     new_posts += 1
                     print(
                         f"[NEWS] Posted [{team}] [{tag}] @{handle}: "
@@ -531,11 +636,12 @@ class NewsBot(discord.Client):
                     )
 
                 save_posted_ids(self.posted_ids)
+                save_recent_fingerprints(self.recent_fingerprints)
 
             except Exception as e:
                 print(f"[NEWS] Feed error for @{handle}: {e}")
 
-        print(f"[NEWS] Done. New posts: {new_posts}")
+        print(f"[NEWS] Done. New posts: {new_posts} | Duplicates skipped: {dupes_skipped}")
 
 
 async def start_news_bot():
