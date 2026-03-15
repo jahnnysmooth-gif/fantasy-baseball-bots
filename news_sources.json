@@ -1,32 +1,79 @@
 [
-  {
-    "name": "Jeff Passan",
-    "handle": "JeffPassan",
-    "team": "MLB",
-    "rss": "https://nitter.net/JeffPassan/rss"
-  },
-  {
-    "name": "Ken Rosenthal",
-    "handle": "Ken_Rosenthal",
-    "team": "MLB",
-    "rss": "https://nitter.net/Ken_Rosenthal/rss"
-  },
-  {
-    "name": "Jon Heyman",
-    "handle": "JonHeyman",
-    "team": "MLB",
-    "rss": "https://nitter.net/JonHeyman/rss"
-  },
-  {
-    "name": "Anthony DiComo",
-    "handle": "AnthonyDiComo",
-    "team": "NYM",
-    "rss": "https://nitter.net/AnthonyDiComo/rss"
-  },
-  {
-    "name": "Bryan Hoch",
-    "handle": "BryanHoch",
-    "team": "NYY",
-    "rss": "https://nitter.net/BryanHoch/rss"
-  }
+  { "name": "Jeff Passan", "handle": "JeffPassan", "team": "MLB", "rss": "https://rsshub.app/twitter/user/JeffPassan" },
+  { "name": "Ken Rosenthal", "handle": "Ken_Rosenthal", "team": "MLB", "rss": "https://rsshub.app/twitter/user/Ken_Rosenthal" },
+  { "name": "Jon Heyman", "handle": "JonHeyman", "team": "MLB", "rss": "https://rsshub.app/twitter/user/JonHeyman" },
+  { "name": "Buster Olney", "handle": "Buster_ESPN", "team": "MLB", "rss": "https://rsshub.app/twitter/user/Buster_ESPN" },
+  { "name": "Bob Nightengale", "handle": "BNightengale", "team": "MLB", "rss": "https://rsshub.app/twitter/user/BNightengale" },
+
+  { "name": "Anthony DiComo", "handle": "AnthonyDiComo", "team": "NYM", "rss": "https://rsshub.app/twitter/user/AnthonyDiComo" },
+  { "name": "Mike Puma", "handle": "NYPost_Mets", "team": "NYM", "rss": "https://rsshub.app/twitter/user/NYPost_Mets" },
+
+  { "name": "Bryan Hoch", "handle": "BryanHoch", "team": "NYY", "rss": "https://rsshub.app/twitter/user/BryanHoch" },
+  { "name": "Brendan Kuty", "handle": "BrendanKutyNJ", "team": "NYY", "rss": "https://rsshub.app/twitter/user/BrendanKutyNJ" },
+
+  { "name": "David O'Brien", "handle": "DOBrienATL", "team": "ATL", "rss": "https://rsshub.app/twitter/user/DOBrienATL" },
+  { "name": "Justin Toscano", "handle": "JustinCToscano", "team": "ATL", "rss": "https://rsshub.app/twitter/user/JustinCToscano" },
+
+  { "name": "Todd Zolecki", "handle": "ToddZolecki", "team": "PHI", "rss": "https://rsshub.app/twitter/user/ToddZolecki" },
+  { "name": "Matt Gelb", "handle": "MattGelb", "team": "PHI", "rss": "https://rsshub.app/twitter/user/MattGelb" },
+
+  { "name": "Jesse Rogers", "handle": "JesseRogersESPN", "team": "CHC", "rss": "https://rsshub.app/twitter/user/JesseRogersESPN" },
+  { "name": "Sahadev Sharma", "handle": "sahadevsharma", "team": "CHC", "rss": "https://rsshub.app/twitter/user/sahadevsharma" },
+
+  { "name": "Mark Gonzales", "handle": "MDGonzales", "team": "CWS", "rss": "https://rsshub.app/twitter/user/MDGonzales" },
+  { "name": "James Fegan", "handle": "JRFegan", "team": "CWS", "rss": "https://rsshub.app/twitter/user/JRFegan" },
+
+  { "name": "C. Trent Rosecrans", "handle": "ctrent", "team": "CIN", "rss": "https://rsshub.app/twitter/user/ctrent" },
+  { "name": "Charlie Goldsmith", "handle": "CharlieG__", "team": "CIN", "rss": "https://rsshub.app/twitter/user/CharlieG__" },
+
+  { "name": "Zack Meisel", "handle": "ZackMeisel", "team": "CLE", "rss": "https://rsshub.app/twitter/user/ZackMeisel" },
+  { "name": "Paul Hoynes", "handle": "hoynsie", "team": "CLE", "rss": "https://rsshub.app/twitter/user/hoynsie" },
+
+  { "name": "Patrick Saunders", "handle": "psaundersdp", "team": "COL", "rss": "https://rsshub.app/twitter/user/psaundersdp" },
+  { "name": "Thomas Harding", "handle": "harding_at_mlb", "team": "COL", "rss": "https://rsshub.app/twitter/user/harding_at_mlb" },
+
+  { "name": "Evan Petzold", "handle": "EvanPetzold", "team": "DET", "rss": "https://rsshub.app/twitter/user/EvanPetzold" },
+  { "name": "Cody Stavenhagen", "handle": "CodyStavenhagen", "team": "DET", "rss": "https://rsshub.app/twitter/user/CodyStavenhagen" },
+
+  { "name": "Brian McTaggart", "handle": "brianmctaggart", "team": "HOU", "rss": "https://rsshub.app/twitter/user/brianmctaggart" },
+  { "name": "Chandler Rome", "handle": "Chandler_Rome", "team": "HOU", "rss": "https://rsshub.app/twitter/user/Chandler_Rome" },
+
+  { "name": "Anne Rogers", "handle": "anne__rogers", "team": "KC", "rss": "https://rsshub.app/twitter/user/anne__rogers" },
+  { "name": "Lynn Worthy", "handle": "LWorthySports", "team": "KC", "rss": "https://rsshub.app/twitter/user/LWorthySports" },
+
+  { "name": "Rhett Bollinger", "handle": "RhettBollinger", "team": "LAA", "rss": "https://rsshub.app/twitter/user/RhettBollinger" },
+  { "name": "Sam Blum", "handle": "SamBlum3", "team": "LAA", "rss": "https://rsshub.app/twitter/user/SamBlum3" },
+
+  { "name": "Juan Toribio", "handle": "juanctoribio", "team": "LAD", "rss": "https://rsshub.app/twitter/user/juanctoribio" },
+  { "name": "Fabian Ardaya", "handle": "FabianArdaya", "team": "LAD", "rss": "https://rsshub.app/twitter/user/FabianArdaya" },
+
+  { "name": "Jordan McPherson", "handle": "J_McPherson1126", "team": "MIA", "rss": "https://rsshub.app/twitter/user/J_McPherson1126" },
+  { "name": "Christina De Nicola", "handle": "CDeNicola13", "team": "MIA", "rss": "https://rsshub.app/twitter/user/CDeNicola13" },
+
+  { "name": "Adam McCalvy", "handle": "AdamMcCalvy", "team": "MIL", "rss": "https://rsshub.app/twitter/user/AdamMcCalvy" },
+  { "name": "Todd Rosiak", "handle": "Todd_Rosiak", "team": "MIL", "rss": "https://rsshub.app/twitter/user/Todd_Rosiak" },
+
+  { "name": "Do-Hyoung Park", "handle": "dohyoungpark", "team": "MIN", "rss": "https://rsshub.app/twitter/user/dohyoungpark" },
+  { "name": "Dan Hayes", "handle": "DanHayesMLB", "team": "MIN", "rss": "https://rsshub.app/twitter/user/DanHayesMLB" }
 ]
+
+{ "name": "Jon Morosi", "handle": "jonmorosi", "team": "MLB", "rss": "https://rsshub.app/twitter/user/jonmorosi" },
+{ "name": "Jesse Rogers", "handle": "JesseRogersESPN", "team": "MLB", "rss": "https://rsshub.app/twitter/user/JesseRogersESPN" },
+{ "name": "Mark Feinsand", "handle": "Feinsand", "team": "MLB", "rss": "https://rsshub.app/twitter/user/Feinsand" },
+{ "name": "Joel Sherman", "handle": "Joelsherman1", "team": "MLB", "rss": "https://rsshub.app/twitter/user/Joelsherman1" }
+
+{ "name": "Andy Martino", "handle": "martinonyc", "team": "NYM", "rss": "https://rsshub.app/twitter/user/martinonyc" },
+{ "name": "SNY Mets", "handle": "SNY_Mets", "team": "NYM", "rss": "https://rsshub.app/twitter/user/SNY_Mets" },
+
+{ "name": "Jack Curry", "handle": "JackCurryYES", "team": "NYY", "rss": "https://rsshub.app/twitter/user/JackCurryYES" },
+{ "name": "Chris Kirschner", "handle": "ChrisKirschner", "team": "NYY", "rss": "https://rsshub.app/twitter/user/ChrisKirschner" }
+{ "name": "Alden Gonzalez", "handle": "Alden_Gonzalez", "team": "LAD", "rss": "https://rsshub.app/twitter/user/Alden_Gonzalez" },
+{ "name": "Bill Plunkett", "handle": "billplunkettocr", "team": "LAD", "rss": "https://rsshub.app/twitter/user/billplunkettocr" },
+
+{ "name": "AJ Cassavell", "handle": "AJCassavell", "team": "SD", "rss": "https://rsshub.app/twitter/user/AJCassavell" },
+{ "name": "Dennis Lin", "handle": "dennistlin", "team": "SD", "rss": "https://rsshub.app/twitter/user/dennistlin" }
+{ "name": "Mark Bowman", "handle": "mlbbowman", "team": "ATL", "rss": "https://rsshub.app/twitter/user/mlbbowman" },
+{ "name": "Brian McTaggart", "handle": "brianmctaggart", "team": "HOU", "rss": "https://rsshub.app/twitter/user/brianmctaggart" }
+
+{ "name": "MLB Pipeline", "handle": "MLBPipeline", "team": "MLB", "rss": "https://rsshub.app/twitter/user/MLBPipeline" },
+{ "name": "Baseball America", "handle": "BaseballAmerica", "team": "MLB", "rss": "https://rsshub.app/twitter/user/BaseballAmerica" }
