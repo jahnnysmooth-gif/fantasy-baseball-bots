@@ -32,7 +32,8 @@ HEADERS = {
     )
 }
 
-STATE_DIR = Path("state")
+# Use Render persistent disk so duplicate protection survives redeploys/restarts
+STATE_DIR = Path("/var/data/injury")
 STATE_FILE = STATE_DIR / "posted_injuries.json"
 STATE_FILE_TMP = STATE_DIR / "posted_injuries.json.tmp"
 
@@ -205,7 +206,6 @@ def load_state() -> dict:
         if not isinstance(posted_ids, list):
             posted_ids = []
 
-        # Deduplicate while preserving order
         seen = set()
         ordered = []
         for item in posted_ids:
@@ -234,6 +234,16 @@ def save_state(state: dict) -> None:
     STATE_FILE_TMP.replace(STATE_FILE)
 
 
+def normalize_posted_ids(posted_ids_list: list[str]) -> list[str]:
+    seen = set()
+    ordered = []
+    for uid in posted_ids_list:
+        if uid not in seen:
+            seen.add(uid)
+            ordered.append(uid)
+    return ordered[-MAX_STORED_IDS:]
+
+
 def make_update_id(item: dict) -> str:
     raw = "|".join([
         item["team"],
@@ -260,16 +270,11 @@ def parse_comment_date(comment: str) -> datetime | None:
     month_day = match.group(1)
     now_year = datetime.now(ET).year
 
-    # Try current year first, then previous year.
-    # This keeps the bot working across year changes without manual edits.
     for year in (now_year, now_year - 1):
         try:
             dt = datetime.strptime(f"{month_day} {year}", "%b %d %Y").replace(tzinfo=ET)
-
-            # Guard against parsing something absurdly far in the future
             if dt > datetime.now(ET).replace(hour=23, minute=59, second=59, microsecond=0):
                 continue
-
             return dt
         except ValueError:
             continue
@@ -447,21 +452,15 @@ async def post_allowed_updates() -> None:
 
             posted_ids_set.add(item["update_id"])
             posted_ids_list.append(item["update_id"])
+            state["posted_ids"] = normalize_posted_ids(posted_ids_list)
+            save_state(state)
 
             log(f"Posted: {item['player']} | {item['team']} | {item['status']}")
             await asyncio.sleep(1.0)
         except Exception as e:
             log(f"Failed to post {item['player']}: {e}")
 
-    # Deduplicate again while preserving order, then trim oldest
-    seen = set()
-    ordered = []
-    for uid in posted_ids_list:
-        if uid not in seen:
-            seen.add(uid)
-            ordered.append(uid)
-
-    state["posted_ids"] = ordered[-MAX_STORED_IDS:]
+    state["posted_ids"] = normalize_posted_ids(posted_ids_list)
     save_state(state)
     log(f"Saved posted_ids: {len(state['posted_ids'])}")
 
