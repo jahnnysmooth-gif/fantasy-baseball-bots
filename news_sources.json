@@ -54,26 +54,26 @@
   { "name": "Todd Rosiak", "handle": "Todd_Rosiak", "team": "MIL", "rss": "https://rsshub.app/twitter/user/Todd_Rosiak" },
 
   { "name": "Do-Hyoung Park", "handle": "dohyoungpark", "team": "MIN", "rss": "https://rsshub.app/twitter/user/dohyoungpark" },
-  { "name": "Dan Hayes", "handle": "DanHayesMLB", "team": "MIN", "rss": "https://rsshub.app/twitter/user/DanHayesMLB" }
+  { "name": "Dan Hayes", "handle": "DanHayesMLB", "team": "MIN", "rss": "https://rsshub.app/twitter/user/DanHayesMLB" },
+
+  { "name": "Jon Morosi", "handle": "jonmorosi", "team": "MLB", "rss": "https://rsshub.app/twitter/user/jonmorosi" },
+  { "name": "Mark Feinsand", "handle": "Feinsand", "team": "MLB", "rss": "https://rsshub.app/twitter/user/Feinsand" },
+  { "name": "Joel Sherman", "handle": "Joelsherman1", "team": "MLB", "rss": "https://rsshub.app/twitter/user/Joelsherman1" },
+
+  { "name": "Andy Martino", "handle": "martinonyc", "team": "NYM", "rss": "https://rsshub.app/twitter/user/martinonyc" },
+  { "name": "SNY Mets", "handle": "SNY_Mets", "team": "NYM", "rss": "https://rsshub.app/twitter/user/SNY_Mets" },
+
+  { "name": "Jack Curry", "handle": "JackCurryYES", "team": "NYY", "rss": "https://rsshub.app/twitter/user/JackCurryYES" },
+  { "name": "Chris Kirschner", "handle": "ChrisKirschner", "team": "NYY", "rss": "https://rsshub.app/twitter/user/ChrisKirschner" },
+
+  { "name": "Alden Gonzalez", "handle": "Alden_Gonzalez", "team": "LAD", "rss": "https://rsshub.app/twitter/user/Alden_Gonzalez" },
+  { "name": "Bill Plunkett", "handle": "billplunkettocr", "team": "LAD", "rss": "https://rsshub.app/twitter/user/billplunkettocr" },
+
+  { "name": "AJ Cassavell", "handle": "AJCassavell", "team": "SD", "rss": "https://rsshub.app/twitter/user/AJCassavell" },
+  { "name": "Dennis Lin", "handle": "dennistlin", "team": "SD", "rss": "https://rsshub.app/twitter/user/dennistlin" },
+
+  { "name": "Mark Bowman", "handle": "mlbbowman", "team": "ATL", "rss": "https://rsshub.app/twitter/user/mlbbowman" },
+
+  { "name": "MLB Pipeline", "handle": "MLBPipeline", "team": "MLB", "rss": "https://rsshub.app/twitter/user/MLBPipeline" },
+  { "name": "Baseball America", "handle": "BaseballAmerica", "team": "MLB", "rss": "https://rsshub.app/twitter/user/BaseballAmerica" }
 ]
-
-{ "name": "Jon Morosi", "handle": "jonmorosi", "team": "MLB", "rss": "https://rsshub.app/twitter/user/jonmorosi" },
-{ "name": "Jesse Rogers", "handle": "JesseRogersESPN", "team": "MLB", "rss": "https://rsshub.app/twitter/user/JesseRogersESPN" },
-{ "name": "Mark Feinsand", "handle": "Feinsand", "team": "MLB", "rss": "https://rsshub.app/twitter/user/Feinsand" },
-{ "name": "Joel Sherman", "handle": "Joelsherman1", "team": "MLB", "rss": "https://rsshub.app/twitter/user/Joelsherman1" }
-
-{ "name": "Andy Martino", "handle": "martinonyc", "team": "NYM", "rss": "https://rsshub.app/twitter/user/martinonyc" },
-{ "name": "SNY Mets", "handle": "SNY_Mets", "team": "NYM", "rss": "https://rsshub.app/twitter/user/SNY_Mets" },
-
-{ "name": "Jack Curry", "handle": "JackCurryYES", "team": "NYY", "rss": "https://rsshub.app/twitter/user/JackCurryYES" },
-{ "name": "Chris Kirschner", "handle": "ChrisKirschner", "team": "NYY", "rss": "https://rsshub.app/twitter/user/ChrisKirschner" }
-{ "name": "Alden Gonzalez", "handle": "Alden_Gonzalez", "team": "LAD", "rss": "https://rsshub.app/twitter/user/Alden_Gonzalez" },
-{ "name": "Bill Plunkett", "handle": "billplunkettocr", "team": "LAD", "rss": "https://rsshub.app/twitter/user/billplunkettocr" },
-
-{ "name": "AJ Cassavell", "handle": "AJCassavell", "team": "SD", "rss": "https://rsshub.app/twitter/user/AJCassavell" },
-{ "name": "Dennis Lin", "handle": "dennistlin", "team": "SD", "rss": "https://rsshub.app/twitter/user/dennistlin" }
-{ "name": "Mark Bowman", "handle": "mlbbowman", "team": "ATL", "rss": "https://rsshub.app/twitter/user/mlbbowman" },
-{ "name": "Brian McTaggart", "handle": "brianmctaggart", "team": "HOU", "rss": "https://rsshub.app/twitter/user/brianmctaggart" }
-
-{ "name": "MLB Pipeline", "handle": "MLBPipeline", "team": "MLB", "rss": "https://rsshub.app/twitter/user/MLBPipeline" },
-{ "name": "Baseball America", "handle": "BaseballAmerica", "team": "MLB", "rss": "https://rsshub.app/twitter/user/BaseballAmerica" }
