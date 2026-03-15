@@ -275,5 +275,5 @@ def main():
     print("[BOT] Posted", posted)
 
 
-if __name__ == "__main__":
+def start_mlb_rss_news_bot():
     main()
