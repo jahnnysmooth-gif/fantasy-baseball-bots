@@ -8,69 +8,29 @@ from pathlib import Path
 from typing import Dict, List, Optional, Set, Tuple
 
 import discord
-import feedparser
+import requests
+from bs4 import BeautifulSoup
 
 os.makedirs("state", exist_ok=True)
 os.makedirs("state/player_profiles", exist_ok=True)
 
 BASE_DIR = Path(__file__).resolve().parent
-SOURCES_FILE = BASE_DIR / "news_sources.json"
 STATE_FILE = "state/news_posted_ids.json"
 DUPES_FILE = "state/news_recent_fingerprints.json"
 THREAD_MAP_FILE = BASE_DIR / "state/player_profiles/player_threads.json"
 
 DISCORD_TOKEN = os.getenv("NEWS_BOT_TOKEN") or os.getenv("DISCORD_TOKEN")
 NEWS_CHANNEL_ID = int(os.getenv("NEWS_CHANNEL_ID", "0"))
-NEWS_POLL_SECONDS = int(os.getenv("NEWS_POLL_SECONDS", "300"))
-MAX_ENTRIES_PER_FEED = int(os.getenv("NEWS_MAX_ENTRIES_PER_FEED", "10"))
+NEWS_POLL_SECONDS = int(os.getenv("NEWS_POLL_SECONDS", "180"))
+MAX_NEWS_ITEMS = int(os.getenv("NEWS_MAX_ITEMS", "25"))
 
 # how long to treat matching stories as duplicates
-DUPLICATE_WINDOW_SECONDS = int(os.getenv("NEWS_DUPLICATE_WINDOW_SECONDS", str(12 * 60 * 60)))
+DUPLICATE_WINDOW_SECONDS = int(
+    os.getenv("NEWS_DUPLICATE_WINDOW_SECONDS", str(12 * 60 * 60))
+)
 
-INCLUDE_PATTERNS: Dict[str, List[str]] = {
-    "INJURY": [
-        "injury", "injured", "il", "10-day il", "15-day il", "60-day il",
-        "placed on", "activated", "reinstated", "scratched", "day-to-day",
-        "day to day", "out for", "headed to the il", "returns", "returning",
-        "available", "unavailable", "underwent", "soreness", "tightness",
-        "will miss", "won't start", "not expected to", "shut down"
-    ],
-    "LINEUP": [
-        "starting", "starts tonight", "in the lineup", "not in the lineup",
-        "batting", "leading off", "gets the start", "starting at", "will start",
-        "lineup", "rest day", "off day", "bench", "scratched from the lineup",
-        "out of the lineup"
-    ],
-    "CALL-UP": [
-        "called up", "recalled", "selected the contract", "promotion",
-        "promoted", "optioned", "sent down", "demoted", "designated for assignment",
-        "dfa", "added to the roster"
-    ],
-    "TRANSACTION": [
-        "traded", "trade", "sign", "signed", "signing", "released",
-        "waived", "claimed", "acquired", "deal", "contract"
-    ],
-    "CLOSER": [
-        "closer", "save chance", "ninth inning", "bullpen", "committee",
-        "high leverage", "setup man", "save opportunity"
-    ],
-    "ROTATION": [
-        "rotation", "starter", "starting pitcher", "probable", "bullpen game",
-        "opens the season", "slot in the rotation", "start sunday", "start monday",
-        "start tuesday", "start wednesday", "start thursday", "start friday",
-        "start saturday"
-    ],
-    "WEATHER": [
-        "postponed", "rain delay", "weather", "delayed", "cancelled", "canceled"
-    ],
-}
-
-EXCLUDE_PATTERNS = [
-    "ticket", "tickets", "giveaway", "promotion", "promo", "sweepstakes",
-    "podcast", "newsletter", "column", "game story", "live blog",
-    "pregame show", "postgame show", "watch live", "stream live",
-    "subscribe", "merch", "shop now", "sale", "odds", "betting"
-]
+NBC_PLAYER_NEWS_URL = "https://www.nbcsports.com/fantasy/baseball/player-news"
+NBC_BASE_URL = "https://www.nbcsports.com"
 
 TEAM_LOGOS = {
     "ARI": "https://a.espncdn.com/i/teamlogos/mlb/500/ari.png",
@@ -140,11 +100,35 @@ TEAM_COLORS = {
     "MLB": 0x2B2D31,
 }
 
+KNOWN_TAGS = {"Headline", "Injury", "Recap", "Transaction"}
+
+TEAM_CODES = {
+    "ARI", "ATL", "BAL", "BOS", "CHC", "CWS", "CIN", "CLE", "COL", "DET",
+    "HOU", "KC", "LAA", "LAD", "MIA", "MIL", "MIN", "NYM", "NYY", "ATH",
+    "PHI", "PIT", "SD", "SF", "SEA", "STL", "TB", "TEX", "TOR", "WSH"
+}
+
 WHITESPACE_RE = re.compile(r"\s+")
 URL_RE = re.compile(r"https?://\S+")
 HANDLE_RE = re.compile(r"@\w+")
 NON_ALNUM_RE = re.compile(r"[^a-z0-9\s]")
 MULTISPACE_RE = re.compile(r"\s+")
+TEAM_POS_RE = re.compile(r"\b([A-Z]{2,3})\b")
+TIMESTAMP_RE = re.compile(
+    r"^(January|February|March|April|May|June|July|August|September|October|November|December)\s+\d{1,2},\s+\d{4}\s+\d{1,2}:\d{2}\s+[AP]M$"
+)
+PLAYER_SLUG_RE = re.compile(r"/player/[^/]+/([a-z0-9-]+)", re.IGNORECASE)
+
+SESSION = requests.Session()
+SESSION.headers.update(
+    {
+        "User-Agent": (
+            "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
+            "AppleWebKit/537.36 (KHTML, like Gecko) "
+            "Chrome/145.0.0.0 Safari/537.36"
+        )
+    }
+)
 
 
 def strip_accents(text: str) -> str:
@@ -236,39 +220,6 @@ def prune_recent_fingerprints(fingerprints: Dict[str, float]) -> Dict[str, float
     return {k: v for k, v in fingerprints.items() if v >= cutoff}
 
 
-def load_sources() -> List[dict]:
-    if not SOURCES_FILE.exists():
-        raise FileNotFoundError(f"{SOURCES_FILE} not found")
-
-    with open(SOURCES_FILE, "r", encoding="utf-8") as f:
-        data = json.load(f)
-
-    if not isinstance(data, list):
-        raise ValueError("news_sources.json must contain a JSON array")
-
-    cleaned = []
-    for item in data:
-        if not isinstance(item, dict):
-            continue
-
-        handle = str(item.get("handle", "")).strip()
-        rss = str(item.get("rss", "")).strip()
-        team = str(item.get("team", "MLB")).strip().upper() or "MLB"
-        name = str(item.get("name", handle)).strip() or handle
-
-        if not handle or not rss:
-            continue
-
-        cleaned.append({
-            "name": name,
-            "handle": handle,
-            "team": team,
-            "rss": rss,
-        })
-
-    return cleaned
-
-
 def load_player_threads() -> Dict[str, int]:
     try:
         if not THREAD_MAP_FILE.exists():
@@ -299,47 +250,6 @@ def build_player_match_index(player_threads: Dict[str, int]) -> List[Tuple[str, 
 
     indexed.sort(key=lambda item: len(item[0]), reverse=True)
     return indexed
-
-
-def get_entry_text(entry) -> Tuple[str, str]:
-    title = normalize_text(getattr(entry, "title", "") or "")
-    summary = normalize_text(getattr(entry, "summary", "") or "")
-    return title, summary
-
-
-def entry_unique_id(entry) -> Optional[str]:
-    for attr in ("id", "guid", "link", "title"):
-        value = getattr(entry, attr, None)
-        if value:
-            return str(value).strip()
-    return None
-
-
-def looks_like_reply_or_repost(title: str, summary: str) -> bool:
-    text = f"{title} {summary}".lower()
-
-    bad_starts = ["rt @", "repost:", "retweeted", "replying to", "@"]
-    if any(text.startswith(x) for x in bad_starts):
-        return True
-
-    if "replying to" in text:
-        return True
-
-    return False
-
-
-def classify_news(title: str, summary: str) -> Optional[str]:
-    text = f"{title} {summary}".lower()
-
-    if any(bad in text for bad in EXCLUDE_PATTERNS):
-        return None
-
-    for tag in ["INJURY", "LINEUP", "CALL-UP", "TRANSACTION", "CLOSER", "ROTATION", "WEATHER"]:
-        patterns = INCLUDE_PATTERNS[tag]
-        if any(p.lower() in text for p in patterns):
-            return tag
-
-    return None
 
 
 def detect_player(title: str, summary: str, player_index: List[Tuple[str, str, int]]) -> Tuple[Optional[str], Optional[int]]:
@@ -382,7 +292,7 @@ async def resolve_player_thread(client: discord.Client, thread_id: Optional[int]
 
 async def infer_team(
     client: discord.Client,
-    source_team: str,
+    source_team: Optional[str],
     player_thread_id: Optional[int],
 ) -> str:
     if source_team and source_team != "MLB":
@@ -445,8 +355,30 @@ def remember_fingerprint(fingerprints: Dict[str, float], fingerprint: str) -> No
     fingerprints[fingerprint] = time.time()
 
 
+def absolute_url(url: Optional[str]) -> str:
+    if not url:
+        return NBC_PLAYER_NEWS_URL
+    if url.startswith("http://") or url.startswith("https://"):
+        return url
+    if url.startswith("/"):
+        return NBC_BASE_URL + url
+    return NBC_BASE_URL + "/" + url.lstrip("/")
+
+
+def get_tag_color(tag: str, team: str) -> int:
+    lowered = (tag or "").lower()
+    if lowered == "injury":
+        return 0xE74C3C
+    if lowered == "transaction":
+        return 0x3498DB
+    if lowered == "recap":
+        return 0x2ECC71
+    if lowered == "headline":
+        return 0xF1C40F
+    return TEAM_COLORS.get(team, TEAM_COLORS["MLB"])
+
+
 def build_embed(
-    source: dict,
     team: str,
     tag: str,
     title: str,
@@ -454,19 +386,19 @@ def build_embed(
     link: str,
     player_name: Optional[str] = None,
     player_thread_url: Optional[str] = None,
+    timestamp_text: Optional[str] = None,
+    position_text: Optional[str] = None,
 ) -> discord.Embed:
-    handle = source["handle"]
     clean_title = title.strip() or "New update"
     clean_summary = summary.strip()
 
     if len(clean_title) > 256:
         clean_title = clean_title[:253] + "..."
 
-    color = TEAM_COLORS.get(team, TEAM_COLORS["MLB"])
     embed = discord.Embed(
         title=clean_title,
         description=clean_summary[:3500] if clean_summary else None,
-        color=color,
+        color=get_tag_color(tag, team),
         url=link,
     )
 
@@ -474,8 +406,11 @@ def build_embed(
     if logo:
         embed.set_thumbnail(url=logo)
 
-    embed.add_field(name="Tag", value=tag.title(), inline=True)
-    embed.add_field(name="Source", value=f"@{handle}", inline=True)
+    embed.add_field(name="Tag", value=tag or "News", inline=True)
+    embed.add_field(name="Source", value=f"[NBC Sports Rotoworld]({link})", inline=True)
+
+    if position_text:
+        embed.add_field(name="Position", value=position_text[:100], inline=True)
 
     if player_name and player_thread_url:
         embed.add_field(
@@ -484,13 +419,233 @@ def build_embed(
             inline=False,
         )
 
-    footer_team = team if team else "MLB"
-    embed.set_footer(text=f"{footer_team} • Fantasy Baseball Geek")
+    footer_parts = [team if team else "MLB", "Fantasy Baseball Geek"]
+    if timestamp_text:
+        footer_parts.append(timestamp_text)
+
+    embed.set_footer(text=" • ".join(footer_parts))
     return embed
 
 
-async def parse_feed(url: str):
-    return await asyncio.to_thread(feedparser.parse, url)
+def is_valid_player_name(text: str) -> bool:
+    if not text:
+        return False
+    text = text.strip()
+    if len(text) < 3 or len(text) > 60:
+        return False
+    if text in KNOWN_TAGS:
+        return False
+    if text.lower().startswith("personalize your rotoworld"):
+        return False
+    if text.lower() in {"related", "up next", "my favorites", "all news"}:
+        return False
+    words = text.split()
+    return len(words) <= 5
+
+
+def extract_team_and_position(line: str) -> Tuple[Optional[str], Optional[str]]:
+    if not line:
+        return None, None
+
+    cleaned = normalize_text(line)
+    parts = cleaned.split()
+
+    team = None
+    for part in parts:
+        upper = part.upper()
+        if upper in TEAM_CODES:
+            team = upper
+            break
+
+    position = None
+    if team and cleaned.startswith(team):
+        position = cleaned[len(team):].strip()
+        position = re.sub(r"#\d+\b", "", position).strip() or None
+
+    return team, position
+
+
+def slug_to_name(slug: str) -> str:
+    parts = [p for p in slug.split("-") if p]
+    return " ".join(p.capitalize() for p in parts)
+
+
+def extract_candidate_links(soup: BeautifulSoup) -> Dict[str, str]:
+    out: Dict[str, str] = {}
+
+    for a in soup.find_all("a", href=True):
+        href = a.get("href", "").strip()
+        text = normalize_text(a.get_text(" ", strip=True))
+
+        if not href:
+            continue
+
+        match = PLAYER_SLUG_RE.search(href)
+        if match:
+            slug = match.group(1)
+            player_name = slug_to_name(slug)
+            if is_valid_player_name(player_name):
+                out.setdefault(player_name, absolute_url(href))
+
+        if is_valid_player_name(text) and "/player/" in href:
+            out.setdefault(text, absolute_url(href))
+
+    return out
+
+
+def parse_rotoworld_items_from_text(raw_text: str, player_links: Dict[str, str]) -> List[dict]:
+    text = raw_text.replace("\r", "\n")
+    lines = [normalize_text(x) for x in text.split("\n")]
+    lines = [x for x in lines if x]
+
+    start_idx = None
+    for i, line in enumerate(lines):
+        if line == "Rotoworld":
+            start_idx = i
+            break
+
+    if start_idx is None:
+        return []
+
+    lines = lines[start_idx:]
+
+    items: List[dict] = []
+    i = 0
+
+    while i < len(lines):
+        line = lines[i]
+
+        if line in KNOWN_TAGS and items:
+            items[-1]["tag"] = line
+            i += 1
+            continue
+
+        if not is_valid_player_name(line):
+            i += 1
+            continue
+
+        player_name = line
+
+        if i + 1 >= len(lines):
+            i += 1
+            continue
+
+        team = None
+        position = None
+        title = None
+        summary = None
+        tag = "News"
+        timestamp_text = None
+
+        next_line = lines[i + 1]
+        team, position = extract_team_and_position(next_line)
+
+        if not team:
+            i += 1
+            continue
+
+        j = i + 2
+
+        # skip site noise
+        while j < len(lines):
+            probe = lines[j]
+            low = probe.lower()
+
+            if low.startswith("personalize your rotoworld feed"):
+                j += 1
+                continue
+
+            if probe == "Related":
+                break
+
+            if probe in KNOWN_TAGS:
+                break
+
+            if not title:
+                title = probe
+                j += 1
+                continue
+
+            if not summary:
+                summary = probe
+                j += 1
+                continue
+
+            # optional timestamp, sometimes appears after the tag / media block
+            if TIMESTAMP_RE.match(probe):
+                timestamp_text = probe
+                j += 1
+                continue
+
+            # stop if next item starts
+            if is_valid_player_name(probe):
+                maybe_team, _ = extract_team_and_position(lines[j + 1] if j + 1 < len(lines) else "")
+                if maybe_team:
+                    break
+
+            # ignore extra lines like Related / Up Next / video text
+            j += 1
+
+        # scan forward a bit for tag/timestamp
+        scan_limit = min(j + 18, len(lines))
+        for k in range(i + 2, scan_limit):
+            probe = lines[k]
+            if probe in KNOWN_TAGS:
+                tag = probe
+            elif TIMESTAMP_RE.match(probe):
+                timestamp_text = probe
+            elif probe == "Link copied to clipboard!":
+                continue
+
+        if title and summary:
+            link = player_links.get(player_name, NBC_PLAYER_NEWS_URL)
+            uid = f"{player_name}|{team}|{tag}|{title}|{summary[:80]}"
+
+            items.append(
+                {
+                    "id": uid,
+                    "player_name": player_name,
+                    "team": team or "MLB",
+                    "position": position,
+                    "title": title,
+                    "summary": summary,
+                    "tag": tag,
+                    "link": link,
+                    "timestamp_text": timestamp_text,
+                }
+            )
+
+        i = j if j > i else i + 1
+
+    # de-dupe while keeping order
+    seen: Set[str] = set()
+    deduped: List[dict] = []
+    for item in items:
+        if item["id"] in seen:
+            continue
+        seen.add(item["id"])
+        deduped.append(item)
+
+    return deduped[:MAX_NEWS_ITEMS]
+
+
+def fetch_nbc_player_news() -> List[dict]:
+    r = SESSION.get(NBC_PLAYER_NEWS_URL, timeout=30)
+    r.raise_for_status()
+
+    soup = BeautifulSoup(r.text, "html.parser")
+    raw_text = soup.get_text("\n", strip=True)
+    player_links = extract_candidate_links(soup)
+    items = parse_rotoworld_items_from_text(raw_text, player_links)
+
+    if not items:
+        raise RuntimeError("Could not parse any Rotoworld player news items from NBC page")
+
+    return items
+
+
+async def parse_nbc_news():
+    return await asyncio.to_thread(fetch_nbc_player_news)
 
 
 class NewsBot(discord.Client):
@@ -499,8 +654,9 @@ class NewsBot(discord.Client):
         super().__init__(intents=intents)
         self.bg_task: Optional[asyncio.Task] = None
         self.posted_ids: Set[str] = load_posted_ids()
-        self.recent_fingerprints: Dict[str, float] = prune_recent_fingerprints(load_recent_fingerprints())
-        self.sources: List[dict] = []
+        self.recent_fingerprints: Dict[str, float] = prune_recent_fingerprints(
+            load_recent_fingerprints()
+        )
         self.started_loop = False
         self.player_threads: Dict[str, int] = {}
         self.player_index: List[Tuple[str, str, int]] = []
@@ -511,20 +667,19 @@ class NewsBot(discord.Client):
 
     async def on_ready(self):
         print(f"[NEWS] Logged in as {self.user}")
-        print("[NEWS] RSS news bot started")
+        print("[NEWS] NBC Rotoworld news bot started")
 
         if self.started_loop:
             return
 
         self.started_loop = True
-        self.sources = load_sources()
         self.refresh_player_threads()
 
-        print(f"[NEWS] Loaded {len(self.sources)} sources")
         print(f"[NEWS] Loaded {len(self.player_threads)} player thread mappings")
         print(f"[NEWS] Poll interval: {NEWS_POLL_SECONDS} seconds")
         print(f"[NEWS] State file: {STATE_FILE}")
         print(f"[NEWS] Duplicate file: {DUPES_FILE}")
+        print(f"[NEWS] Source page: {NBC_PLAYER_NEWS_URL}")
 
         self.bg_task = asyncio.create_task(self.news_loop())
 
@@ -535,13 +690,13 @@ class NewsBot(discord.Client):
             try:
                 self.refresh_player_threads()
                 self.recent_fingerprints = prune_recent_fingerprints(self.recent_fingerprints)
-                await self.check_news_feeds()
+                await self.check_news_page()
             except Exception as e:
                 print(f"[NEWS] Loop error: {e}")
 
             await asyncio.sleep(NEWS_POLL_SECONDS)
 
-    async def check_news_feeds(self):
+    async def check_news_page(self):
         if NEWS_CHANNEL_ID == 0:
             print("[NEWS] NEWS_CHANNEL_ID is not set")
             return
@@ -554,92 +709,96 @@ class NewsBot(discord.Client):
                 print(f"[NEWS] Could not fetch news channel {NEWS_CHANNEL_ID}: {e}")
                 return
 
-        print("[NEWS] Checking RSS feeds")
+        print("[NEWS] Checking NBC Rotoworld player news page")
 
         new_posts = 0
         dupes_skipped = 0
 
-        for source in self.sources:
-            handle = source["handle"]
-            rss = source["rss"]
+        items = await parse_nbc_news()
 
-            try:
-                feed = await parse_feed(rss)
+        # oldest -> newest feel, based on page order top-to-bottom
+        for item in reversed(items):
+            uid = item["id"]
+            if uid in self.posted_ids:
+                continue
 
-                if getattr(feed, "bozo", 0):
-                    print(f"[NEWS] Feed warning for @{handle}: {getattr(feed, 'bozo_exception', 'unknown')}")
+            title = item["title"]
+            summary = item["summary"]
+            tag = item["tag"]
+            link = item["link"]
+            source_team = item["team"]
+            position_text = item.get("position")
+            timestamp_text = item.get("timestamp_text")
+            scraped_player_name = item.get("player_name")
 
-                entries = getattr(feed, "entries", [])[:MAX_ENTRIES_PER_FEED]
+            player_name = None
+            player_thread_id = None
 
-                for entry in entries:
-                    uid = entry_unique_id(entry)
-                    if not uid or uid in self.posted_ids:
-                        continue
+            if scraped_player_name and scraped_player_name in self.player_threads:
+                player_name = scraped_player_name
+                player_thread_id = self.player_threads.get(scraped_player_name)
+            else:
+                player_name, player_thread_id = detect_player(
+                    title=title,
+                    summary=f"{scraped_player_name or ''} {summary}",
+                    player_index=self.player_index,
+                )
 
-                    title, summary = get_entry_text(entry)
-                    if not title and not summary:
-                        continue
+            player_thread = await resolve_player_thread(self, player_thread_id)
+            player_thread_url = getattr(player_thread, "jump_url", None)
 
-                    if looks_like_reply_or_repost(title, summary):
-                        continue
+            team = await infer_team(
+                client=self,
+                source_team=source_team,
+                player_thread_id=player_thread_id,
+            )
 
-                    tag = classify_news(title, summary)
-                    if not tag:
-                        continue
+            fingerprint = build_story_fingerprint(
+                title=f"{scraped_player_name or ''} {title}",
+                summary=summary,
+                tag=tag,
+                team=team,
+            )
 
-                    link = getattr(entry, "link", "") or source["rss"]
+            if is_recent_duplicate(self.recent_fingerprints, fingerprint):
+                dupes_skipped += 1
+                self.posted_ids.add(uid)
+                print(f"[NEWS] Duplicate skipped [{team}] [{tag}] {title[:100]}")
+                continue
 
-                    player_name, player_thread_id = detect_player(title, summary, self.player_index)
-                    player_thread = await resolve_player_thread(self, player_thread_id)
-                    player_thread_url = getattr(player_thread, "jump_url", None)
+            embed = build_embed(
+                team=team,
+                tag=tag,
+                title=f"{scraped_player_name} — {title}" if scraped_player_name else title,
+                summary=summary,
+                link=link,
+                player_name=player_name,
+                player_thread_url=player_thread_url,
+                timestamp_text=timestamp_text,
+                position_text=position_text,
+            )
 
-                    team = await infer_team(
-                        client=self,
-                        source_team=source["team"],
-                        player_thread_id=player_thread_id,
-                    )
+            await channel.send(embed=embed)
 
-                    fingerprint = build_story_fingerprint(title, summary, tag, team)
-                    if is_recent_duplicate(self.recent_fingerprints, fingerprint):
-                        dupes_skipped += 1
-                        self.posted_ids.add(uid)
-                        print(f"[NEWS] Duplicate skipped [{team}] [{tag}] @{handle}: {title[:100]}")
-                        continue
+            if player_thread is not None:
+                try:
+                    await player_thread.send(embed=embed)
+                    print(f"[NEWS] Also posted to thread for {player_name}")
+                except Exception as e:
+                    print(f"[NEWS] Failed posting to player thread for {player_name}: {e}")
 
-                    embed = build_embed(
-                        source=source,
-                        team=team,
-                        tag=tag,
-                        title=title,
-                        summary=summary,
-                        link=link,
-                        player_name=player_name,
-                        player_thread_url=player_thread_url,
-                    )
+            self.posted_ids.add(uid)
+            remember_fingerprint(self.recent_fingerprints, fingerprint)
+            new_posts += 1
 
-                    await channel.send(embed=embed)
+            print(
+                f"[NEWS] Posted [{team}] [{tag}] "
+                f"{(scraped_player_name or 'Unknown')} | {title[:120]}"
+                + (f" | player={player_name}" if player_name else "")
+            )
 
-                    if player_thread is not None:
-                        try:
-                            await player_thread.send(embed=embed)
-                            print(f"[NEWS] Also posted to thread for {player_name}")
-                        except Exception as e:
-                            print(f"[NEWS] Failed posting to player thread for {player_name}: {e}")
-
-                    self.posted_ids.add(uid)
-                    remember_fingerprint(self.recent_fingerprints, fingerprint)
-                    new_posts += 1
-                    print(
-                        f"[NEWS] Posted [{team}] [{tag}] @{handle}: "
-                        f"{title[:120]}"
-                        + (f" | player={player_name}" if player_name else "")
-                    )
-
-                save_posted_ids(self.posted_ids)
-                save_recent_fingerprints(self.recent_fingerprints)
-
-            except Exception as e:
-                print(f"[NEWS] Feed error for @{handle}: {e}")
+        save_posted_ids(self.posted_ids)
+        save_recent_fingerprints(self.recent_fingerprints)
 
         print(f"[NEWS] Done. New posts: {new_posts} | Duplicates skipped: {dupes_skipped}")
 
