@@ -1,0 +1,13 @@
+beautifulsoup4
+feedparser
+redis
+requests
+discord.py
+requests==2.32.5
+beautifulsoup4==4.12.3
+discord.py
+aiohttp
+pandas
+beautifulsoup4
+lxml
+pybaseball
