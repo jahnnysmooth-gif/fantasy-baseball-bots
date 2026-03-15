@@ -10,8 +10,10 @@ import requests
 DISCORD_TOKEN = os.getenv("CLOSER_BOT_TOKEN")
 DISCORD_CHANNEL_ID = int(os.getenv("DISCORD_CHANNEL_ID", "0"))
 POLL_MINUTES = int(os.getenv("POLL_MINUTES", "10"))
-STATE_DIR = os.getenv("STATE_DIR", "/var/data")
+STATE_DIR = os.getenv("STATE_DIR", "state/closer")
 STATE_FILE = os.path.join(STATE_DIR, "closer_alert_state.json")
+
+os.makedirs(STATE_DIR, exist_ok=True)
 
 ET = ZoneInfo("America/New_York")
 
