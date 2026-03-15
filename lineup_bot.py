@@ -103,7 +103,26 @@ def load_state():
             if not isinstance(posted, dict):
                 posted = {}
 
-            return {"posted": posted}
+            normalized_posted = {}
+            for key, value in posted.items():
+                if not isinstance(key, str) or not isinstance(value, dict):
+                    continue
+
+                fingerprint = value.get("fingerprint")
+                message_id = value.get("message_id")
+
+                if not isinstance(fingerprint, str):
+                    continue
+
+                if message_id is not None and not isinstance(message_id, int):
+                    continue
+
+                normalized_posted[key] = {
+                    "fingerprint": fingerprint,
+                    "message_id": message_id
+                }
+
+            return {"posted": normalized_posted}
         except Exception as e:
             log(f"Failed to load state: {e}")
 
@@ -389,6 +408,23 @@ async def run_once():
 
     log(f"Parsed {len(items)} lineups")
 
+    # First-run safeguard:
+    # If no saved lineup state exists yet, seed all current lineups without posting.
+    if not posted and items:
+        log("First run detected. Seeding current lineups without posting.")
+
+        for item in items:
+            key = f"{item['matchup']}|{item['team']}"
+            fp = fingerprint(item)
+            posted[key] = {
+                "fingerprint": fp,
+                "message_id": None
+            }
+
+        save_state(state)
+        log(f"Seeded {len(posted)} lineup entries. No posts sent.")
+        return
+
     for item in items:
         key = f"{item['matchup']}|{item['team']}"
         fp = fingerprint(item)
@@ -398,10 +434,10 @@ async def run_once():
             log(f"Skipping unchanged {key}")
             continue
 
-        embed = build_embed(item, is_update=existing is not None)
+        embed = build_embed(item, is_update=existing is not None and existing.get("message_id") is not None)
 
         try:
-            if existing:
+            if existing and existing.get("message_id"):
                 log(f"Updating {key}")
                 await edit_existing_embed(channel, existing["message_id"], embed)
                 posted[key]["fingerprint"] = fp
