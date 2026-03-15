@@ -24,7 +24,6 @@ NEWS_CHANNEL_ID = int(os.getenv("NEWS_CHANNEL_ID", "0"))
 NEWS_POLL_SECONDS = int(os.getenv("NEWS_POLL_SECONDS", "180"))
 MAX_NEWS_ITEMS = int(os.getenv("NEWS_MAX_ITEMS", "25"))
 
-# how long to treat matching stories as duplicates
 DUPLICATE_WINDOW_SECONDS = int(
     os.getenv("NEWS_DUPLICATE_WINDOW_SECONDS", str(12 * 60 * 60))
 )
@@ -113,7 +112,6 @@ URL_RE = re.compile(r"https?://\S+")
 HANDLE_RE = re.compile(r"@\w+")
 NON_ALNUM_RE = re.compile(r"[^a-z0-9\s]")
 MULTISPACE_RE = re.compile(r"\s+")
-TEAM_POS_RE = re.compile(r"\b([A-Z]{2,3})\b")
 TIMESTAMP_RE = re.compile(
     r"^(January|February|March|April|May|June|July|August|September|October|November|December)\s+\d{1,2},\s+\d{4}\s+\d{1,2}:\d{2}\s+[AP]M$"
 )
@@ -546,7 +544,6 @@ def parse_rotoworld_items_from_text(raw_text: str, player_links: Dict[str, str])
 
         j = i + 2
 
-        # skip site noise
         while j < len(lines):
             probe = lines[j]
             low = probe.lower()
@@ -571,22 +568,19 @@ def parse_rotoworld_items_from_text(raw_text: str, player_links: Dict[str, str])
                 j += 1
                 continue
 
-            # optional timestamp, sometimes appears after the tag / media block
             if TIMESTAMP_RE.match(probe):
                 timestamp_text = probe
                 j += 1
                 continue
 
-            # stop if next item starts
             if is_valid_player_name(probe):
-                maybe_team, _ = extract_team_and_position(lines[j + 1] if j + 1 < len(lines) else "")
+                next_probe = lines[j + 1] if j + 1 < len(lines) else ""
+                maybe_team, _ = extract_team_and_position(next_probe)
                 if maybe_team:
                     break
 
-            # ignore extra lines like Related / Up Next / video text
             j += 1
 
-        # scan forward a bit for tag/timestamp
         scan_limit = min(j + 18, len(lines))
         for k in range(i + 2, scan_limit):
             probe = lines[k]
@@ -617,7 +611,6 @@ def parse_rotoworld_items_from_text(raw_text: str, player_links: Dict[str, str])
 
         i = j if j > i else i + 1
 
-    # de-dupe while keeping order
     seen: Set[str] = set()
     deduped: List[dict] = []
     for item in items:
@@ -715,16 +708,15 @@ class NewsBot(discord.Client):
         dupes_skipped = 0
 
         items = await parse_nbc_news()
-        
+
         print(f"[NEWS] Parsed items: {len(items)}")
         print(f"[NEWS] Posted ID count: {len(self.posted_ids)}")
         if items:
-    first = items[0]
-    print(f"[NEWS] First item player: {first.get('player_name')}")
-    print(f"[NEWS] First item tag: {first.get('tag')}")
-    print(f"[NEWS] First item title: {first.get('title')}")
+            first = items[0]
+            print(f"[NEWS] First item player: {first.get('player_name')}")
+            print(f"[NEWS] First item tag: {first.get('tag')}")
+            print(f"[NEWS] First item title: {first.get('title')}")
 
-        # oldest -> newest feel, based on page order top-to-bottom
         for item in reversed(items):
             uid = item["id"]
             if uid in self.posted_ids:
@@ -787,7 +779,11 @@ class NewsBot(discord.Client):
                 position_text=position_text,
             )
 
-            await channel.send(embed=embed)
+            try:
+                await channel.send(embed=embed)
+            except Exception as e:
+                print(f"[NEWS] Failed sending to NEWS_CHANNEL_ID {NEWS_CHANNEL_ID}: {e}")
+                continue
 
             if player_thread is not None:
                 try:
