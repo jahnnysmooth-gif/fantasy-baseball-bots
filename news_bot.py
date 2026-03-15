@@ -28,8 +28,8 @@ DUPLICATE_WINDOW_SECONDS = int(
     os.getenv("NEWS_DUPLICATE_WINDOW_SECONDS", str(12 * 60 * 60))
 )
 
-NBC_PLAYER_NEWS_URL = "https://www.nbcsports.com/fantasy/baseball/player-news"
-NBC_BASE_URL = "https://www.nbcsports.com"
+FANTASYPROS_PLAYER_NEWS_URL = "https://www.fantasypros.com/mlb/player-news.php"
+FANTASYPROS_BASE_URL = "https://www.fantasypros.com"
 
 TEAM_LOGOS = {
     "ARI": "https://a.espncdn.com/i/teamlogos/mlb/500/ari.png",
@@ -99,10 +99,7 @@ TEAM_COLORS = {
     "MLB": 0x2B2D31,
 }
 
-KNOWN_TAGS = {"Headline", "Injury", "Recap", "Transaction"}
-
 PAGE_TEAM_MAP = {
-    "AZ": "ARI",
     "ARI": "ARI",
     "ATL": "ATL",
     "BAL": "BAL",
@@ -141,9 +138,13 @@ HANDLE_RE = re.compile(r"@\w+")
 NON_ALNUM_RE = re.compile(r"[^a-z0-9\s]")
 MULTISPACE_RE = re.compile(r"\s+")
 TIMESTAMP_RE = re.compile(
-    r"^(January|February|March|April|May|June|July|August|September|October|November|December)\s+\d{1,2},\s+\d{4}\s+\d{1,2}:\d{2}\s+[AP]M$"
+    r"^(Mon|Tue|Wed|Thu|Fri|Sat|Sun),\s+[A-Z][a-z]{2}\s+\d{1,2}(st|nd|rd|th)?\s+\d{1,2}:\d{2}[ap]m\s+\w+$|^(Mon|Tue|Wed|Thu|Fri|Sat|Sun),?\s+[A-Z][a-z]{2}\s+\d{1,2}(st|nd|rd|th)?\s+\d{1,2}:\d{2}[ap]m\s+\w+$|^[A-Z][a-z]{2},\s+[A-Z][a-z]{2}\s+\d{1,2}(st|nd|rd|th)?\s+\d{1,2}:\d{2}[ap]m\s+\w+$|^[A-Z][a-z]{2},\s+Mar\s+\d{1,2}(st|nd|rd|th)?\s+\d{1,2}:\d{2}[ap]m\s+\w+$",
+    re.IGNORECASE,
 )
-PLAYER_SLUG_RE = re.compile(r"/player/[^/]+/([a-z0-9-]+)", re.IGNORECASE)
+FANTASYPROS_TIMESTAMP_RE = re.compile(
+    r"^(Mon|Tue|Wed|Thu|Fri|Sat|Sun),?\s+[A-Z][a-z]{2}\s+\d{1,2}(st|nd|rd|th)?\s+\d{1,2}:\d{2}[ap]m\s+\w+$|^[A-Z][a-z]{3},?\s+[A-Z][a-z]{3}\s+\d{1,2}(st|nd|rd|th)?\s+\d{1,2}:\d{2}[ap]m\s+\w+$|^[A-Z][a-z]{2},\s+[A-Z][a-z]{3}\s+\d{1,2}(st|nd|rd|th)?\s+\d{1,2}:\d{2}[ap]m\s+\w+$",
+    re.IGNORECASE,
+)
 
 SESSION = requests.Session()
 SESSION.headers.update(
@@ -383,23 +384,23 @@ def remember_fingerprint(fingerprints: Dict[str, float], fingerprint: str) -> No
 
 def absolute_url(url: Optional[str]) -> str:
     if not url:
-        return NBC_PLAYER_NEWS_URL
+        return FANTASYPROS_PLAYER_NEWS_URL
     if url.startswith("http://") or url.startswith("https://"):
         return url
     if url.startswith("/"):
-        return NBC_BASE_URL + url
-    return NBC_BASE_URL + "/" + url.lstrip("/")
+        return FANTASYPROS_BASE_URL + url
+    return FANTASYPROS_BASE_URL + "/" + url.lstrip("/")
 
 
 def get_tag_color(tag: str, team: str) -> int:
     lowered = (tag or "").lower()
-    if lowered == "injury":
+    if "injur" in lowered:
         return 0xE74C3C
-    if lowered == "transaction":
+    if "transaction" in lowered:
         return 0x3498DB
-    if lowered == "recap":
-        return 0x2ECC71
-    if lowered == "headline":
+    if "rumor" in lowered:
+        return 0x9B59B6
+    if "breaking" in lowered:
         return 0xF1C40F
     return TEAM_COLORS.get(team, TEAM_COLORS["MLB"])
 
@@ -433,7 +434,7 @@ def build_embed(
         embed.set_thumbnail(url=logo)
 
     embed.add_field(name="Tag", value=tag or "News", inline=True)
-    embed.add_field(name="Source", value="NBC Sports Rotoworld", inline=True)
+    embed.add_field(name="Source", value="FantasyPros", inline=True)
 
     if position_text:
         embed.add_field(name="Position", value=position_text[:100], inline=True)
@@ -453,32 +454,16 @@ def build_embed(
     return embed
 
 
-def is_valid_player_name(text: str) -> bool:
-    if not text:
-        return False
-    text = text.strip()
-    if len(text) < 3 or len(text) > 60:
-        return False
-    if text in KNOWN_TAGS:
-        return False
-    if text.lower().startswith("personalize your rotoworld"):
-        return False
-    if text.lower() in {"related", "up next", "my favorites", "all news"}:
-        return False
-    words = text.split()
-    return len(words) <= 5
-
-
-def extract_team_and_position(line: str) -> Tuple[Optional[str], Optional[str]]:
+def parse_team_and_position(line: str) -> Tuple[Optional[str], Optional[str]]:
     if not line:
         return None, None
 
     cleaned = normalize_text(line)
-    match = re.match(r"^([A-Z]{2,3})\s+(.+?)\s+#\d+\s*$", cleaned)
+    match = re.match(r"^([A-Z]{2,3})\s*-\s*(.+)$", cleaned)
     if not match:
         return None, None
 
-    raw_team = match.group(1).upper()
+    raw_team = match.group(1).upper().strip()
     position = match.group(2).strip()
     team = PAGE_TEAM_MAP.get(raw_team)
 
@@ -488,35 +473,25 @@ def extract_team_and_position(line: str) -> Tuple[Optional[str], Optional[str]]:
     return team, position or None
 
 
-def slug_to_name(slug: str) -> str:
-    parts = [p for p in slug.split("-") if p]
-    return " ".join(p.capitalize() for p in parts)
+def extract_player_name_from_headline(headline: str) -> Optional[str]:
+    headline = normalize_text(headline)
+    if not headline:
+        return None
+
+    patterns = [
+        r"^([A-Z][a-zA-ZÀ-ÿ'’.\-]+(?:\s+[A-Z][a-zA-ZÀ-ÿ'’.\-]+){1,3})\s",
+        r"^([A-Z][a-zA-ZÀ-ÿ'’.\-]+(?:\s+[A-Z][a-zA-ZÀ-ÿ'’.\-]+){1,3})$",
+    ]
+
+    for pattern in patterns:
+        m = re.match(pattern, headline)
+        if m:
+            return m.group(1).strip()
+
+    return None
 
 
-def extract_candidate_links(soup: BeautifulSoup) -> Dict[str, str]:
-    out: Dict[str, str] = {}
-
-    for a in soup.find_all("a", href=True):
-        href = a.get("href", "").strip()
-        text = normalize_text(a.get_text(" ", strip=True))
-
-        if not href:
-            continue
-
-        match = PLAYER_SLUG_RE.search(href)
-        if match:
-            slug = match.group(1)
-            player_name = slug_to_name(slug)
-            if is_valid_player_name(player_name):
-                out.setdefault(player_name, absolute_url(href))
-
-        if is_valid_player_name(text) and "/player/" in href:
-            out.setdefault(text, absolute_url(href))
-
-    return out
-
-
-def parse_rotoworld_items_from_text(raw_text: str, player_links: Dict[str, str]) -> List[dict]:
+def parse_fantasypros_items_from_text(raw_text: str) -> List[dict]:
     text = raw_text.replace("\r", "\n")
     lines = [normalize_text(x) for x in text.split("\n")]
     lines = [x for x in lines if x]
@@ -524,97 +499,92 @@ def parse_rotoworld_items_from_text(raw_text: str, player_links: Dict[str, str])
     items: List[dict] = []
     i = 0
 
-    def is_noise(line: str) -> bool:
-        low = line.lower()
-        if not line:
-            return True
-        if line in {"Rotoworld", "My Favorites", "All News", "Load More", "Related", "Up Next"}:
-            return True
-        if low.startswith("all news "):
-            return True
-        if low.startswith("positions "):
-            return True
-        if low.startswith("leagues "):
-            return True
-        if low.startswith("player news"):
-            return True
-        if low == "link copied to clipboard!":
-            return True
-        if "now playing" in low:
-            return True
-        if re.match(r"^\d+:\d+\s+", line):
-            return True
-        return False
-
     while i < len(lines):
         line = lines[i]
 
-        if is_noise(line) or line in KNOWN_TAGS:
+        team, position = parse_team_and_position(line)
+        if not team:
             i += 1
             continue
 
-        if i + 1 >= len(lines):
-            i += 1
-            continue
-
-        team, position = extract_team_and_position(lines[i + 1])
-        if not team or not is_valid_player_name(line):
-            i += 1
-            continue
-
-        player_name = line
-        j = i + 2
-        paragraphs: List[str] = []
-        tag = "News"
+        # expected structure after team/position:
+        # » Rankings / » Stats / » More News / headline / timestamp / By author / source text / Fantasy Impact / impact text / Category: X
+        headline = None
         timestamp_text = None
+        source_text = None
+        fantasy_impact = None
+        tag = "News"
 
+        j = i + 1
         while j < len(lines):
             probe = lines[j]
 
-            if probe in KNOWN_TAGS:
-                tag = probe
+            next_team, _ = parse_team_and_position(probe)
+            if next_team:
+                break
+
+            if probe.startswith("» "):
                 j += 1
                 continue
 
-            if TIMESTAMP_RE.match(probe):
+            if probe == "Fantasy Baseball News" or probe == "Latest Player Updates":
+                j += 1
+                continue
+
+            if headline is None and not probe.startswith("By ") and not probe.startswith("Fantasy Impact:") and not probe.startswith("Category:"):
+                if not FANTASYPROS_TIMESTAMP_RE.match(probe):
+                    headline = probe
+                    j += 1
+                    continue
+
+            if timestamp_text is None and FANTASYPROS_TIMESTAMP_RE.match(probe):
                 timestamp_text = probe
                 j += 1
                 continue
 
-            if j + 1 < len(lines):
-                next_team, _ = extract_team_and_position(lines[j + 1])
-                if next_team and is_valid_player_name(probe):
-                    break
+            if probe.startswith("By "):
+                j += 1
+                continue
 
-            if not is_noise(probe):
-                paragraphs.append(probe)
+            if probe.startswith("Fantasy Impact:"):
+                fantasy_impact = probe.replace("Fantasy Impact:", "", 1).strip()
+                j += 1
+                continue
+
+            if probe.startswith("Category:"):
+                tag = probe.replace("Category:", "", 1).strip() or "News"
+                j += 1
+                continue
+
+            if headline and source_text is None:
+                source_text = probe
+                j += 1
+                continue
 
             j += 1
 
-        paragraphs = [p for p in paragraphs if p]
-        if not paragraphs:
-            i = j if j > i else i + 1
-            continue
+        if headline and source_text:
+            player_name = extract_player_name_from_headline(headline)
+            summary_parts = [source_text]
+            if fantasy_impact:
+                summary_parts.append(f"Fantasy Impact: {fantasy_impact}")
+            summary = "\n\n".join(summary_parts)
 
-        blurb = paragraphs[0]
-        full_summary = "\n\n".join(paragraphs)
+            uid = f"{headline}|{timestamp_text or ''}|{tag}|{source_text[:120]}"
 
-        link = player_links.get(player_name, NBC_PLAYER_NEWS_URL)
-        uid = f"{player_name}|{team}|{tag}|{blurb[:120]}"
-
-        items.append(
-            {
-                "id": uid,
-                "player_name": player_name,
-                "team": team,
-                "position": position,
-                "title": blurb,
-                "summary": full_summary,
-                "tag": tag,
-                "link": link,
-                "timestamp_text": timestamp_text,
-            }
-        )
+            items.append(
+                {
+                    "id": uid,
+                    "player_name": player_name,
+                    "team": team,
+                    "position": position,
+                    "title": headline,
+                    "summary": summary,
+                    "tag": tag,
+                    "link": FANTASYPROS_PLAYER_NEWS_URL,
+                    "timestamp_text": timestamp_text,
+                }
+            )
 
         i = j if j > i else i + 1
 
@@ -629,23 +599,22 @@ def parse_rotoworld_items_from_text(raw_text: str, player_links: Dict[str, str])
     return deduped[:MAX_NEWS_ITEMS]
 
 
-def fetch_nbc_player_news() -> List[dict]:
-    response = SESSION.get(NBC_PLAYER_NEWS_URL, timeout=30)
+def fetch_fantasypros_player_news() -> List[dict]:
+    response = SESSION.get(FANTASYPROS_PLAYER_NEWS_URL, timeout=30)
     response.raise_for_status()
 
     soup = BeautifulSoup(response.text, "html.parser")
     raw_text = soup.get_text("\n", strip=True)
-    player_links = extract_candidate_links(soup)
-    items = parse_rotoworld_items_from_text(raw_text, player_links)
+    items = parse_fantasypros_items_from_text(raw_text)
 
     if not items:
-        raise RuntimeError("Could not parse any Rotoworld player news items from NBC page")
+        raise RuntimeError("Could not parse any FantasyPros player news items")
 
     return items
 
 
-async def parse_nbc_news():
-    return await asyncio.to_thread(fetch_nbc_player_news)
+async def parse_fantasypros_news():
+    return await asyncio.to_thread(fetch_fantasypros_player_news)
 
 
 class NewsBot(discord.Client):
@@ -667,7 +636,7 @@ class NewsBot(discord.Client):
 
     async def on_ready(self):
         print(f"[NEWS] Logged in as {self.user}")
-        print("[NEWS] NBC Rotoworld news bot started")
+        print("[NEWS] FantasyPros news bot started")
 
         if self.started_loop:
             return
@@ -679,7 +648,7 @@ class NewsBot(discord.Client):
         print(f"[NEWS] Poll interval: {NEWS_POLL_SECONDS} seconds")
         print(f"[NEWS] State file: {STATE_FILE}")
         print(f"[NEWS] Duplicate file: {DUPES_FILE}")
-        print(f"[NEWS] Source page: {NBC_PLAYER_NEWS_URL}")
+        print(f"[NEWS] Source page: {FANTASYPROS_PLAYER_NEWS_URL}")
 
         self.bg_task = asyncio.create_task(self.news_loop())
 
@@ -709,12 +678,12 @@ class NewsBot(discord.Client):
                 print(f"[NEWS] Could not fetch news channel {NEWS_CHANNEL_ID}: {e}")
                 return
 
-        print("[NEWS] Checking NBC Rotoworld player news page")
+        print("[NEWS] Checking FantasyPros player news page")
 
         new_posts = 0
         dupes_skipped = 0
 
-        items = await parse_nbc_news()
+        items = await parse_fantasypros_news()
 
         print(f"[NEWS] Parsed items: {len(items)}")
         print(f"[NEWS] Posted ID count: {len(self.posted_ids)}")
@@ -777,7 +746,7 @@ class NewsBot(discord.Client):
             embed = build_embed(
                 team=team,
                 tag=tag,
-                title=scraped_player_name or title,
+                title=title,
                 summary=summary,
                 link=link,
                 player_name=player_name,
