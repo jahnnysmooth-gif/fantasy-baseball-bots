@@ -2,6 +2,7 @@ import asyncio
 import json
 import os
 import re
+import unicodedata
 from pathlib import Path
 from typing import Dict, List, Optional, Set, Tuple
 
@@ -10,30 +11,28 @@ import feedparser
 
 os.makedirs("state", exist_ok=True)
 
-
 BASE_DIR = Path(__file__).resolve().parent
 SOURCES_FILE = BASE_DIR / "news_sources.json"
 STATE_FILE = "state/news_posted_ids.json"
+THREAD_MAP_FILE = BASE_DIR / "state/player_profiles/player_threads.json"
 
 DISCORD_TOKEN = os.getenv("NEWS_BOT_TOKEN") or os.getenv("DISCORD_TOKEN")
 NEWS_CHANNEL_ID = int(os.getenv("NEWS_CHANNEL_ID", "0"))
 NEWS_POLL_SECONDS = int(os.getenv("NEWS_POLL_SECONDS", "300"))
-
-# Keep this modest at first. You can raise it later.
 MAX_ENTRIES_PER_FEED = int(os.getenv("NEWS_MAX_ENTRIES_PER_FEED", "5"))
 
-# Simple include filters for fantasy-relevant news
 INCLUDE_PATTERNS: Dict[str, List[str]] = {
     "INJURY": [
         "injury", "injured", "il", "10-day il", "15-day il", "60-day il",
         "placed on", "activated", "reinstated", "scratched", "day-to-day",
         "day to day", "out for", "headed to the il", "returns", "returning",
-        "available", "unavailable", "underwent", "soreness", "tightness"
+        "available", "unavailable", "underwent", "soreness", "tightness",
+        "will miss", "won't start", "not expected to", "shut down"
     ],
     "LINEUP": [
         "starting", "starts tonight", "in the lineup", "not in the lineup",
         "batting", "leading off", "gets the start", "starting at", "will start",
-        "lineup", "rest day", "off day"
+        "lineup", "rest day", "off day", "bench", "scratched from the lineup"
     ],
     "CALL-UP": [
         "called up", "recalled", "selected the contract", "promotion",
@@ -50,14 +49,15 @@ INCLUDE_PATTERNS: Dict[str, List[str]] = {
     ],
     "ROTATION": [
         "rotation", "starter", "starting pitcher", "probable", "bullpen game",
-        "opens the season", "slot in the rotation"
+        "opens the season", "slot in the rotation", "start sunday", "start monday",
+        "start tuesday", "start wednesday", "start thursday", "start friday",
+        "start saturday"
     ],
     "WEATHER": [
         "postponed", "rain delay", "weather", "delayed", "cancelled", "canceled"
     ],
 }
 
-# Noise filters
 EXCLUDE_PATTERNS = [
     "ticket", "tickets", "giveaway", "promotion", "promo", "sweepstakes",
     "podcast", "newsletter", "column", "game story", "live blog",
@@ -65,10 +65,92 @@ EXCLUDE_PATTERNS = [
     "subscribe", "merch", "shop now", "sale", "odds", "betting"
 ]
 
-# Some public RSS mirrors prepend handle/title formats inconsistently.
-# We'll normalize and classify from the combined title + summary.
+TEAM_LOGOS = {
+    "ARI": "https://a.espncdn.com/i/teamlogos/mlb/500/ari.png",
+    "ATL": "https://a.espncdn.com/i/teamlogos/mlb/500/atl.png",
+    "BAL": "https://a.espncdn.com/i/teamlogos/mlb/500/bal.png",
+    "BOS": "https://a.espncdn.com/i/teamlogos/mlb/500/bos.png",
+    "CHC": "https://a.espncdn.com/i/teamlogos/mlb/500/chc.png",
+    "CWS": "https://a.espncdn.com/i/teamlogos/mlb/500/chw.png",
+    "CIN": "https://a.espncdn.com/i/teamlogos/mlb/500/cin.png",
+    "CLE": "https://a.espncdn.com/i/teamlogos/mlb/500/cle.png",
+    "COL": "https://a.espncdn.com/i/teamlogos/mlb/500/col.png",
+    "DET": "https://a.espncdn.com/i/teamlogos/mlb/500/det.png",
+    "HOU": "https://a.espncdn.com/i/teamlogos/mlb/500/hou.png",
+    "KC": "https://a.espncdn.com/i/teamlogos/mlb/500/kc.png",
+    "LAA": "https://a.espncdn.com/i/teamlogos/mlb/500/laa.png",
+    "LAD": "https://a.espncdn.com/i/teamlogos/mlb/500/lad.png",
+    "MIA": "https://a.espncdn.com/i/teamlogos/mlb/500/mia.png",
+    "MIL": "https://a.espncdn.com/i/teamlogos/mlb/500/mil.png",
+    "MIN": "https://a.espncdn.com/i/teamlogos/mlb/500/min.png",
+    "NYM": "https://a.espncdn.com/i/teamlogos/mlb/500/nym.png",
+    "NYY": "https://a.espncdn.com/i/teamlogos/mlb/500/nyy.png",
+    "ATH": "https://a.espncdn.com/i/teamlogos/mlb/500/oak.png",
+    "PHI": "https://a.espncdn.com/i/teamlogos/mlb/500/phi.png",
+    "PIT": "https://a.espncdn.com/i/teamlogos/mlb/500/pit.png",
+    "SD": "https://a.espncdn.com/i/teamlogos/mlb/500/sd.png",
+    "SF": "https://a.espncdn.com/i/teamlogos/mlb/500/sf.png",
+    "SEA": "https://a.espncdn.com/i/teamlogos/mlb/500/sea.png",
+    "STL": "https://a.espncdn.com/i/teamlogos/mlb/500/stl.png",
+    "TB": "https://a.espncdn.com/i/teamlogos/mlb/500/tb.png",
+    "TEX": "https://a.espncdn.com/i/teamlogos/mlb/500/tex.png",
+    "TOR": "https://a.espncdn.com/i/teamlogos/mlb/500/tor.png",
+    "WSH": "https://a.espncdn.com/i/teamlogos/mlb/500/wsh.png",
+    "MLB": "https://a.espncdn.com/i/teamlogos/mlb/500/mlb.png",
+}
+
+TEAM_COLORS = {
+    "ARI": 0xA71930,
+    "ATL": 0xCE1141,
+    "BAL": 0xDF4601,
+    "BOS": 0xBD3039,
+    "CHC": 0x0E3386,
+    "CWS": 0x27251F,
+    "CIN": 0xC6011F,
+    "CLE": 0xE31937,
+    "COL": 0x33006F,
+    "DET": 0x0C2340,
+    "HOU": 0xEB6E1F,
+    "KC": 0x004687,
+    "LAA": 0xBA0021,
+    "LAD": 0x005A9C,
+    "MIA": 0x00A3E0,
+    "MIL": 0x12284B,
+    "MIN": 0x002B5C,
+    "NYM": 0x002D72,
+    "NYY": 0x0C2340,
+    "ATH": 0x003831,
+    "PHI": 0xE81828,
+    "PIT": 0xFDB827,
+    "SD": 0x2F241D,
+    "SF": 0xFD5A1E,
+    "SEA": 0x005C5C,
+    "STL": 0xC41E3A,
+    "TB": 0x092C5C,
+    "TEX": 0x003278,
+    "TOR": 0x134A8E,
+    "WSH": 0xAB0003,
+    "MLB": 0x2B2D31,
+}
+
 WHITESPACE_RE = re.compile(r"\s+")
 URL_RE = re.compile(r"https?://\S+")
+
+
+def strip_accents(text: str) -> str:
+    return "".join(
+        ch for ch in unicodedata.normalize("NFKD", text)
+        if not unicodedata.combining(ch)
+    )
+
+
+def normalize_for_match(text: str) -> str:
+    text = strip_accents(text or "").lower()
+    text = text.replace("&amp;", "&")
+    text = URL_RE.sub(" ", text)
+    text = re.sub(r"[^a-z0-9\s]", " ", text)
+    text = WHITESPACE_RE.sub(" ", text).strip()
+    return f" {text} " if text else " "
 
 
 def load_posted_ids() -> Set[str]:
@@ -131,6 +213,38 @@ def load_sources() -> List[dict]:
     return cleaned
 
 
+def load_player_threads() -> Dict[str, int]:
+    try:
+        if not THREAD_MAP_FILE.exists():
+            return {}
+
+        with open(THREAD_MAP_FILE, "r", encoding="utf-8") as f:
+            raw = json.load(f)
+
+        cleaned: Dict[str, int] = {}
+        if isinstance(raw, dict):
+            for player_name, thread_id in raw.items():
+                try:
+                    cleaned[str(player_name).strip()] = int(thread_id)
+                except Exception:
+                    continue
+        return cleaned
+    except Exception as e:
+        print(f"[NEWS] Failed loading player thread map: {e}")
+        return {}
+
+
+def build_player_match_index(player_threads: Dict[str, int]) -> List[Tuple[str, str, int]]:
+    indexed = []
+    for player_name, thread_id in player_threads.items():
+        norm = normalize_for_match(player_name).strip()
+        if norm:
+            indexed.append((norm, player_name, thread_id))
+
+    indexed.sort(key=lambda item: len(item[0]), reverse=True)
+    return indexed
+
+
 def normalize_text(text: str) -> str:
     text = text or ""
     text = URL_RE.sub("", text)
@@ -156,10 +270,7 @@ def entry_unique_id(entry) -> Optional[str]:
 def looks_like_reply_or_repost(title: str, summary: str) -> bool:
     text = f"{title} {summary}".lower()
 
-    # rough filters for replies / repost-ish content
-    bad_starts = [
-        "rt @", "repost:", "retweeted", "replying to", "@"
-    ]
+    bad_starts = ["rt @", "repost:", "retweeted", "replying to", "@"]
     if any(text.startswith(x) for x in bad_starts):
         return True
 
@@ -175,7 +286,6 @@ def classify_news(title: str, summary: str) -> Optional[str]:
     if any(bad in text for bad in EXCLUDE_PATTERNS):
         return None
 
-    # Most important buckets first
     for tag in ["INJURY", "LINEUP", "CALL-UP", "TRANSACTION", "CLOSER", "ROTATION", "WEATHER"]:
         patterns = INCLUDE_PATTERNS[tag]
         if any(p.lower() in text for p in patterns):
@@ -184,31 +294,108 @@ def classify_news(title: str, summary: str) -> Optional[str]:
     return None
 
 
-def build_embed(source: dict, tag: str, title: str, summary: str, link: str) -> discord.Embed:
-    team = source["team"]
-    handle = source["handle"]
-    header = f"[{team}] [{tag}]"
+def detect_player(title: str, summary: str, player_index: List[Tuple[str, str, int]]) -> Tuple[Optional[str], Optional[int]]:
+    haystack = normalize_for_match(f"{title} {summary}")
 
+    for normalized_name, original_name, thread_id in player_index:
+        needle = f" {normalized_name} "
+        if needle in haystack:
+            return original_name, thread_id
+
+    return None, None
+
+
+def extract_team_from_thread_name(thread_name: str) -> Optional[str]:
+    if not thread_name:
+        return None
+
+    for sep in [" — ", " - ", " | ", "("]:
+        if sep in thread_name:
+            part = thread_name.split(sep, 1)[-1].strip(" )")
+            maybe = part.upper().strip()
+            if len(maybe) in (2, 3, 4):
+                return maybe
+    return None
+
+
+async def resolve_player_thread(client: discord.Client, thread_id: Optional[int]) -> Optional[discord.abc.GuildChannel]:
+    if not thread_id:
+        return None
+
+    thread = client.get_channel(thread_id)
+    if thread is not None:
+        return thread
+
+    try:
+        fetched = await client.fetch_channel(thread_id)
+        return fetched
+    except Exception:
+        return None
+
+
+async def infer_team(
+    client: discord.Client,
+    source_team: str,
+    player_name: Optional[str],
+    player_thread_id: Optional[int],
+) -> str:
+    if source_team and source_team != "MLB":
+        return source_team
+
+    thread = await resolve_player_thread(client, player_thread_id)
+    if thread is not None:
+        inferred = extract_team_from_thread_name(getattr(thread, "name", ""))
+        if inferred:
+            return inferred
+
+    return "MLB"
+
+
+def build_embed(
+    source: dict,
+    team: str,
+    tag: str,
+    title: str,
+    summary: str,
+    link: str,
+    player_name: Optional[str] = None,
+    player_thread_url: Optional[str] = None,
+) -> discord.Embed:
+    handle = source["handle"]
     clean_title = title.strip() or "New update"
+    clean_summary = summary.strip()
+
     if len(clean_title) > 256:
         clean_title = clean_title[:253] + "..."
 
-    description_parts = []
-    if summary and summary.lower() != title.lower():
-        description_parts.append(summary[:3500])
-
-    description_parts.append(f"Source: @{handle}")
-    description_parts.append(link)
-
+    color = TEAM_COLORS.get(team, TEAM_COLORS["MLB"])
     embed = discord.Embed(
-        title=f"{header} {clean_title}",
-        description="\n\n".join(description_parts),
+        title=clean_title,
+        description=clean_summary[:3500] if clean_summary else None,
+        color=color,
+        url=link,
     )
+
+    logo = TEAM_LOGOS.get(team)
+    if logo:
+        embed.set_thumbnail(url=logo)
+
+    embed.add_field(name="Tag", value=tag.title(), inline=True)
+    embed.add_field(name="Source", value=f"@{handle}", inline=True)
+
+    if player_name and player_thread_url:
+        embed.add_field(
+            name="Player Profile",
+            value=f"[Open {player_name} thread]({player_thread_url})",
+            inline=False,
+        )
+
+    footer_team = team if team else "MLB"
+    embed.set_footer(text=f"{footer_team} • Fantasy Baseball Geek")
     return embed
 
 
 async def parse_feed(url: str):
-    # feedparser is sync, so run it off the event loop
     return await asyncio.to_thread(feedparser.parse, url)
 
 
@@ -220,6 +407,12 @@ class NewsBot(discord.Client):
         self.posted_ids: Set[str] = load_posted_ids()
         self.sources: List[dict] = []
         self.started_loop = False
+        self.player_threads: Dict[str, int] = {}
+        self.player_index: List[Tuple[str, str, int]] = []
+
+    def refresh_player_threads(self):
+        self.player_threads = load_player_threads()
+        self.player_index = build_player_match_index(self.player_threads)
 
     async def on_ready(self):
         print(f"[NEWS] Logged in as {self.user}")
@@ -230,8 +423,10 @@ class NewsBot(discord.Client):
 
         self.started_loop = True
         self.sources = load_sources()
+        self.refresh_player_threads()
 
         print(f"[NEWS] Loaded {len(self.sources)} sources")
+        print(f"[NEWS] Loaded {len(self.player_threads)} player thread mappings")
         print(f"[NEWS] Poll interval: {NEWS_POLL_SECONDS} seconds")
         print(f"[NEWS] State file: {STATE_FILE}")
 
@@ -242,6 +437,7 @@ class NewsBot(discord.Client):
 
         while not self.is_closed():
             try:
+                self.refresh_player_threads()
                 await self.check_news_feeds()
             except Exception as e:
                 print(f"[NEWS] Loop error: {e}")
@@ -273,7 +469,6 @@ class NewsBot(discord.Client):
                 feed = await parse_feed(rss)
 
                 if getattr(feed, "bozo", 0):
-                    # bozo_exception can still return usable entries, so do not skip immediately
                     print(f"[NEWS] Feed warning for @{handle}: {getattr(feed, 'bozo_exception', 'unknown')}")
 
                 entries = getattr(feed, "entries", [])[:MAX_ENTRIES_PER_FEED]
@@ -296,21 +491,45 @@ class NewsBot(discord.Client):
 
                     link = getattr(entry, "link", "") or source["rss"]
 
+                    player_name, player_thread_id = detect_player(title, summary, self.player_index)
+                    player_thread = await resolve_player_thread(self, player_thread_id)
+                    player_thread_url = getattr(player_thread, "jump_url", None)
+
+                    team = await infer_team(
+                        client=self,
+                        source_team=source["team"],
+                        player_name=player_name,
+                        player_thread_id=player_thread_id,
+                    )
+
                     embed = build_embed(
                         source=source,
+                        team=team,
                         tag=tag,
                         title=title,
                         summary=summary,
                         link=link,
+                        player_name=player_name,
+                        player_thread_url=player_thread_url,
                     )
 
                     await channel.send(embed=embed)
 
+                    if player_thread is not None:
+                        try:
+                            await player_thread.send(embed=embed)
+                            print(f"[NEWS] Also posted to thread for {player_name}")
+                        except Exception as e:
+                            print(f"[NEWS] Failed posting to player thread for {player_name}: {e}")
+
                     self.posted_ids.add(uid)
                     new_posts += 1
-                    print(f"[NEWS] Posted [{source['team']}] [{tag}] @{handle}: {title[:120]}")
+                    print(
+                        f"[NEWS] Posted [{team}] [{tag}] @{handle}: "
+                        f"{title[:120]}"
+                        + (f" | player={player_name}" if player_name else "")
+                    )
 
-                # save after each source so crashes do less damage
                 save_posted_ids(self.posted_ids)
 
             except Exception as e:
