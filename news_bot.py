@@ -101,10 +101,38 @@ TEAM_COLORS = {
 
 KNOWN_TAGS = {"Headline", "Injury", "Recap", "Transaction"}
 
-TEAM_CODES = {
-    "ARI", "ATL", "BAL", "BOS", "CHC", "CWS", "CIN", "CLE", "COL", "DET",
-    "HOU", "KC", "LAA", "LAD", "MIA", "MIL", "MIN", "NYM", "NYY", "ATH",
-    "PHI", "PIT", "SD", "SF", "SEA", "STL", "TB", "TEX", "TOR", "WSH"
+PAGE_TEAM_MAP = {
+    "AZ": "ARI",
+    "ARI": "ARI",
+    "ATL": "ATL",
+    "BAL": "BAL",
+    "BOS": "BOS",
+    "CHC": "CHC",
+    "CWS": "CWS",
+    "CIN": "CIN",
+    "CLE": "CLE",
+    "COL": "COL",
+    "DET": "DET",
+    "HOU": "HOU",
+    "KC": "KC",
+    "LAA": "LAA",
+    "LAD": "LAD",
+    "MIA": "MIA",
+    "MIL": "MIL",
+    "MIN": "MIN",
+    "NYM": "NYM",
+    "NYY": "NYY",
+    "ATH": "ATH",
+    "PHI": "PHI",
+    "PIT": "PIT",
+    "SD": "SD",
+    "SF": "SF",
+    "SEA": "SEA",
+    "STL": "STL",
+    "TB": "TB",
+    "TEX": "TEX",
+    "TOR": "TOR",
+    "WSH": "WSH",
 }
 
 WHITESPACE_RE = re.compile(r"\s+")
@@ -405,7 +433,7 @@ def build_embed(
         embed.set_thumbnail(url=logo)
 
     embed.add_field(name="Tag", value=tag or "News", inline=True)
-    embed.add_field(name="Source", value=f"[NBC Sports Rotoworld]({link})", inline=True)
+    embed.add_field(name="Source", value="NBC Sports Rotoworld", inline=True)
 
     if position_text:
         embed.add_field(name="Position", value=position_text[:100], inline=True)
@@ -446,21 +474,18 @@ def extract_team_and_position(line: str) -> Tuple[Optional[str], Optional[str]]:
         return None, None
 
     cleaned = normalize_text(line)
-    parts = cleaned.split()
+    match = re.match(r"^([A-Z]{2,3})\s+(.+?)\s+#\d+\s*$", cleaned)
+    if not match:
+        return None, None
 
-    team = None
-    for part in parts:
-        upper = part.upper()
-        if upper in TEAM_CODES:
-            team = upper
-            break
+    raw_team = match.group(1).upper()
+    position = match.group(2).strip()
+    team = PAGE_TEAM_MAP.get(raw_team)
 
-    position = None
-    if team and cleaned.startswith(team):
-        position = cleaned[len(team):].strip()
-        position = re.sub(r"#\d+\b", "", position).strip() or None
+    if not team:
+        return None, None
 
-    return team, position
+    return team, position or None
 
 
 def slug_to_name(slug: str) -> str:
@@ -497,6 +522,8 @@ def parse_rotoworld_items_from_text(raw_text: str, player_links: Dict[str, str])
     lines = [x for x in lines if x]
 
     start_idx = None
+    end_idx = None
+
     for i, line in enumerate(lines):
         if line == "Rotoworld":
             start_idx = i
@@ -505,66 +532,87 @@ def parse_rotoworld_items_from_text(raw_text: str, player_links: Dict[str, str])
     if start_idx is None:
         return []
 
-    lines = lines[start_idx:]
+    for i in range(start_idx, len(lines)):
+        if lines[i] == "Load More":
+            end_idx = i
+            break
+
+    section = lines[start_idx:end_idx] if end_idx else lines[start_idx:]
 
     items: List[dict] = []
     i = 0
 
-    while i < len(lines):
-        line = lines[i]
+    def is_noise(line: str) -> bool:
+        low = line.lower()
+        if not line:
+            return True
+        if line in {"Rotoworld", "My Favorites", "All News", "Load More", "Related", "Up Next"}:
+            return True
+        if low.startswith("all news "):
+            return True
+        if low.startswith("positions "):
+            return True
+        if low.startswith("leagues "):
+            return True
+        if low == "link copied to clipboard!":
+            return True
+        if "now playing" in low:
+            return True
+        if re.match(r"^\d+:\d+\s+", line):
+            return True
+        if TIMESTAMP_RE.match(line):
+            return True
+        return False
 
-        if line in KNOWN_TAGS and items:
-            items[-1]["tag"] = line
+    while i < len(section):
+        line = section[i]
+
+        if is_noise(line) or line in KNOWN_TAGS:
             i += 1
             continue
 
-        if not is_valid_player_name(line):
+        if i + 1 >= len(section):
             i += 1
             continue
 
-        player_name = line
-
-        if i + 1 >= len(lines):
-            i += 1
-            continue
-
-        team = None
-        position = None
-        title = None
-        summary = None
-        tag = "News"
-        timestamp_text = None
-
-        next_line = lines[i + 1]
-        team, position = extract_team_and_position(next_line)
-
+        team, position = extract_team_and_position(section[i + 1])
         if not team:
             i += 1
             continue
 
+        player_name = line
         j = i + 2
+        paragraphs: List[str] = []
+        tag = "News"
+        timestamp_text = None
 
-        while j < len(lines):
-            probe = lines[j]
-            low = probe.lower()
-
-            if low.startswith("personalize your rotoworld feed"):
-                j += 1
-                continue
-
-            if probe == "Related":
-                break
+        while j < len(section):
+            probe = section[j]
 
             if probe in KNOWN_TAGS:
+                tag = probe
+                j += 1
                 break
 
-            if not title:
-                title = probe
+            if TIMESTAMP_RE.match(probe):
+                timestamp_text = probe
                 j += 1
                 continue
 
-            if not summary:
-                summary = probe
+            if j + 1 < len(section):
+                maybe_team, _ = extract_team_and_position(section[j + 1])
+                if maybe_team and is_valid_player_name(probe):
+                    break
+
+            if not is_noise(probe):
+                paragraphs.append(probe)
+
+            j += 1
+
+        while j < len(section):
+            probe = section[j]
+
+            if probe == "Link copied to clipboard!":
                 j += 1
                 continue
 
@@ -573,41 +621,47 @@ def parse_rotoworld_items_from_text(raw_text: str, player_links: Dict[str, str])
                 j += 1
                 continue
 
-            if is_valid_player_name(probe):
-                next_probe = lines[j + 1] if j + 1 < len(lines) else ""
-                maybe_team, _ = extract_team_and_position(next_probe)
-                if maybe_team:
-                    break
-
-            j += 1
-
-        scan_limit = min(j + 18, len(lines))
-        for k in range(i + 2, scan_limit):
-            probe = lines[k]
             if probe in KNOWN_TAGS:
                 tag = probe
-            elif TIMESTAMP_RE.match(probe):
-                timestamp_text = probe
-            elif probe == "Link copied to clipboard!":
+                j += 1
                 continue
 
-        if title and summary:
-            link = player_links.get(player_name, NBC_PLAYER_NEWS_URL)
-            uid = f"{player_name}|{team}|{tag}|{title}|{summary[:80]}"
+            if j + 1 < len(section):
+                maybe_team, _ = extract_team_and_position(section[j + 1])
+                if maybe_team and is_valid_player_name(probe):
+                    break
 
-            items.append(
-                {
-                    "id": uid,
-                    "player_name": player_name,
-                    "team": team or "MLB",
-                    "position": position,
-                    "title": title,
-                    "summary": summary,
-                    "tag": tag,
-                    "link": link,
-                    "timestamp_text": timestamp_text,
-                }
-            )
+            if is_noise(probe):
+                j += 1
+                continue
+
+            paragraphs.append(probe)
+            j += 1
+
+        paragraphs = [p for p in paragraphs if p]
+        if not paragraphs:
+            i = j if j > i else i + 1
+            continue
+
+        blurb = paragraphs[0]
+        full_summary = "\n\n".join(paragraphs)
+
+        link = player_links.get(player_name, NBC_PLAYER_NEWS_URL)
+        uid = f"{player_name}|{team}|{tag}|{blurb[:120]}"
+
+        items.append(
+            {
+                "id": uid,
+                "player_name": player_name,
+                "team": team,
+                "position": position,
+                "title": blurb,
+                "summary": full_summary,
+                "tag": tag,
+                "link": link,
+                "timestamp_text": timestamp_text,
+            }
+        )
 
         i = j if j > i else i + 1
 
@@ -623,10 +677,10 @@ def parse_rotoworld_items_from_text(raw_text: str, player_links: Dict[str, str])
 
 
 def fetch_nbc_player_news() -> List[dict]:
-    r = SESSION.get(NBC_PLAYER_NEWS_URL, timeout=30)
-    r.raise_for_status()
+    response = SESSION.get(NBC_PLAYER_NEWS_URL, timeout=30)
+    response.raise_for_status()
 
-    soup = BeautifulSoup(r.text, "html.parser")
+    soup = BeautifulSoup(response.text, "html.parser")
     raw_text = soup.get_text("\n", strip=True)
     player_links = extract_candidate_links(soup)
     items = parse_rotoworld_items_from_text(raw_text, player_links)
@@ -770,7 +824,7 @@ class NewsBot(discord.Client):
             embed = build_embed(
                 team=team,
                 tag=tag,
-                title=f"{scraped_player_name} — {title}" if scraped_player_name else title,
+                title=scraped_player_name or title,
                 summary=summary,
                 link=link,
                 player_name=player_name,
