@@ -8,10 +8,12 @@ from typing import Dict, List, Optional, Set, Tuple
 import discord
 import feedparser
 
+os.makedirs("state", exist_ok=True)
+
 
 BASE_DIR = Path(__file__).resolve().parent
 SOURCES_FILE = BASE_DIR / "news_sources.json"
-STATE_FILE = "/data/news_posted_ids.json"
+STATE_FILE = "state/news_posted_ids.json"
 
 DISCORD_TOKEN = os.getenv("NEWS_BOT_TOKEN") or os.getenv("DISCORD_TOKEN")
 NEWS_CHANNEL_ID = int(os.getenv("NEWS_CHANNEL_ID", "0"))
