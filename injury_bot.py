@@ -11,9 +11,9 @@ import discord
 import requests
 from bs4 import BeautifulSoup
 
-DISCORD_TOKEN = os.getenv("DISCORD_TOKEN")
-CHANNEL_ID = int(os.getenv("CHANNEL_ID", "0"))
-POLL_INTERVAL = int(os.getenv("POLL_INTERVAL", "900"))
+DISCORD_TOKEN = os.getenv("INJURY_BOT_TOKEN")
+CHANNEL_ID = int(os.getenv("INJURY_CHANNEL_ID", "0"))
+POLL_INTERVAL = int(os.getenv("INJURY_POLL_INTERVAL", "900"))
 
 ESPN_URL = "https://www.espn.com/mlb/injuries"
 ET = ZoneInfo("America/New_York")
@@ -490,15 +490,11 @@ async def on_ready():
         asyncio.create_task(background_loop())
 
 
-async def main():
+async def start_injury_bot():
     if not DISCORD_TOKEN:
-        raise RuntimeError("DISCORD_TOKEN is not set")
+        raise RuntimeError("INJURY_BOT_TOKEN is not set")
     if not CHANNEL_ID:
-        raise RuntimeError("CHANNEL_ID is not set")
+        raise RuntimeError("INJURY_CHANNEL_ID is not set")
 
     log(f"Using cutoff date: {CUTOFF_DATE_ET.strftime('%Y-%m-%d')}")
     await client.start(DISCORD_TOKEN)
-
-
-if __name__ == "__main__":
-    asyncio.run(main())
