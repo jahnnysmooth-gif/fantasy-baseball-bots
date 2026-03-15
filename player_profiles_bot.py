@@ -41,6 +41,14 @@ STATE_DIR.mkdir(parents=True, exist_ok=True)
 SEED_STATE_FILE = STATE_DIR / "seed_state.json"
 THREAD_COMMAND_STATE_FILE = STATE_DIR / "thread_command_state.json"
 
+THREAD_MAP_FILE = STATE_DIR / "player_threads.json"
+
+if THREAD_MAP_FILE.exists():
+    with open(THREAD_MAP_FILE) as f:
+        PLAYER_THREADS = json.load(f)
+else:
+    PLAYER_THREADS = {}
+
 BOT_TIMEZONE = "America/New_York"
 OUTLOOK_UNLOCK_DATE = date(2026, 4, 15)
 
@@ -2211,6 +2219,11 @@ async def create_profile_for_name(
             )
 
             created_thread = created.thread if hasattr(created, "thread") else created
+
+            PLAYER_THREADS[profile["full_name"]] = created_thread.id
+            with open(THREAD_MAP_FILE, "w") as f:
+                json.dump(PLAYER_THREADS, f, indent=2)
+            
             return {
                 "status": "created",
                 "player_name": profile["full_name"],
