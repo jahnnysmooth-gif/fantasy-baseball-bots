@@ -12,9 +12,9 @@ import discord
 import requests
 from bs4 import BeautifulSoup
 
-DISCORD_TOKEN = os.getenv("DISCORD_TOKEN")
-CHANNEL_ID = int(os.getenv("CHANNEL_ID", "0"))
-POLL_INTERVAL = int(os.getenv("POLL_INTERVAL", "300"))
+DISCORD_TOKEN = os.getenv("LINEUP_BOT_TOKEN")
+CHANNEL_ID = int(os.getenv("LINEUP_CHANNEL_ID", "0"))
+POLL_INTERVAL = int(os.getenv("LINEUP_POLL_INTERVAL", "300"))
 
 STATE_DIR = Path("state")
 STATE_FILE = STATE_DIR / "posted_lineups.json"
@@ -451,14 +451,10 @@ async def on_ready():
         asyncio.create_task(background_loop())
 
 
-async def main():
+async def start_lineup_bot():
     if not DISCORD_TOKEN:
-        raise RuntimeError("DISCORD_TOKEN is not set")
+        raise RuntimeError("LINEUP_BOT_TOKEN is not set")
     if not CHANNEL_ID:
-        raise RuntimeError("CHANNEL_ID is not set")
+        raise RuntimeError("LINEUP_CHANNEL_ID is not set")
 
     await client.start(DISCORD_TOKEN)
-
-
-if __name__ == "__main__":
-    asyncio.run(main())
