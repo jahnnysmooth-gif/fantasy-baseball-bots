@@ -521,24 +521,6 @@ def parse_rotoworld_items_from_text(raw_text: str, player_links: Dict[str, str])
     lines = [normalize_text(x) for x in text.split("\n")]
     lines = [x for x in lines if x]
 
-    start_idx = None
-    end_idx = None
-
-    for i, line in enumerate(lines):
-        if line == "Rotoworld":
-            start_idx = i
-            break
-
-    if start_idx is None:
-        return []
-
-    for i in range(start_idx, len(lines)):
-        if lines[i] == "Load More":
-            end_idx = i
-            break
-
-    section = lines[start_idx:end_idx] if end_idx else lines[start_idx:]
-
     items: List[dict] = []
     i = 0
 
@@ -554,29 +536,29 @@ def parse_rotoworld_items_from_text(raw_text: str, player_links: Dict[str, str])
             return True
         if low.startswith("leagues "):
             return True
+        if low.startswith("player news"):
+            return True
         if low == "link copied to clipboard!":
             return True
         if "now playing" in low:
             return True
         if re.match(r"^\d+:\d+\s+", line):
             return True
-        if TIMESTAMP_RE.match(line):
-            return True
         return False
 
-    while i < len(section):
-        line = section[i]
+    while i < len(lines):
+        line = lines[i]
 
         if is_noise(line) or line in KNOWN_TAGS:
             i += 1
             continue
 
-        if i + 1 >= len(section):
+        if i + 1 >= len(lines):
             i += 1
             continue
 
-        team, position = extract_team_and_position(section[i + 1])
-        if not team:
+        team, position = extract_team_and_position(lines[i + 1])
+        if not team or not is_valid_player_name(line):
             i += 1
             continue
 
@@ -586,56 +568,27 @@ def parse_rotoworld_items_from_text(raw_text: str, player_links: Dict[str, str])
         tag = "News"
         timestamp_text = None
 
-        while j < len(section):
-            probe = section[j]
+        while j < len(lines):
+            probe = lines[j]
 
             if probe in KNOWN_TAGS:
                 tag = probe
                 j += 1
-                break
+                continue
 
             if TIMESTAMP_RE.match(probe):
                 timestamp_text = probe
                 j += 1
                 continue
 
-            if j + 1 < len(section):
-                maybe_team, _ = extract_team_and_position(section[j + 1])
-                if maybe_team and is_valid_player_name(probe):
+            if j + 1 < len(lines):
+                next_team, _ = extract_team_and_position(lines[j + 1])
+                if next_team and is_valid_player_name(probe):
                     break
 
             if not is_noise(probe):
                 paragraphs.append(probe)
 
-            j += 1
-
-        while j < len(section):
-            probe = section[j]
-
-            if probe == "Link copied to clipboard!":
-                j += 1
-                continue
-
-            if TIMESTAMP_RE.match(probe):
-                timestamp_text = probe
-                j += 1
-                continue
-
-            if probe in KNOWN_TAGS:
-                tag = probe
-                j += 1
-                continue
-
-            if j + 1 < len(section):
-                maybe_team, _ = extract_team_and_position(section[j + 1])
-                if maybe_team and is_valid_player_name(probe):
-                    break
-
-            if is_noise(probe):
-                j += 1
-                continue
-
-            paragraphs.append(probe)
             j += 1
 
         paragraphs = [p for p in paragraphs if p]
