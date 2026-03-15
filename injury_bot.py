@@ -33,7 +33,7 @@ HEADERS = {
 }
 
 # Use Render persistent disk so duplicate protection survives redeploys/restarts
-STATE_DIR = Path("/var/data/injury")
+STATE_DIR = Path("state/injury")
 STATE_FILE = STATE_DIR / "posted_injuries.json"
 STATE_FILE_TMP = STATE_DIR / "posted_injuries.json.tmp"
 

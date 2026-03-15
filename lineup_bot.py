@@ -17,7 +17,7 @@ CHANNEL_ID = int(os.getenv("LINEUP_CHANNEL_ID", "0"))
 POLL_INTERVAL = int(os.getenv("LINEUP_POLL_INTERVAL", "300"))
 
 # Use Render persistent disk so duplicate protection survives redeploys/restarts
-STATE_DIR = Path("/var/data/lineup")
+STATE_DIR = Path("state/lineup")
 STATE_FILE = STATE_DIR / "posted_lineups.json"
 STATE_FILE_TMP = STATE_DIR / "posted_lineups.json.tmp"
 
