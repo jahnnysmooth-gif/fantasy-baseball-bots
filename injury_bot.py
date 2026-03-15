@@ -434,12 +434,24 @@ async def post_allowed_updates() -> None:
         )
     )
 
+    current_ids = []
     new_items = []
+
     for item in items:
         update_id = make_update_id(item)
         item["update_id"] = update_id
+        current_ids.append(update_id)
+
         if update_id not in posted_ids_set:
             new_items.append(item)
+
+    # First-run safeguard:
+    # if the state file is empty, seed all current injuries without posting.
+    if not posted_ids_list:
+        state["posted_ids"] = normalize_posted_ids(current_ids)
+        save_state(state)
+        log(f"First run detected. Seeded posted_ids with {len(state['posted_ids'])} existing injuries. No posts sent.")
+        return
 
     log(f"New items: {len(new_items)}")
     for item in new_items[:5]:
