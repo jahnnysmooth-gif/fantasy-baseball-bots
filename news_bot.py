@@ -715,11 +715,20 @@ class NewsBot(discord.Client):
         dupes_skipped = 0
 
         items = await parse_nbc_news()
+        
+        print(f"[NEWS] Parsed items: {len(items)}")
+        print(f"[NEWS] Posted ID count: {len(self.posted_ids)}")
+        if items:
+    first = items[0]
+    print(f"[NEWS] First item player: {first.get('player_name')}")
+    print(f"[NEWS] First item tag: {first.get('tag')}")
+    print(f"[NEWS] First item title: {first.get('title')}")
 
         # oldest -> newest feel, based on page order top-to-bottom
         for item in reversed(items):
             uid = item["id"]
             if uid in self.posted_ids:
+                print(f"[NEWS] Already posted uid: {uid[:120]}")
                 continue
 
             title = item["title"]
