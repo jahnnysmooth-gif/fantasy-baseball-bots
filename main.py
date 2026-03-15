@@ -9,13 +9,18 @@ from lineup_bot import start_lineup_bot
 from news_bot import start_news_bot
 
 
-# ensure persistent data directory exists
+# try to use persistent disk if available
 DATA_DIR = "/data"
-os.makedirs(DATA_DIR, exist_ok=True)
 
-# persistent state file for news bot
-NEWS_STATE_FILE = f"{DATA_DIR}/news_posted_ids.json"
+if os.path.exists(DATA_DIR) and os.access(DATA_DIR, os.W_OK):
+    NEWS_STATE_FILE = f"{DATA_DIR}/news_posted_ids.json"
+else:
+    # fallback to local directory
+    DATA_DIR = "."
+    NEWS_STATE_FILE = f"{DATA_DIR}/news_posted_ids.json"
 
+
+# create state file if missing
 if not os.path.exists(NEWS_STATE_FILE):
     with open(NEWS_STATE_FILE, "w") as f:
         json.dump([], f)
