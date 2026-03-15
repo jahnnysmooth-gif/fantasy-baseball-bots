@@ -34,10 +34,12 @@ ADP_URL = "https://www.fantasypros.com/mlb/adp/overall.php"
 SEED_COUNT = 250
 SEED_SLEEP_MIN_SECONDS = 600   # 10 min
 SEED_SLEEP_MAX_SECONDS = 900   # 15 min
-COOLDOWN_SLEEP_SECONDS = 86400 # 24 hours
 
-SEED_STATE_FILE = Path("seed_state.json")
-THREAD_COMMAND_STATE_FILE = Path("thread_command_state.json")
+STATE_DIR = Path("state/player_profiles")
+STATE_DIR.mkdir(parents=True, exist_ok=True)
+
+SEED_STATE_FILE = STATE_DIR / "seed_state.json"
+THREAD_COMMAND_STATE_FILE = STATE_DIR / "thread_command_state.json"
 
 BOT_TIMEZONE = "America/New_York"
 OUTLOOK_UNLOCK_DATE = date(2026, 4, 15)
@@ -46,6 +48,17 @@ intents = discord.Intents.default()
 intents.message_content = True
 bot = commands.Bot(command_prefix="!", intents=intents)
 bot.remove_command("stats")
+
+# =========================
+# LOGGING
+# =========================
+def log_profiles(msg: str) -> None:
+    print(f"[PROFILES] {msg}", flush=True)
+
+
+def log_adp(msg: str) -> None:
+    print(f"[ADP] {msg}", flush=True)
+
 
 # =========================
 # TEAM COLORS / ABBREVS / LOGOS
@@ -392,7 +405,7 @@ def load_thread_command_state():
         with open(THREAD_COMMAND_STATE_FILE, "r", encoding="utf-8") as f:
             thread_command_state = json.load(f)
     except Exception as e:
-        print(f"Failed to load thread command state: {e}")
+        log_profiles(f"Failed to load thread command state: {e}")
         thread_command_state = {}
 
 
@@ -401,7 +414,7 @@ def save_thread_command_state():
         with open(THREAD_COMMAND_STATE_FILE, "w", encoding="utf-8") as f:
             json.dump(thread_command_state, f, indent=2)
     except Exception as e:
-        print(f"Failed to save thread command state: {e}")
+        log_profiles(f"Failed to save thread command state: {e}")
 
 
 def was_thread_command_used_today(thread_id: int, command_name: str) -> bool:
@@ -451,7 +464,7 @@ def load_seed_state():
         seed_state["last_run_ts"] = data.get("last_run_ts", 0)
         seed_state["seed_players"] = data.get("seed_players", [])
     except Exception as e:
-        print(f"Failed to load seed state: {e}")
+        log_adp(f"Failed to load seed state: {e}")
 
 
 def init_seed_state_if_needed(seed_players: list[dict]):
@@ -564,7 +577,7 @@ async def find_existing_profile_thread(
             if await thread_matches(thread):
                 return thread
     except Exception as e:
-        print(f"Archived thread check error: {e}")
+        log_profiles(f"Archived thread check error: {e}")
 
     return None
 
@@ -576,7 +589,7 @@ async def fetch_json(url: str, params=None):
     async with aiohttp.ClientSession() as session:
         async with session.get(url, params=params, timeout=30) as resp:
             if resp.status != 200:
-                print(f"HTTP {resp.status} for {url}")
+                log_profiles(f"HTTP {resp.status} for {url}")
                 return None
             return await resp.json()
 
@@ -586,7 +599,7 @@ async def fetch_text(url: str, params=None):
     async with aiohttp.ClientSession(headers=headers) as session:
         async with session.get(url, params=params, timeout=30) as resp:
             if resp.status != 200:
-                print(f"HTTP {resp.status} for {url}")
+                log_profiles(f"HTTP {resp.status} for {url}")
                 return None
             return await resp.text()
 
@@ -675,7 +688,7 @@ async def search_player_candidates(player_query: str):
                     }
                 )
     except Exception as e:
-        print(f"pybaseball fallback lookup error for '{player_query}': {e}")
+        log_profiles(f"pybaseball fallback lookup error for '{player_query}': {e}")
 
     return candidates
 
@@ -824,7 +837,7 @@ async def fetch_adp_top_250():
                     names = temp
                     break
     except Exception as e:
-        print(f"ADP pandas parse failed: {e}")
+        log_adp(f"ADP pandas parse failed: {e}")
 
     if not names:
         try:
@@ -846,7 +859,7 @@ async def fetch_adp_top_250():
                 dedup.append(row)
             names = dedup
         except Exception as e:
-            print(f"ADP soup fallback failed: {e}")
+            log_adp(f"ADP soup fallback failed: {e}")
 
     cleaned = []
     seen = set()
@@ -866,7 +879,7 @@ async def fetch_adp_top_250():
             break
 
     adp_cache = tiered_seed_order(cleaned[:SEED_COUNT])
-    print(f"Loaded ADP seed list: {len(adp_cache)} players")
+    log_adp(f"Loaded ADP seed list: {len(adp_cache)} players")
     return adp_cache
 
 
@@ -950,19 +963,19 @@ def _load_pitcher_x_df(season: int):
 async def ensure_statcast_loaded(season: int):
     if season not in BATTING_EV_DF_BY_SEASON:
         BATTING_EV_DF_BY_SEASON[season] = await asyncio.to_thread(_load_batter_ev_df, season)
-        print(f"Loaded hitter EV/barrels rows for {season}: {len(BATTING_EV_DF_BY_SEASON[season])}")
+        log_profiles(f"Loaded hitter EV/barrels rows for {season}: {len(BATTING_EV_DF_BY_SEASON[season])}")
 
     if season not in BATTING_X_DF_BY_SEASON:
         BATTING_X_DF_BY_SEASON[season] = await asyncio.to_thread(_load_batter_x_df, season)
-        print(f"Loaded hitter expected stats rows for {season}: {len(BATTING_X_DF_BY_SEASON[season])}")
+        log_profiles(f"Loaded hitter expected stats rows for {season}: {len(BATTING_X_DF_BY_SEASON[season])}")
 
     if season not in PITCHING_EV_DF_BY_SEASON:
         PITCHING_EV_DF_BY_SEASON[season] = await asyncio.to_thread(_load_pitcher_ev_df, season)
-        print(f"Loaded pitcher EV/barrels rows for {season}: {len(PITCHING_EV_DF_BY_SEASON[season])}")
+        log_profiles(f"Loaded pitcher EV/barrels rows for {season}: {len(PITCHING_EV_DF_BY_SEASON[season])}")
 
     if season not in PITCHING_X_DF_BY_SEASON:
         PITCHING_X_DF_BY_SEASON[season] = await asyncio.to_thread(_load_pitcher_x_df, season)
-        print(f"Loaded pitcher expected stats rows for {season}: {len(PITCHING_X_DF_BY_SEASON[season])}")
+        log_profiles(f"Loaded pitcher expected stats rows for {season}: {len(PITCHING_X_DF_BY_SEASON[season])}")
 
 
 def get_statcast_row(df: pd.DataFrame, player_id: int):
@@ -2300,7 +2313,7 @@ async def ensure_seed_queue_loaded():
 async def seed_next_player_from_state(forum_channel: discord.ForumChannel):
     loaded = await ensure_seed_queue_loaded()
     if not loaded:
-        print("ADP seeder: no ADP players loaded")
+        log_adp("No ADP players loaded")
         return False, False
 
     if seed_state["completed"]:
@@ -2314,16 +2327,18 @@ async def seed_next_player_from_state(forum_channel: discord.ForumChannel):
 
         existing = await find_existing_profile_thread(forum_channel, name)
         if existing:
-            print(f"ADP seeder: already existed {name}")
+            log_adp(f"Already existed {name}")
             seed_state["current_index"] += 1
+            if seed_state["current_index"] >= len(players):
+                seed_state["completed"] = True
             save_seed_state()
             continue
 
-        print(f"ADP seeder: creating {name}")
+        log_adp(f"Creating {name}")
         result = await create_profile_for_name(name, forum_channel)
 
         if result["status"] == "created":
-            print(f"ADP seeder: created {name}")
+            log_adp(f"Created {name}")
             seed_state["current_index"] += 1
             seed_state["last_run_ts"] = int(time.time())
             if seed_state["current_index"] >= len(players):
@@ -2332,13 +2347,15 @@ async def seed_next_player_from_state(forum_channel: discord.ForumChannel):
             return True, seed_state["completed"]
 
         if result["status"] == "exists":
-            print(f"ADP seeder: already existed {name}")
+            log_adp(f"Already existed {name}")
             seed_state["current_index"] += 1
+            if seed_state["current_index"] >= len(players):
+                seed_state["completed"] = True
             save_seed_state()
             continue
 
         if result["status"] in {"ambiguous", "no_match", "error"}:
-            print(f"ADP seeder: skipped {name} -> {result['status']}")
+            log_adp(f"Skipped {name} -> {result['status']}")
             seed_state["current_index"] += 1
             if seed_state["current_index"] >= len(players):
                 seed_state["completed"] = True
@@ -2347,7 +2364,7 @@ async def seed_next_player_from_state(forum_channel: discord.ForumChannel):
 
     seed_state["completed"] = True
     save_seed_state()
-    print("ADP seeder: top 250 complete")
+    log_adp("Top 250 complete")
     return False, True
 
 
@@ -2356,12 +2373,16 @@ async def background_seeder_loop():
     forum_channel = bot.get_channel(FORUM_CHANNEL_ID)
 
     if forum_channel is None:
-        print("ADP seeder: forum channel not found")
+        log_adp("Forum channel not found")
         return
 
     while not bot.is_closed():
         try:
             await ensure_seed_queue_loaded()
+
+            if seed_state["completed"]:
+                log_adp("Seeder complete. Stopping background seeder loop.")
+                return
 
             if seed_state["paused"]:
                 await asyncio.sleep(30)
@@ -2370,19 +2391,18 @@ async def background_seeder_loop():
             created_one, finished = await seed_next_player_from_state(forum_channel)
 
             if finished:
-                print("ADP seeder: cooldown mode (24h)")
-                await asyncio.sleep(COOLDOWN_SLEEP_SECONDS)
-                continue
+                log_adp("Seeder complete. Stopping background seeder loop.")
+                return
 
             if created_one:
                 sleep_for = random.randint(SEED_SLEEP_MIN_SECONDS, SEED_SLEEP_MAX_SECONDS)
-                print(f"ADP seeder: sleeping {sleep_for} seconds")
+                log_adp(f"Sleeping {sleep_for} seconds")
                 await asyncio.sleep(sleep_for)
             else:
                 await asyncio.sleep(1800)
 
         except Exception as e:
-            print(f"ADP seeder loop error: {e}")
+            log_adp(f"Seeder loop error: {e}")
             await asyncio.sleep(1800)
 
 
@@ -2392,14 +2412,16 @@ async def background_seeder_loop():
 @bot.event
 async def on_ready():
     global seeder_task
-    print(f"Logged in as {bot.user}")
+    log_profiles(f"Logged in as {bot.user}")
 
     load_seed_state()
     load_thread_command_state()
 
-    if seeder_task is None or seeder_task.done():
+    if seed_state.get("completed"):
+        log_adp("Seeder already complete. Background seeder will not start.")
+    elif seeder_task is None or seeder_task.done():
         seeder_task = asyncio.create_task(background_seeder_loop())
-        print("ADP seeder task started")
+        log_adp("Seeder task started")
 
 
 @bot.event
@@ -2517,7 +2539,7 @@ async def on_message(message: discord.Message):
         try:
             await ensure_seed_queue_loaded()
         except Exception as e:
-            print(f"Seed queue load error: {e}")
+            log_adp(f"Seed queue load error: {e}")
 
         if lowered == "seedstatus":
             await message.reply(get_seed_status_text(), mention_author=False)
@@ -2530,8 +2552,18 @@ async def on_message(message: discord.Message):
             return
 
         if lowered == "seedresume":
+            if seed_state.get("completed"):
+                await message.reply("Seeder is already complete.", mention_author=False)
+                return
+
             seed_state["paused"] = False
             save_seed_state()
+
+            global seeder_task
+            if seeder_task is None or seeder_task.done():
+                seeder_task = asyncio.create_task(background_seeder_loop())
+                log_adp("Seeder task restarted via seedresume")
+
             await message.reply("Seeder resumed.", mention_author=False)
             return
 
@@ -2560,7 +2592,7 @@ async def on_message(message: discord.Message):
                 return
 
             except Exception as e:
-                print(f"Seed next error: {e}")
+                log_adp(f"Seed next error: {e}")
                 await message.reply(
                     "Something went wrong while advancing the seeder.",
                     mention_author=False,
@@ -2579,7 +2611,7 @@ async def on_message(message: discord.Message):
         await message.reply(result["message"], mention_author=False)
 
     except Exception as e:
-        print(f"Create thread error: {e}")
+        log_profiles(f"Create thread error: {e}")
         await message.reply(
             "Something went wrong while creating that profile.",
             mention_author=False,
@@ -2588,6 +2620,7 @@ async def on_message(message: discord.Message):
 
 if not TOKEN:
     raise ValueError("PLAYER_PROFILES_TOKEN environment variable is not set.")
+
 
 async def start_player_profiles_bot():
     await bot.start(TOKEN)

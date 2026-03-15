@@ -88,7 +88,7 @@ client = discord.Client(intents=intents)
 
 
 def log(message: str) -> None:
-    print(message, flush=True)
+    print(f"[CLOSER] {message}", flush=True)
 
 
 def now_utc() -> datetime:
@@ -281,7 +281,7 @@ async def get_channel() -> discord.abc.Messageable | None:
     try:
         return await client.fetch_channel(DISCORD_CHANNEL_ID)
     except Exception as e:
-        log(f"[BOT] ERROR: Could not fetch channel {DISCORD_CHANNEL_ID}: {e}")
+        log(f"ERROR: Could not fetch channel {DISCORD_CHANNEL_ID}: {e}")
         return None
 
 
@@ -301,7 +301,7 @@ async def process_games() -> None:
     total_blown_found = 0
     total_posted = 0
 
-    log(f"[BOT] Games found: {len(games)}")
+    log(f"Games found: {len(games)}")
 
     for game in games:
         status = game.get("status", {}).get("detailedState", "")
@@ -318,11 +318,11 @@ async def process_games() -> None:
         final_stamp = build_final_stamp(game)
 
         if processed_final_games.get(game_pk_str) == final_stamp:
-            log(f"[BOT] Skipping already processed final game: {game_pk}")
+            log(f"Skipping already processed final game: {game_pk}")
             continue
 
         total_new_final_games += 1
-        log(f"[BOT] Processing new final game: {game_pk}")
+        log(f"Processing new final game: {game_pk}")
 
         url = f"https://statsapi.mlb.com/api/v1.1/game/{game_pk}/feed/live"
         r = requests.get(url, timeout=30)
@@ -331,7 +331,7 @@ async def process_games() -> None:
 
         box = data.get("liveData", {}).get("boxscore", {}).get("teams", {})
         if not box:
-            log(f"[BOT] No boxscore found for game {game_pk}")
+            log(f"No boxscore found for game {game_pk}")
             processed_final_games[game_pk_str] = final_stamp
             continue
 
@@ -388,7 +388,7 @@ async def process_games() -> None:
                     event_key = f"save_{game_pk}_{pitcher_id}"
 
                     if event_key in posted_events:
-                        log(f"[BOT] Skipping duplicate save: {pitcher} | {team}")
+                        log(f"Skipping duplicate save: {pitcher} | {team}")
                     else:
                         embed = build_save_embed(
                             team=team,
@@ -403,23 +403,23 @@ async def process_games() -> None:
                             posted_events.add(event_key)
                             total_posted += 1
                             game_posted += 1
-                            log(f"[BOT] SAVE: {pitcher} | {team}")
+                            log(f"SAVE: {pitcher} | {team}")
                             await asyncio.sleep(1.5)
                         except Exception as e:
-                            log(f"[BOT] Discord send error on save: {e}")
+                            log(f"Discord send error on save: {e}")
 
                 if pitching_stats.get("blownSaves", 0) > 0:
                     total_blown_found += 1
                     game_blown += 1
 
                     if team in blown_posted_teams:
-                        log(f"[BOT] Skipping extra blown save for team in same game: {team}")
+                        log(f"Skipping extra blown save for team in same game: {team}")
                         continue
 
                     event_key = f"blown_team_{game_pk}_{team}"
 
                     if event_key in posted_events:
-                        log(f"[BOT] Skipping duplicate blown save team alert: {team}")
+                        log(f"Skipping duplicate blown save team alert: {team}")
                     else:
                         embed = build_blown_embed(
                             team=team,
@@ -435,15 +435,15 @@ async def process_games() -> None:
                             blown_posted_teams.add(team)
                             total_posted += 1
                             game_posted += 1
-                            log(f"[BOT] BLOWN SAVE: {pitcher} | {team}")
+                            log(f"BLOWN SAVE: {pitcher} | {team}")
                             await asyncio.sleep(1.5)
                         except Exception as e:
-                            log(f"[BOT] Discord send error on blown save: {e}")
+                            log(f"Discord send error on blown save: {e}")
 
         processed_final_games[game_pk_str] = final_stamp
 
         log(
-            f"[BOT] Game {game_pk} complete | "
+            f"Game {game_pk} complete | "
             f"Saves found: {game_saves} | "
             f"Blown saves found: {game_blown} | "
             f"Posted: {game_posted}"
@@ -454,7 +454,7 @@ async def process_games() -> None:
     save_state(state)
 
     log(
-        f"[BOT] Loop summary | "
+        f"Loop summary | "
         f"Final games seen: {total_final_games_seen} | "
         f"New finals processed: {total_new_final_games} | "
         f"Saves found: {total_saves_found} | "
@@ -466,37 +466,39 @@ async def process_games() -> None:
 async def polling_loop() -> None:
     await client.wait_until_ready()
 
-    log("[BOT] === CLOSER ALERT BOT STARTED ===")
-    log(f"[BOT] Poll interval: {POLL_MINUTES} minutes")
-    log(f"[BOT] State file: {STATE_FILE}")
+    log("=== CLOSER ALERT BOT STARTED ===")
+    log(f"Poll interval: {POLL_MINUTES} minutes")
+    log(f"State file: {STATE_FILE}")
 
     while not client.is_closed():
         current_et = now_et().strftime("%Y-%m-%d %I:%M:%S %p %Z")
-        log(f"[BOT] Loop start | ET time: {current_et}")
+        log(f"Loop start | ET time: {current_et}")
 
         try:
             if in_quiet_hours():
-                log("[BOT] Quiet hours active (2:00 AM ET - 1:00 PM ET). Skipping this loop.")
+                log("Quiet hours active (2:00 AM ET - 1:00 PM ET). Skipping this loop.")
             else:
                 await process_games()
         except Exception as e:
-            log(f"[BOT] ERROR: {e}")
+            log(f"ERROR: {e}")
 
-        log(f"[BOT] Sleeping {POLL_MINUTES} minutes")
+        log(f"Sleeping {POLL_MINUTES} minutes")
         await asyncio.sleep(POLL_MINUTES * 60)
 
 
 @client.event
 async def on_ready():
-    log(f"[BOT] Logged in as {client.user}")
+    log(f"Logged in as {client.user}")
     if not hasattr(client, "polling_task"):
         client.polling_task = asyncio.create_task(polling_loop())
+
 
 if not DISCORD_TOKEN:
     raise RuntimeError("CLOSER_BOT_TOKEN is not set")
 
 if not DISCORD_CHANNEL_ID:
     raise RuntimeError("DISCORD_CHANNEL_ID is not set")
+
 
 async def start_closer_bot():
     await client.start(DISCORD_TOKEN)

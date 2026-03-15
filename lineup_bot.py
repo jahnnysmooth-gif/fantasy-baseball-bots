@@ -88,7 +88,7 @@ WEATHER_HINT_RE = re.compile(r"(rain|precipitation|wind|mph|degrees|°)", re.IGN
 
 
 def log(msg: str) -> None:
-    print(f"[BOT] {msg}", flush=True)
+    print(f"[LINEUP] {msg}", flush=True)
 
 
 def load_state():

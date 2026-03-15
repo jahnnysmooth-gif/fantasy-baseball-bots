@@ -162,7 +162,7 @@ PAGE_HEADER_TOKENS = {"NAME", "POS", "EST. RETURN DATE", "STATUS", "COMMENT"}
 
 
 def log(msg: str) -> None:
-    print(f"[BOT] {msg}", flush=True)
+    print(f"[INJURY] {msg}", flush=True)
 
 
 def clean_text(text: str) -> str:
