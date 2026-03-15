@@ -9,8 +9,12 @@ from lineup_bot import start_lineup_bot
 from news_bot import start_news_bot
 
 
+# ensure persistent data directory exists
+DATA_DIR = "/data"
+os.makedirs(DATA_DIR, exist_ok=True)
+
 # persistent state file for news bot
-NEWS_STATE_FILE = "/data/news_posted_ids.json"
+NEWS_STATE_FILE = f"{DATA_DIR}/news_posted_ids.json"
 
 if not os.path.exists(NEWS_STATE_FILE):
     with open(NEWS_STATE_FILE, "w") as f:
@@ -23,7 +27,7 @@ async def main():
         start_closer_bot(),
         start_injury_bot(),
         start_lineup_bot(),
-        start_news_bot(),   # NEW NEWS BOT
+        start_news_bot(),
     )
 
 
