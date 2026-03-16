@@ -1,5 +1,6 @@
 import json
 import os
+import re
 from datetime import datetime
 
 import requests
@@ -8,88 +9,105 @@ from bs4 import BeautifulSoup
 STATE_FILE = "state/closers/closer_depth_chart.json"
 URL = "https://closermonkey.com"
 
-TEAM_NAME_TO_ABBR = {
-    "Arizona Diamondbacks": "ARI",
-    "Atlanta Braves": "ATL",
-    "Baltimore Orioles": "BAL",
-    "Boston Red Sox": "BOS",
-    "Chicago Cubs": "CHC",
-    "Chicago White Sox": "CWS",
-    "Cincinnati Reds": "CIN",
-    "Cleveland Guardians": "CLE",
-    "Colorado Rockies": "COL",
-    "Detroit Tigers": "DET",
-    "Houston Astros": "HOU",
-    "Kansas City Royals": "KC",
-    "Los Angeles Angels": "LAA",
-    "Los Angeles Dodgers": "LAD",
-    "Miami Marlins": "MIA",
-    "Milwaukee Brewers": "MIL",
-    "Minnesota Twins": "MIN",
-    "New York Mets": "NYM",
-    "New York Yankees": "NYY",
-    "Athletics": "ATH",
-    "The Athletics": "ATH",
-    "Oakland Athletics": "ATH",
-    "Philadelphia Phillies": "PHI",
-    "Pittsburgh Pirates": "PIT",
-    "San Diego Padres": "SD",
-    "San Francisco Giants": "SF",
-    "Seattle Mariners": "SEA",
-    "St. Louis Cardinals": "STL",
-    "Tampa Bay Rays": "TB",
-    "Texas Rangers": "TEX",
-    "Toronto Blue Jays": "TOR",
-    "Washington Nationals": "WSH",
-}
-
-VALID_TEAM_ABBRS = {
+TEAM_ABBRS = {
     "ARI", "ATL", "BAL", "BOS", "CHC", "CWS", "CIN", "CLE", "COL", "DET",
     "HOU", "KC", "LAA", "LAD", "MIA", "MIL", "MIN", "NYM", "NYY", "ATH",
     "PHI", "PIT", "SD", "SF", "SEA", "STL", "TB", "TEX", "TOR", "WSH", "WAS"
 }
 
 
-def _clean_cell_text(td):
-    return " ".join(td.stripped_strings).strip()
-
-
-def _resolve_team(raw_team: str) -> str:
-    raw_team = raw_team.strip()
-
-    if raw_team in TEAM_NAME_TO_ABBR:
-        return TEAM_NAME_TO_ABBR[raw_team]
-
-    upper = raw_team.upper()
-    if upper == "WAS":
+def _normalize_team(team: str) -> str:
+    team = team.strip().upper()
+    if team == "WAS":
         return "WSH"
-    if upper in VALID_TEAM_ABBRS:
-        return upper
-
-    return ""
+    return team
 
 
-def _parse_team_block(cols, start_index):
-    if len(cols) < start_index + 4:
-        return None, None
+def _clean_player_name(name: str) -> str:
+    name = name.strip()
+    # remove committee asterisks like *Jax*
+    name = name.replace("*", "")
+    # collapse whitespace
+    name = re.sub(r"\s+", " ", name)
+    return name.strip()
 
-    raw_team = _clean_cell_text(cols[start_index])
-    team = _resolve_team(raw_team)
-    if not team:
-        return None, None
 
-    closer = _clean_cell_text(cols[start_index + 1])
-    next_man = _clean_cell_text(cols[start_index + 2])
-    second = _clean_cell_text(cols[start_index + 3])
+def _extract_chart_lines(text: str) -> list[str]:
+    lines = [line.strip() for line in text.splitlines()]
+    lines = [line for line in lines if line]
 
-    if not closer and not next_man and not second:
-        return None, None
+    start_idx = None
+    end_idx = None
 
-    return team, {
-        "closer": closer,
-        "next": next_man,
-        "second": second,
-    }
+    for i, line in enumerate(lines):
+        if "Updated MLB Closer Depth Chart" in line:
+            start_idx = i
+            break
+
+    if start_idx is None:
+        return []
+
+    for i in range(start_idx, len(lines)):
+        if lines[i].startswith("* = closer-by-committee"):
+            end_idx = i
+            break
+
+    if end_idx is None:
+        return []
+
+    return lines[start_idx:end_idx]
+
+
+def _parse_depth_chart_from_text(text: str) -> dict:
+    lines = _extract_chart_lines(text)
+    teams = {}
+
+    if not lines:
+        return teams
+
+    # We only want the actual chart rows, which begin with a team abbr
+    chart_rows = []
+    for line in lines:
+        if re.match(r"^(ARI|ATL|BAL|BOS|CHC|CWS|CIN|CLE|COL|DET|HOU|KC|LAA|LAD|MIA|MIL|MIN|NYM|NYY|ATH|PHI|PIT|SD|SF|SEA|STL|TB|TEX|TOR|WSH|WAS)\b", line):
+            chart_rows.append(line)
+
+    # Each row is two side-by-side team blocks:
+    # BAL Helsley Wells Akin 3/13/26 ATL Iglesias R Suárez Lee 3/13/26
+    pattern = re.compile(
+        r"^(?P<t1>ARI|ATL|BAL|BOS|CHC|CWS|CIN|CLE|COL|DET|HOU|KC|LAA|LAD|MIA|MIL|MIN|NYM|NYY|ATH|PHI|PIT|SD|SF|SEA|STL|TB|TEX|TOR|WSH|WAS)\s+"
+        r"(?P<c1>.+?)\s+"
+        r"(?P<n1>.+?)\s+"
+        r"(?P<s1>.+?)\s+"
+        r"(?P<d1>\d{1,2}/\d{1,2}/\d{2})\s+"
+        r"(?P<t2>ARI|ATL|BAL|BOS|CHC|CWS|CIN|CLE|COL|DET|HOU|KC|LAA|LAD|MIA|MIL|MIN|NYM|NYY|ATH|PHI|PIT|SD|SF|SEA|STL|TB|TEX|TOR|WSH|WAS)\s+"
+        r"(?P<c2>.+?)\s+"
+        r"(?P<n2>.+?)\s+"
+        r"(?P<s2>.+?)\s+"
+        r"(?P<d2>\d{1,2}/\d{1,2}/\d{2})$"
+    )
+
+    for row in chart_rows:
+        m = pattern.match(row)
+        if not m:
+            print(f"[CLOSER WATCH] Could not parse row: {row}", flush=True)
+            continue
+
+        t1 = _normalize_team(m.group("t1"))
+        t2 = _normalize_team(m.group("t2"))
+
+        teams[t1] = {
+            "closer": _clean_player_name(m.group("c1")),
+            "next": _clean_player_name(m.group("n1")),
+            "second": _clean_player_name(m.group("s1")),
+        }
+
+        teams[t2] = {
+            "closer": _clean_player_name(m.group("c2")),
+            "next": _clean_player_name(m.group("n2")),
+            "second": _clean_player_name(m.group("s2")),
+        }
+
+    return teams
 
 
 def fetch_closer_depth_chart():
@@ -103,23 +121,9 @@ def fetch_closer_depth_chart():
         return {}
 
     soup = BeautifulSoup(r.text, "html.parser")
-    teams = {}
+    page_text = soup.get_text("\n", strip=True)
 
-    rows = soup.select("table tr")
-
-    for row in rows:
-        cols = row.find_all("td")
-        if len(cols) < 4:
-            continue
-
-        team_left, data_left = _parse_team_block(cols, 0)
-        if team_left and data_left:
-            teams[team_left] = data_left
-
-        if len(cols) >= 8:
-            team_right, data_right = _parse_team_block(cols, 4)
-            if team_right and data_right:
-                teams[team_right] = data_right
+    teams = _parse_depth_chart_from_text(page_text)
 
     if len(teams) < 25 or len(teams) > 35:
         print(
