@@ -29,6 +29,7 @@ TEAM_NAME_TO_ABBR = {
     "New York Mets": "NYM",
     "New York Yankees": "NYY",
     "Athletics": "ATH",
+    "The Athletics": "ATH",
     "Oakland Athletics": "ATH",
     "Philadelphia Phillies": "PHI",
     "Pittsburgh Pirates": "PIT",
@@ -42,7 +43,11 @@ TEAM_NAME_TO_ABBR = {
     "Washington Nationals": "WSH",
 }
 
-VALID_TEAM_ABBRS = set(TEAM_NAME_TO_ABBR.values())
+VALID_TEAM_ABBRS = {
+    "ARI", "ATL", "BAL", "BOS", "CHC", "CWS", "CIN", "CLE", "COL", "DET",
+    "HOU", "KC", "LAA", "LAD", "MIA", "MIL", "MIN", "NYM", "NYY", "ATH",
+    "PHI", "PIT", "SD", "SF", "SEA", "STL", "TB", "TEX", "TOR", "WSH", "WAS"
+}
 
 
 def _clean_cell_text(td):
@@ -51,11 +56,45 @@ def _clean_cell_text(td):
 
 def _resolve_team(raw_team: str) -> str:
     raw_team = raw_team.strip()
+
     if raw_team in TEAM_NAME_TO_ABBR:
         return TEAM_NAME_TO_ABBR[raw_team]
-    if raw_team.upper() in VALID_TEAM_ABBRS:
-        return raw_team.upper()
+
+    upper = raw_team.upper()
+    if upper == "WAS":
+        return "WSH"
+    if upper in VALID_TEAM_ABBRS:
+        return upper
+
     return ""
+
+
+def _parse_team_block(cols, start_index):
+    """
+    Parse one 4-column team block:
+    team | closer | next | second
+    Returns (team_abbr, data_dict) or (None, None)
+    """
+    if len(cols) < start_index + 4:
+        return None, None
+
+    raw_team = _clean_cell_text(cols[start_index])
+    team = _resolve_team(raw_team)
+    if not team:
+        return None, None
+
+    closer = _clean_cell_text(cols[start_index + 1])
+    next_man = _clean_cell_text(cols[start_index + 2])
+    second = _clean_cell_text(cols[start_index + 3])
+
+    if not closer and not next_man and not second:
+        return None, None
+
+    return team, {
+        "closer": closer,
+        "next": next_man,
+        "second": second,
+    }
 
 
 def fetch_closer_depth_chart():
@@ -71,38 +110,33 @@ def fetch_closer_depth_chart():
     soup = BeautifulSoup(r.text, "html.parser")
     teams = {}
 
-    # Closer Monkey has multiple tables/rows on the page.
-    # We only want rows whose first column resolves to a real MLB team.
     rows = soup.select("table tr")
 
     for row in rows:
         cols = row.find_all("td")
+
+        # We expect either:
+        # 4 columns  -> one team block
+        # 8+ columns -> two team blocks on same row
         if len(cols) < 4:
             continue
 
-        raw_team = _clean_cell_text(cols[0])
-        team = _resolve_team(raw_team)
+        # left side
+        team_left, data_left = _parse_team_block(cols, 0)
+        if team_left and data_left:
+            teams[team_left] = data_left
 
-        if not team:
-            continue
+        # right side
+        if len(cols) >= 8:
+            team_right, data_right = _parse_team_block(cols, 4)
+            if team_right and data_right:
+                teams[team_right] = data_right
 
-        closer = _clean_cell_text(cols[1])
-        next_man = _clean_cell_text(cols[2])
-        second = _clean_cell_text(cols[3])
-
-        # Ignore junk rows
-        if not closer and not next_man and not second:
-            continue
-
-        teams[team] = {
-            "closer": closer,
-            "next": next_man,
-            "second": second,
-        }
-
-    # Hard guard: if we somehow parsed nonsense again, do not save it
     if len(teams) < 25 or len(teams) > 35:
-        print(f"[CLOSER WATCH] Parsed suspicious bullpen count: {len(teams)}. Refusing to save.", flush=True)
+        print(
+            f"[CLOSER WATCH] Parsed suspicious bullpen count: {len(teams)}. Refusing to save.",
+            flush=True,
+        )
         return {}
 
     os.makedirs(os.path.dirname(STATE_FILE), exist_ok=True)
@@ -138,7 +172,7 @@ if __name__ == "__main__":
 
     if teams:
         print("[CLOSER WATCH] Sample entries:", flush=True)
-        for i, (team, roles) in enumerate(teams.items()):
+        for i, (team, roles) in enumerate(sorted(teams.items())):
             print(f"{team}: {roles}", flush=True)
             if i >= 4:
                 break
