@@ -1,8 +1,9 @@
-import requests
-from bs4 import BeautifulSoup
 import json
 import os
 from datetime import datetime
+
+import requests
+from bs4 import BeautifulSoup
 
 STATE_FILE = "state/closers/closer_depth_chart.json"
 URL = "https://closermonkey.com"
@@ -41,40 +42,56 @@ TEAM_NAME_TO_ABBR = {
     "Washington Nationals": "WSH",
 }
 
+VALID_TEAM_ABBRS = set(TEAM_NAME_TO_ABBR.values())
+
+
+def _clean_cell_text(td):
+    return " ".join(td.stripped_strings).strip()
+
+
+def _resolve_team(raw_team: str) -> str:
+    raw_team = raw_team.strip()
+    if raw_team in TEAM_NAME_TO_ABBR:
+        return TEAM_NAME_TO_ABBR[raw_team]
+    if raw_team.upper() in VALID_TEAM_ABBRS:
+        return raw_team.upper()
+    return ""
+
 
 def fetch_closer_depth_chart():
-    print("[CLOSER WATCH] Fetching Closer Monkey depth chart")
+    print("[CLOSER WATCH] Fetching Closer Monkey depth chart", flush=True)
 
     try:
         r = requests.get(URL, timeout=20)
         r.raise_for_status()
     except requests.RequestException as e:
-        print(f"[CLOSER WATCH] Failed to load site: {e}")
+        print(f"[CLOSER WATCH] Failed to load site: {e}", flush=True)
         return {}
 
     soup = BeautifulSoup(r.text, "html.parser")
     teams = {}
 
-    rows = soup.select("table tbody tr")
-
-    if not rows:
-        print("[CLOSER WATCH] No table rows found on page")
-        return {}
+    # Closer Monkey has multiple tables/rows on the page.
+    # We only want rows whose first column resolves to a real MLB team.
+    rows = soup.select("table tr")
 
     for row in rows:
         cols = row.find_all("td")
-
         if len(cols) < 4:
             continue
 
-        raw_team = cols[0].get_text(" ", strip=True)
-        team = TEAM_NAME_TO_ABBR.get(raw_team, raw_team)
-
-        closer = cols[1].get_text(" ", strip=True)
-        next_man = cols[2].get_text(" ", strip=True)
-        second = cols[3].get_text(" ", strip=True)
+        raw_team = _clean_cell_text(cols[0])
+        team = _resolve_team(raw_team)
 
         if not team:
+            continue
+
+        closer = _clean_cell_text(cols[1])
+        next_man = _clean_cell_text(cols[2])
+        second = _clean_cell_text(cols[3])
+
+        # Ignore junk rows
+        if not closer and not next_man and not second:
             continue
 
         teams[team] = {
@@ -83,8 +100,9 @@ def fetch_closer_depth_chart():
             "second": second,
         }
 
-    if not teams:
-        print("[CLOSER WATCH] Parsed 0 bullpens")
+    # Hard guard: if we somehow parsed nonsense again, do not save it
+    if len(teams) < 25 or len(teams) > 35:
+        print(f"[CLOSER WATCH] Parsed suspicious bullpen count: {len(teams)}. Refusing to save.", flush=True)
         return {}
 
     os.makedirs(os.path.dirname(STATE_FILE), exist_ok=True)
@@ -98,7 +116,7 @@ def fetch_closer_depth_chart():
     with open(STATE_FILE, "w", encoding="utf-8") as f:
         json.dump(payload, f, indent=2, ensure_ascii=False)
 
-    print(f"[CLOSER WATCH] Stored {len(teams)} bullpens in {STATE_FILE}")
+    print(f"[CLOSER WATCH] Stored {len(teams)} bullpens in {STATE_FILE}", flush=True)
     return teams
 
 
@@ -111,7 +129,7 @@ def load_depth_chart():
             data = json.load(f)
         return data.get("teams", {})
     except Exception as e:
-        print(f"[CLOSER WATCH] Failed to load saved depth chart: {e}")
+        print(f"[CLOSER WATCH] Failed to load saved depth chart: {e}", flush=True)
         return {}
 
 
@@ -119,8 +137,8 @@ if __name__ == "__main__":
     teams = fetch_closer_depth_chart()
 
     if teams:
-        print("[CLOSER WATCH] Sample entries:")
+        print("[CLOSER WATCH] Sample entries:", flush=True)
         for i, (team, roles) in enumerate(teams.items()):
-            print(f"{team}: {roles}")
+            print(f"{team}: {roles}", flush=True)
             if i >= 4:
                 break
