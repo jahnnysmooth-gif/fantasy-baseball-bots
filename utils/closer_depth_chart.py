@@ -7,143 +7,160 @@ import requests
 from bs4 import BeautifulSoup
 
 STATE_FILE = "state/closers/closer_depth_chart.json"
-URL = "https://closermonkey.com"
+BASE_URL = "https://closermonkey.com"
 
-TEAM_ABBRS = {
-    "ARI", "ATL", "BAL", "BOS", "CHC", "CWS", "CIN", "CLE", "COL", "DET",
-    "HOU", "KC", "LAA", "LAD", "MIA", "MIL", "MIN", "NYM", "NYY", "ATH",
-    "PHI", "PIT", "SD", "SF", "SEA", "STL", "TB", "TEX", "TOR", "WSH", "WAS"
+TEAM_NAME_TO_ABBR = {
+    "Arizona Diamondbacks": "ARI",
+    "Atlanta Braves": "ATL",
+    "Baltimore Orioles": "BAL",
+    "Boston Red Sox": "BOS",
+    "Chicago Cubs": "CHC",
+    "Chicago White Sox": "CWS",
+    "Cincinnati Reds": "CIN",
+    "Cleveland Guardians": "CLE",
+    "Colorado Rockies": "COL",
+    "Detroit Tigers": "DET",
+    "Houston Astros": "HOU",
+    "Kansas City Royals": "KC",
+    "Los Angeles Angels": "LAA",
+    "Los Angeles Dodgers": "LAD",
+    "Miami Marlins": "MIA",
+    "Milwaukee Brewers": "MIL",
+    "Minnesota Twins": "MIN",
+    "New York Mets": "NYM",
+    "New York Yankees": "NYY",
+    "Athletics": "ATH",
+    "The Athletics": "ATH",
+    "Oakland Athletics": "ATH",
+    "Philadelphia Phillies": "PHI",
+    "Pittsburgh Pirates": "PIT",
+    "San Diego Padres": "SD",
+    "San Francisco Giants": "SF",
+    "Seattle Mariners": "SEA",
+    "St. Louis Cardinals": "STL",
+    "Tampa Bay Rays": "TB",
+    "Texas Rangers": "TEX",
+    "Toronto Blue Jays": "TOR",
+    "Washington Nationals": "WSH",
+}
+
+TEAM_PAGE_PATHS = {
+    "/test/archives/al-east/bal/": "BAL",
+    "/test/archives/al-east/bos/": "BOS",
+    "/test/archives/al-east/nyy/": "NYY",
+    "/test/archives/al-east/tb/": "TB",
+    "/test/archives/al-east/tor/": "TOR",
+    "/test/archives/al-central/chw/": "CWS",
+    "/test/archives/al-central/cle/": "CLE",
+    "/test/archives/al-central/det/": "DET",
+    "/test/archives/al-central/kc/": "KC",
+    "/test/archives/al-central/min/": "MIN",
+    "/test/archives/al-west/hou/": "HOU",
+    "/test/archives/al-west/laa/": "LAA",
+    "/test/archives/al-west/sea/": "SEA",
+    "/test/archives/al-west/tex/": "TEX",
+    "/test/archives/al-west/oak/": "ATH",
+    "/test/archives/nl-east/atl/": "ATL",
+    "/test/archives/nl-east/mia/": "MIA",
+    "/test/archives/nl-east/nym/": "NYM",
+    "/test/archives/nl-east/phi/": "PHI",
+    "/test/archives/nl-east/was/": "WSH",
+    "/test/archives/nl-central/chc/": "CHC",
+    "/test/archives/nl-central/cin/": "CIN",
+    "/test/archives/nl-central/mil/": "MIL",
+    "/test/archives/nl-central/pit/": "PIT",
+    "/test/archives/nl-central/stl/": "STL",
+    "/test/archives/nl-west/ari/": "ARI",
+    "/test/archives/nl-west/col/": "COL",
+    "/test/archives/nl-west/lad/": "LAD",
+    "/test/archives/nl-west/sd/": "SD",
+    "/test/archives/nl-west/sf/": "SF",
 }
 
 
-def _normalize_team(team: str) -> str:
-    team = team.strip().upper()
-    if team == "WAS":
-        return "WSH"
-    return team
-
-
-def _clean_player_name(name: str) -> str:
-    name = name.strip()
+def _clean_name(name: str) -> str:
     name = name.replace("*", "")
     name = re.sub(r"\s+", " ", name)
     return name.strip()
+
+
+def _extract_team_links(home_html: str) -> dict:
+    soup = BeautifulSoup(home_html, "html.parser")
+    links = {}
+
+    for a in soup.find_all("a", href=True):
+        href = a["href"].strip()
+        if href in TEAM_PAGE_PATHS:
+            links[TEAM_PAGE_PATHS[href]] = href
+
+    return links
+
+
+def _parse_team_page(team_abbr: str, html: str) -> dict | None:
+    soup = BeautifulSoup(html, "html.parser")
+    text = soup.get_text("\n", strip=True)
+
+    # Look for the line after the header:
+    # Closer 1st in line 2nd in line 2027 Closer Updated
+    # BAL Ryan Helsley Tyler Wells Keegan Akin TBD 3/15/26
+    pattern = re.compile(
+        rf"{team_abbr}\s+(.*?)\s+(.*?)\s+(.*?)\s+(?:TBD\s+)?\d{{1,2}}/\d{{1,2}}/\d{{2}}",
+        re.DOTALL,
+    )
+
+    m = pattern.search(text)
+    if not m:
+        return None
+
+    return {
+        "closer": _clean_name(m.group(1)),
+        "next": _clean_name(m.group(2)),
+        "second": _clean_name(m.group(3)),
+    }
 
 
 def fetch_closer_depth_chart():
     print("[CLOSER WATCH] Fetching Closer Monkey depth chart", flush=True)
 
     try:
-        r = requests.get(URL, timeout=20)
+        r = requests.get(BASE_URL, timeout=20)
         r.raise_for_status()
+        home_html = r.text
     except requests.RequestException as e:
-        print(f"[CLOSER WATCH] Failed to load site: {e}", flush=True)
+        print(f"[CLOSER WATCH] Failed to load homepage: {e}", flush=True)
         return {}
 
-    soup = BeautifulSoup(r.text, "html.parser")
-    text = soup.get_text(" ", strip=True)
-
-    # Normalize whitespace
-    text = re.sub(r"\s+", " ", text)
-
-    # Find the chart section
-    start_marker = "Updated MLB Closer Depth Chart"
-    end_marker = "* = closer-by-committee"
-
-    start_idx = text.find(start_marker)
-    end_idx = text.find(end_marker)
-
-    if start_idx == -1 or end_idx == -1 or end_idx <= start_idx:
-        print("[CLOSER WATCH] Could not locate depth chart text block", flush=True)
+    team_links = _extract_team_links(home_html)
+    if len(team_links) < 25:
+        print(f"[CLOSER WATCH] Found only {len(team_links)} team links. Refusing to save.", flush=True)
         return {}
-
-    chart_text = text[start_idx:end_idx]
-
-    # Break into tokens
-    tokens = chart_text.split()
-
-    # Keep only from first team abbreviation onward
-    first_team_idx = None
-    for i, tok in enumerate(tokens):
-        if tok.upper() in TEAM_ABBRS:
-            first_team_idx = i
-            break
-
-    if first_team_idx is None:
-        print("[CLOSER WATCH] No team abbreviations found in chart text", flush=True)
-        return {}
-
-    tokens = tokens[first_team_idx:]
 
     teams = {}
-    i = 0
 
-    while i < len(tokens):
-        tok = tokens[i].upper()
-
-        if tok not in TEAM_ABBRS:
-            i += 1
+    for team_abbr, path in team_links.items():
+        try:
+            r = requests.get(f"{BASE_URL}{path}", timeout=20)
+            r.raise_for_status()
+        except requests.RequestException as e:
+            print(f"[CLOSER WATCH] Failed to load {team_abbr} page: {e}", flush=True)
             continue
 
-        team = _normalize_team(tok)
-        i += 1
+        parsed = _parse_team_page(team_abbr, r.text)
+        if not parsed:
+            print(f"[CLOSER WATCH] Failed to parse team page for {team_abbr}", flush=True)
+            continue
 
-        fields = []
-        current = []
-
-        # We want: closer, next, second, date
-        while i < len(tokens) and len(fields) < 4:
-            t = tokens[i]
-
-            # stop if another team starts unexpectedly
-            if t.upper() in TEAM_ABBRS and len(fields) < 3:
-                break
-
-            # date ends a team block
-            if re.fullmatch(r"\d{1,2}/\d{1,2}/\d{2}", t):
-                if current:
-                    fields.append(" ".join(current).strip())
-                    current = []
-                fields.append(t)
-                i += 1
-                break
-
-            # separator "/" splits closer / next / second
-            if t == "/":
-                fields.append(" ".join(current).strip())
-                current = []
-            else:
-                current.append(t)
-
-            i += 1
-
-        if current:
-            fields.append(" ".join(current).strip())
-
-        # Need at least closer / next / second
-        if len(fields) >= 3:
-            closer = _clean_player_name(fields[0])
-            next_man = _clean_player_name(fields[1])
-            second = _clean_player_name(fields[2])
-
-            teams[team] = {
-                "closer": closer,
-                "next": next_man,
-                "second": second,
-            }
+        teams[team_abbr] = parsed
 
     if len(teams) < 25 or len(teams) > 35:
-        print(
-            f"[CLOSER WATCH] Parsed suspicious bullpen count: {len(teams)}. Refusing to save.",
-            flush=True,
-        )
+        print(f"[CLOSER WATCH] Parsed suspicious bullpen count: {len(teams)}. Refusing to save.", flush=True)
         return {}
 
     os.makedirs(os.path.dirname(STATE_FILE), exist_ok=True)
 
     payload = {
         "last_update_utc": datetime.utcnow().isoformat(),
-        "source": URL,
+        "source": BASE_URL,
         "teams": teams,
     }
 
@@ -169,7 +186,6 @@ def load_depth_chart():
 
 if __name__ == "__main__":
     teams = fetch_closer_depth_chart()
-
     if teams:
         print("[CLOSER WATCH] Sample entries:", flush=True)
         for i, (team, roles) in enumerate(sorted(teams.items())):
