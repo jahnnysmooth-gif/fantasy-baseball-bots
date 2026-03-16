@@ -603,12 +603,19 @@ def fetch_fantasypros_player_news() -> List[dict]:
     response = SESSION.get(FANTASYPROS_PLAYER_NEWS_URL, timeout=30)
     response.raise_for_status()
 
+    print(f"[NEWS] FantasyPros status: {response.status_code}")
+    print(f"[NEWS] FantasyPros final URL: {response.url}")
+    print(f"[NEWS] FantasyPros html length: {len(response.text)}")
+    print(response.text[:3000])
+
     soup = BeautifulSoup(response.text, "html.parser")
     raw_text = soup.get_text("\n", strip=True)
     items = parse_fantasypros_items_from_text(raw_text)
 
     if not items:
-        raise RuntimeError("Could not parse any FantasyPros player news items")
+    with open("state/fantasypros_debug.html", "w", encoding="utf-8") as f:
+        f.write(response.text)
+    raise RuntimeError("Could not parse any FantasyPros player news items")
 
     return items
 
