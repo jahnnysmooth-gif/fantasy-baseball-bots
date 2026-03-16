@@ -64,7 +64,6 @@ def fetch_news_items():
 
     soup = BeautifulSoup(response.text, "html.parser")
 
-    # Try a few selectors in order of likelihood.
     containers = (
         soup.select(".player-news-item")
         or soup.select(".news-item")
@@ -72,6 +71,10 @@ def fetch_news_items():
     )
 
     print(f"[NEWS] Candidate containers found: {len(containers)}")
+
+    for idx, container in enumerate(containers[:2]):
+        html = str(container)
+        print(f"[NEWS] Container {idx} html preview: {html[:2000]}")
 
     items = []
 
@@ -96,7 +99,6 @@ def fetch_news_items():
         summary = ""
         timestamp = ""
 
-        # Headline guess
         for sel in ["h1", "h2", "h3", "h4", ".headline", ".news-title", ".title"]:
             el = container.select_one(sel)
             if el:
@@ -104,7 +106,6 @@ def fetch_news_items():
                 if headline:
                     break
 
-        # Player guess
         for sel in [".player-name", ".name", ".player", "strong", "b"]:
             el = container.select_one(sel)
             if el:
@@ -112,7 +113,6 @@ def fetch_news_items():
                 if player:
                     break
 
-        # Timestamp guess
         for sel in [".timestamp", ".time", "time", ".date"]:
             el = container.select_one(sel)
             if el:
@@ -120,7 +120,6 @@ def fetch_news_items():
                 if timestamp:
                     break
 
-        # Summary guess
         for sel in [".news-content", ".content", ".summary", ".excerpt", "p"]:
             el = container.select_one(sel)
             if el:
@@ -128,7 +127,6 @@ def fetch_news_items():
                 if summary:
                     break
 
-        # Fallbacks
         if not headline:
             headline = text[:160]
         if not player:
