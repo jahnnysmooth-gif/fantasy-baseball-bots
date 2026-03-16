@@ -70,11 +70,6 @@ def _resolve_team(raw_team: str) -> str:
 
 
 def _parse_team_block(cols, start_index):
-    """
-    Parse one 4-column team block:
-    team | closer | next | second
-    Returns (team_abbr, data_dict) or (None, None)
-    """
     if len(cols) < start_index + 4:
         return None, None
 
@@ -114,19 +109,13 @@ def fetch_closer_depth_chart():
 
     for row in rows:
         cols = row.find_all("td")
-
-        # We expect either:
-        # 4 columns  -> one team block
-        # 8+ columns -> two team blocks on same row
         if len(cols) < 4:
             continue
 
-        # left side
         team_left, data_left = _parse_team_block(cols, 0)
         if team_left and data_left:
             teams[team_left] = data_left
 
-        # right side
         if len(cols) >= 8:
             team_right, data_right = _parse_team_block(cols, 4)
             if team_right and data_right:
