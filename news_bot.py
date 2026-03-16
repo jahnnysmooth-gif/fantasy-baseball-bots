@@ -1,6 +1,7 @@
 import asyncio
 import json
 import os
+from typing import Optional, Set
 
 import discord
 import requests
@@ -29,82 +30,144 @@ SESSION.headers.update(
 )
 
 
-def load_ids():
+def load_ids() -> Set[str]:
     if not os.path.exists(STATE_FILE):
         return set()
-
     try:
         with open(STATE_FILE, "r", encoding="utf-8") as f:
             data = json.load(f)
-        return set(str(x) for x in data)
-    except Exception:
-        return set()
+        if isinstance(data, list):
+            return {str(x) for x in data}
+    except Exception as e:
+        print(f"[NEWS] Failed loading state: {e}")
+    return set()
 
 
-def save_ids(ids):
-    with open(STATE_FILE, "w", encoding="utf-8") as f:
-        json.dump(sorted(list(ids)), f, indent=2)
+def save_ids(ids: Set[str]) -> None:
+    try:
+        with open(STATE_FILE, "w", encoding="utf-8") as f:
+            json.dump(sorted(ids), f, indent=2)
+    except Exception as e:
+        print(f"[NEWS] Failed saving state: {e}")
 
 
-def clean_text(text: str) -> str:
+def clean_text(text: Optional[str]) -> str:
     return " ".join((text or "").split()).strip()
 
 
-def fetch_news():
+def fetch_news_items():
     response = SESSION.get(NEWS_URL, timeout=30)
     response.raise_for_status()
-
-    soup = BeautifulSoup(response.text, "html.parser")
 
     print(f"[NEWS] FantasyPros status: {response.status_code}")
     print(f"[NEWS] FantasyPros html length: {len(response.text)}")
 
-    cards = soup.select(".player-news-item")
-    print(f"[NEWS] Found .player-news-item cards: {len(cards)}")
+    soup = BeautifulSoup(response.text, "html.parser")
 
-    news = []
+    # Try a few selectors in order of likelihood.
+    containers = (
+        soup.select(".player-news-item")
+        or soup.select(".news-item")
+        or soup.select("article")
+    )
 
-    for card in cards:
-        player_el = card.select_one(".player-name")
-        headline_el = card.select_one("h3")
-        summary_el = card.select_one(".news-content")
-        timestamp_el = card.select_one(".timestamp")
+    print(f"[NEWS] Candidate containers found: {len(containers)}")
 
-        player = clean_text(player_el.get_text(" ", strip=True) if player_el else "")
-        headline = clean_text(headline_el.get_text(" ", strip=True) if headline_el else "")
-        summary = clean_text(summary_el.get_text(" ", strip=True) if summary_el else "")
-        timestamp = clean_text(timestamp_el.get_text(" ", strip=True) if timestamp_el else "")
+    items = []
 
-        if not player and not headline and not summary:
+    for idx, container in enumerate(containers):
+        text = clean_text(container.get_text(" ", strip=True))
+        if not text:
             continue
 
-        uid = f"{player}|{headline}|{summary[:120]}"
+        links = container.select("a[href]")
+        link = NEWS_URL
+        for a in links:
+            href = a.get("href", "").strip()
+            if href:
+                if href.startswith("http://") or href.startswith("https://"):
+                    link = href
+                elif href.startswith("/"):
+                    link = "https://www.fantasypros.com" + href
+                break
 
-        news.append(
+        headline = ""
+        player = ""
+        summary = ""
+        timestamp = ""
+
+        # Headline guess
+        for sel in ["h1", "h2", "h3", "h4", ".headline", ".news-title", ".title"]:
+            el = container.select_one(sel)
+            if el:
+                headline = clean_text(el.get_text(" ", strip=True))
+                if headline:
+                    break
+
+        # Player guess
+        for sel in [".player-name", ".name", ".player", "strong", "b"]:
+            el = container.select_one(sel)
+            if el:
+                player = clean_text(el.get_text(" ", strip=True))
+                if player:
+                    break
+
+        # Timestamp guess
+        for sel in [".timestamp", ".time", "time", ".date"]:
+            el = container.select_one(sel)
+            if el:
+                timestamp = clean_text(el.get_text(" ", strip=True))
+                if timestamp:
+                    break
+
+        # Summary guess
+        for sel in [".news-content", ".content", ".summary", ".excerpt", "p"]:
+            el = container.select_one(sel)
+            if el:
+                summary = clean_text(el.get_text(" ", strip=True))
+                if summary:
+                    break
+
+        # Fallbacks
+        if not headline:
+            headline = text[:160]
+        if not player:
+            player = "FantasyPros MLB"
+        if not summary:
+            summary = text[:1000]
+
+        uid = f"{headline}|{summary[:120]}"
+
+        items.append(
             {
                 "id": uid,
-                "player": player or "MLB News",
-                "headline": headline or "Player News Update",
-                "summary": summary or "No summary available.",
+                "player": player,
+                "headline": headline,
+                "summary": summary,
                 "timestamp": timestamp,
-                "link": NEWS_URL,
+                "link": link,
             }
         )
 
-    if not news:
+    if not items:
         debug_path = os.path.join(STATE_DIR, "fantasypros_debug.html")
-        with open(debug_path, "w", encoding="utf-8") as f:
-            f.write(response.text)
+        try:
+            with open(debug_path, "w", encoding="utf-8") as f:
+                f.write(response.text)
+            print(f"[NEWS] Wrote debug HTML to {debug_path}")
+        except Exception as e:
+            print(f"[NEWS] Failed writing debug HTML: {e}")
+
         raise RuntimeError("Could not parse any FantasyPros player news items")
 
-    return news
+    return items
 
 
 class NewsBot(discord.Client):
     def __init__(self):
         intents = discord.Intents.default()
         super().__init__(intents=intents)
-        self.posted = load_ids()
+        self.posted_ids: Set[str] = load_ids()
         self.bg_task = None
         self.started_loop = False
 
@@ -147,19 +210,20 @@ class NewsBot(discord.Client):
 
         print("[NEWS] Checking FantasyPros player news page")
 
-        items = await asyncio.to_thread(fetch_news)
+        items = await asyncio.to_thread(fetch_news_items)
+
         print(f"[NEWS] Parsed items: {len(items)}")
-        print(f"[NEWS] Posted ID count: {len(self.posted)}")
+        print(f"[NEWS] Posted ID count: {len(self.posted_ids)}")
 
         new_posts = 0
 
         for item in reversed(items):
-            if item["id"] in self.posted:
+            if item["id"] in self.posted_ids:
                 continue
 
             embed = discord.Embed(
-                title=item["headline"],
-                description=item["summary"],
+                title=item["headline"][:256],
+                description=item["summary"][:3500],
                 url=item["link"],
                 color=0x2ECC71,
             )
@@ -177,11 +241,11 @@ class NewsBot(discord.Client):
                 print(f"[NEWS] Failed sending embed: {e}")
                 continue
 
-            self.posted.add(item["id"])
+            self.posted_ids.add(item["id"])
             new_posts += 1
             print(f"[NEWS] Posted: {item['player']} | {item['headline'][:100]}")
 
-        save_ids(self.posted)
+        save_ids(self.posted_ids)
         print(f"[NEWS] Done. New posts: {new_posts}")
 
 
