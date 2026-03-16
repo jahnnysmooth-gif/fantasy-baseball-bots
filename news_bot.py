@@ -613,9 +613,10 @@ def fetch_fantasypros_player_news() -> List[dict]:
     items = parse_fantasypros_items_from_text(raw_text)
 
     if not items:
-    with open("state/fantasypros_debug.html", "w", encoding="utf-8") as f:
-        f.write(response.text)
-    raise RuntimeError("Could not parse any FantasyPros player news items")
+        with open("state/fantasypros_debug.html", "w", encoding="utf-8") as f:
+            f.write(response.text)
+
+        raise RuntimeError("Could not parse any FantasyPros player news items")
 
     return items
 
