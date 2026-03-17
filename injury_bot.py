@@ -363,10 +363,20 @@ def parse_espn_injuries(html: str) -> list[dict]:
     return items
 
 
+def get_role_tag(position: str) -> str:
+    if position == "SP":
+        return "Starter"
+    if position in {"RP", "P"}:
+        return "Reliever"
+    return "Hitter"
+
+
 def build_embed(item: dict) -> discord.Embed:
     team = item["team"]
     color = TEAM_COLORS.get(team, DEFAULT_COLOR)
     logo_url = TEAM_LOGOS.get(team)
+    position = item["position"]
+    role_tag = get_role_tag(position)
 
     status_title = "🚑 MLB INJURY UPDATE"
     if item["status"] == "60-Day-IL":
@@ -377,16 +387,16 @@ def build_embed(item: dict) -> discord.Embed:
         status_title = "🚨 IL PLACEMENT"
 
     embed = discord.Embed(
-        title=item["player"],
+        title=f"{item['player']} | {team} | {position}",
         color=color,
         timestamp=datetime.now(ET)
     )
 
-    embed.description = f"**{status_title}**\n`{team} • {item['position']}`"
+    embed.description = f"**{status_title}**"
 
+    embed.add_field(name="Role", value=f"`{role_tag}`", inline=True)
     embed.add_field(name="Status", value=f"`{item['status']}`", inline=True)
     embed.add_field(name="Est. Return", value=f"`{short_date(item['est_return'])}`", inline=True)
-    embed.add_field(name="Source", value="`ESPN`", inline=True)
     embed.add_field(name="Update", value=clamp_update(item["comment"]), inline=False)
 
     if logo_url:
