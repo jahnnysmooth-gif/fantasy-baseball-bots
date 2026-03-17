@@ -15,6 +15,8 @@ TEAM_ABBRS = {
     "PHI", "PIT", "SD", "SF", "SEA", "STL", "TB", "TEX", "TOR", "WSH", "WAS"
 }
 
+DATE_RE = r"\d{1,2}/\d{1,2}/\d{2}"
+
 
 def _normalize_team(team: str) -> str:
     team = team.strip().upper()
@@ -29,6 +31,169 @@ def _clean_name(name: str) -> str:
     return name.strip()
 
 
+def _extract_chart_lines(soup: BeautifulSoup) -> list[str]:
+    text = soup.get_text("\n", strip=True)
+    lines = [line.strip() for line in text.splitlines() if line.strip()]
+
+    start_idx = None
+    end_idx = None
+
+    for i, line in enumerate(lines):
+        if "Updated MLB Closer Depth Chart" in line:
+            start_idx = i
+            break
+
+    if start_idx is None:
+        print("[CLOSER WATCH] Could not find chart header", flush=True)
+        return []
+
+    for i in range(start_idx, len(lines)):
+        if line := lines[i]:
+            if line.startswith("* = closer-by-committee"):
+                end_idx = i
+                break
+
+    if end_idx is None:
+        print("[CLOSER WATCH] Could not find chart footer", flush=True)
+        return []
+
+    chart_lines = lines[start_idx + 1:end_idx]
+
+    # drop repeated header row if present
+    cleaned = []
+    for line in chart_lines:
+        if "Closer 1st in line 2nd in line Updated" in line:
+            continue
+        cleaned.append(line)
+
+    return cleaned
+
+
+def _parse_team_block(block: str):
+    """
+    Parse a single team block of the form:
+      TB *Jax*Cleavinger*Baker 3/13/26
+      ATH *Leiter Jr.*Harris*Sterner 3/13/26
+      ATL Iglesias R Suárez Lee 3/13/26
+      WAS *Beeter*Henry*C Pérez 3/13/26
+    """
+    block = re.sub(r"\s+", " ", block).strip()
+
+    m = re.match(rf"^([A-Z]{{2,3}})\s+(.+?)\s+({DATE_RE})$", block)
+    if not m:
+        return None
+
+    team = _normalize_team(m.group(1))
+    payload = m.group(2).strip()
+
+    if team not in TEAM_ABBRS:
+        return None
+
+    # Split payload into three names.
+    # Strategy:
+    # 1) If there are committee markers, names are often wrapped with *...*
+    # 2) Otherwise fall back to space splitting with support for common multi-token names.
+
+    star_names = re.findall(r"\*([^*]+)\*", payload)
+    if len(star_names) == 3:
+        closer, next_man, second = [_clean_name(x) for x in star_names]
+        return team, closer, next_man, second
+
+    if len(star_names) == 2:
+        # one non-starred name remains outside the starred names
+        temp = payload
+        for s in star_names:
+            temp = temp.replace(f"*{s}*", " ").strip()
+        non_star = _clean_name(temp)
+        names = [_clean_name(star_names[0]), non_star, _clean_name(star_names[1])]
+        if len([n for n in names if n]) == 3:
+            return team, names[0], names[1], names[2]
+
+    if len(star_names) == 1:
+        temp = payload.replace(f"*{star_names[0]}*", " ").strip()
+        rest_tokens = temp.split()
+        if len(rest_tokens) >= 2:
+            closer = _clean_name(star_names[0])
+            next_man = _clean_name(rest_tokens[0])
+            second = _clean_name(" ".join(rest_tokens[1:]))
+            return team, closer, next_man, second
+
+    # Fallback for standard non-star rows.
+    tokens = payload.split()
+
+    # Handle common two-token player formats in this chart:
+    # - single initial + surname: "R Suárez", "B King", "C Pérez", "E Díaz", "T Scott", "R Walker"
+    # - suffix name: "Leiter Jr."
+    # We parse from left to right into exactly 3 names.
+
+    names = []
+    i = 0
+    while i < len(tokens) and len(names) < 3:
+        tok = tokens[i]
+
+        # suffix handling
+        if i + 1 < len(tokens) and tokens[i + 1] in {"Jr.", "Sr.", "II", "III", "IV"}:
+            names.append(f"{tok} {tokens[i + 1]}")
+            i += 2
+            continue
+
+        # initial + surname handling
+        if len(tok) == 1 and i + 1 < len(tokens):
+            names.append(f"{tok} {tokens[i + 1]}")
+            i += 2
+            continue
+
+        names.append(tok)
+        i += 1
+
+    if len(names) != 3:
+        return None
+
+    closer, next_man, second = [_clean_name(x) for x in names]
+    return team, closer, next_man, second
+
+
+def _parse_chart_lines(chart_lines: list[str]) -> dict:
+    teams = {}
+
+    # Each chart line usually contains two team blocks:
+    # BAL ... 3/13/26 ATL ... 3/13/26
+    pair_pattern = re.compile(
+        rf"([A-Z]{{2,3}} .+? {DATE_RE})(?=[A-Z]{{2,3}} .+? {DATE_RE}|$)"
+    )
+
+    for line in chart_lines:
+        line = re.sub(r"\s+", " ", line).strip()
+        blocks = [b.strip() for b in pair_pattern.findall(line) if b.strip()]
+
+        # fallback: if regex misses, try manual split by dates
+        if not blocks:
+            date_matches = list(re.finditer(DATE_RE, line))
+            if date_matches:
+                start = 0
+                for dm in date_matches:
+                    end = dm.end()
+                    block = line[start:end].strip()
+                    if block:
+                        blocks.append(block)
+                    start = end
+
+        for block in blocks:
+            parsed = _parse_team_block(block)
+            if not parsed:
+                print(f"[CLOSER WATCH] Could not parse block: {block}", flush=True)
+                continue
+
+            team, closer, next_man, second = parsed
+            teams[team] = {
+                "closer": closer,
+                "next": next_man,
+                "second": second,
+            }
+
+    return teams
+
+
 def fetch_closer_depth_chart():
     print("[CLOSER WATCH] Fetching Closer Monkey depth chart", flush=True)
 
@@ -40,87 +205,17 @@ def fetch_closer_depth_chart():
         return {}
 
     soup = BeautifulSoup(r.text, "html.parser")
-    strings = [s.strip() for s in soup.stripped_strings if s.strip()]
+    chart_lines = _extract_chart_lines(soup)
 
-    teams = {}
-
-    # Find chart start and stop markers
-    start_idx = None
-    end_idx = None
-
-    for i, s in enumerate(strings):
-        if "Updated MLB Closer Depth Chart" in s:
-            start_idx = i
-            break
-
-    if start_idx is None:
-        print("[CLOSER WATCH] Could not find chart header", flush=True)
+    if not chart_lines:
         return {}
 
-    for i in range(start_idx, len(strings)):
-        if strings[i].startswith("* = closer-by-committee"):
-            end_idx = i
-            break
+    teams = _parse_chart_lines(chart_lines)
 
-    if end_idx is None:
-        print("[CLOSER WATCH] Could not find chart footer", flush=True)
-        return {}
-
-    chart_strings = strings[start_idx:end_idx]
-
-    # Keep only the actual chart tokens after the repeated header row
-    # We expect sequence like:
-    # BAL, Helsley, Wells, Akin, 3/13/26, ATL, Iglesias, R Suárez, Lee, 3/13/26, ...
-    first_team_idx = None
-    for i, s in enumerate(chart_strings):
-        if s.upper() in TEAM_ABBRS:
-            first_team_idx = i
-            break
-
-    if first_team_idx is None:
-        print("[CLOSER WATCH] Could not find first team token", flush=True)
-        return {}
-
-    chart_strings = chart_strings[first_team_idx:]
-
-    i = 0
-    while i < len(chart_strings):
-        token = chart_strings[i].upper()
-
-        if token not in TEAM_ABBRS:
-            i += 1
-            continue
-
-        team = _normalize_team(token)
-
-        if i + 4 >= len(chart_strings):
-            break
-
-        closer = _clean_name(chart_strings[i + 1])
-        next_man = _clean_name(chart_strings[i + 2])
-        second = _clean_name(chart_strings[i + 3])
-        updated = chart_strings[i + 4]
-
-        if not re.fullmatch(r"\d{1,2}/\d{1,2}/\d{2}", updated):
-            print(
-                f"[CLOSER WATCH] Bad date slot for {team}: "
-                f"{closer} | {next_man} | {second} | {updated}",
-                flush=True,
-            )
-            i += 1
-            continue
-
-        teams[team] = {
-            "closer": closer,
-            "next": next_man,
-            "second": second,
-        }
-
-        i += 5
-
-    if len(teams) < 25 or len(teams) > 35:
+    if len(teams) != 30:
+        missing = sorted({_normalize_team(t) for t in TEAM_ABBRS if t != "WAS"} - set(teams.keys()))
         print(
-            f"[CLOSER WATCH] Parsed suspicious bullpen count: {len(teams)}. Refusing to save.",
+            f"[CLOSER WATCH] Parsed {len(teams)} teams instead of 30. Missing: {missing}. Refusing to save.",
             flush=True,
         )
         return {}
