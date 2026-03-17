@@ -188,8 +188,7 @@ def short_date(date_str: str) -> str:
 
 
 def should_run_now() -> bool:
-    now_et = datetime.now(ET)
-    return 7 <= now_et.hour < 24
+    return True
 
 
 def load_state() -> dict:
@@ -369,20 +368,22 @@ def build_embed(item: dict) -> discord.Embed:
     color = TEAM_COLORS.get(team, DEFAULT_COLOR)
     logo_url = TEAM_LOGOS.get(team)
 
-    title = "🚑 MLB INJURY UPDATE"
+    status_title = "🚑 MLB INJURY UPDATE"
     if item["status"] == "60-Day-IL":
-        title = "🧊 60-DAY IL"
+        status_title = "🧊 60-DAY IL"
     elif item["status"] == "Day-To-Day":
-        title = "⚠️ DAY-TO-DAY"
+        status_title = "⚠️ DAY-TO-DAY"
     elif "IL" in item["status"]:
-        title = "🚨 IL PLACEMENT"
+        status_title = "🚨 IL PLACEMENT"
 
     embed = discord.Embed(
-        title=title,
+        title=item["player"],
         color=color,
         timestamp=datetime.now(ET)
     )
-    embed.description = f"**{item['player']}**\n`{team} • {item['position']}`"
+
+    embed.description = f"**{status_title}**\n`{team} • {item['position']}`"
+
     embed.add_field(name="Status", value=f"`{item['status']}`", inline=True)
     embed.add_field(name="Est. Return", value=f"`{short_date(item['est_return'])}`", inline=True)
     embed.add_field(name="Source", value="`ESPN`", inline=True)
