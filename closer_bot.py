@@ -540,10 +540,33 @@ def refresh_closer_depth_chart() -> None:
     log(f"Tracking {len(tracked_pitchers)} relievers from depth chart")
 
 
+def find_tracked_pitcher_info(raw_name: str) -> dict | None:
+    norm = normalize_name(raw_name)
+    if not norm:
+        return None
+
+    exact = tracked_pitchers.get(norm)
+    if exact:
+        return exact
+
+    last = norm.split()[-1] if norm else ""
+    if not last:
+        return None
+
+    matches = []
+    for tracked_norm, info in tracked_pitchers.items():
+        tracked_last = tracked_norm.split()[-1] if tracked_norm else ""
+        if tracked_last == last:
+            matches.append(info)
+
+    if len(matches) == 1:
+        return matches[0]
+
+    return None
+
+
 def is_tracked_pitcher_name(name: str) -> bool:
-    if not name:
-        return False
-    return normalize_name(name) in tracked_pitchers
+    return find_tracked_pitcher_info(name) is not None
 
 
 def fetch_live_feed(game_id: int) -> dict | None:
@@ -607,9 +630,7 @@ def maybe_start_outing(game_id: int, pitcher_info: dict) -> None:
     if not raw_name:
         return
 
-    normalized = normalize_name(raw_name)
-    tracked_info = tracked_pitchers.get(normalized)
-
+    tracked_info = find_tracked_pitcher_info(raw_name)
     if not tracked_info:
         return
 
@@ -736,9 +757,9 @@ def get_pitcher_entry_context(feed: dict, pitcher_id: int, pitcher_side: str) ->
 
             if half:
                 entry_phrase = f"the {half.lower()} of the {inning}"
-                if str(inning).endswith("1"):
+                if str(inning).endswith("1") and str(inning) != "11":
                     entry_phrase += "st"
-                elif str(inning).endswith("2"):
+                elif str(inning).endswith("2") and str(inning) != "12":
                     entry_phrase += "nd"
                 elif str(inning).endswith("3") and str(inning) != "13":
                     entry_phrase += "rd"
@@ -782,6 +803,8 @@ def refresh_yesterday_pitchers_cache() -> None:
                 game_pk = game.get("gamePk")
                 if not game_pk:
                     continue
+
+                    # no-op
 
                 feed = fetch_live_feed(game_pk)
                 if not feed:
@@ -841,7 +864,9 @@ def get_tracked_pitchers_who_pitched_yesterday():
 
     for norm_name, info in tracked_pitchers.items():
         for y_name in yesterday_pitchers_cache:
-            if norm_name in y_name or y_name in norm_name:
+            if norm_name in y_name or y_name in norm_name or (
+                norm_name.split()[-1] if norm_name else ""
+            ) in y_name:
                 results.append({
                     "name": info.get("name"),
                     "team": info.get("team"),
