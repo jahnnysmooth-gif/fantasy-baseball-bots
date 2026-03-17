@@ -25,11 +25,11 @@ MLB_SCHEDULE_URL = "https://statsapi.mlb.com/api/v1/schedule?sportId=1"
 MLB_LIVE_FEED_URL = "https://statsapi.mlb.com/api/v1.1/game/{}/feed/live"
 
 CLOSER_WATCH_INTERVAL = 60
-OUTING_DELAY_SECONDS = 600  # 10 minutes
+OUTING_DELAY_SECONDS = 600
 MIN_LIVE_FEED_GAP = 0.35
 
-FINAL_RECHECK_INTERVAL_SECONDS = 1800  # 30 minutes
-FINAL_RECHECK_MAX_AGE_SECONDS = 21600  # 6 hours
+FINAL_RECHECK_INTERVAL_SECONDS = 1800
+FINAL_RECHECK_MAX_AGE_SECONDS = 21600
 
 TEAM_COLORS = {
     "ARI": 0xA71930,
@@ -820,7 +820,7 @@ def refresh_yesterday_pitchers_cache() -> None:
                 if not game_pk:
                     continue
 
-                    feed = fetch_live_feed(game_pk)
+                feed = fetch_live_feed(game_pk)
                 if not feed:
                     continue
 
@@ -847,6 +847,54 @@ def refresh_yesterday_pitchers_cache() -> None:
         log(f"Failed to build back-to-back cache: {e}")
         yesterday_pitchers_cache = set()
         yesterday_pitchers_cache_date = target_date
+
+
+def debug_tracked_usage_yesterday() -> None:
+    today_et = now_et().date()
+    yesterday_et = today_et - timedelta(days=1)
+
+    tracked_used = set()
+    tracked_names = set(tracked_pitchers.keys())
+
+    try:
+        url = f"{MLB_SCHEDULE_URL}&date={yesterday_et.isoformat()}"
+        r = requests.get(url, timeout=30)
+        r.raise_for_status()
+        data = r.json()
+
+        for date_block in data.get("dates", []):
+            for game in date_block.get("games", []):
+                game_pk = game.get("gamePk")
+                if not game_pk:
+                    continue
+
+                feed = fetch_live_feed(game_pk)
+                if not feed:
+                    continue
+
+                box = feed.get("liveData", {}).get("boxscore", {}).get("teams", {})
+
+                for side in ["home", "away"]:
+                    players = box.get(side, {}).get("players", {})
+
+                    for p in players.values():
+                        pitching_stats = p.get("stats", {}).get("pitching")
+                        if not pitching_stats:
+                            continue
+
+                        if not pitching_stats.get("inningsPitched"):
+                            continue
+
+                        name = p.get("person", {}).get("fullName", "")
+                        norm = normalize_name(name)
+
+                        if norm in tracked_names:
+                            tracked_used.add(norm)
+
+        log(f"Tracked relievers used yesterday: {len(tracked_used)} / {len(tracked_pitchers)}")
+
+    except Exception as e:
+        log(f"Failed tracked-usage check: {e}")
 
 
 def pitched_yesterday(pitcher_id: int) -> bool:
@@ -1309,6 +1357,7 @@ async def final_game_loop() -> None:
                 log("Quiet hours active (2:00 AM ET - 11:30 AM ET). Skipping final-game loop.")
             else:
                 refresh_closer_depth_chart()
+                debug_tracked_usage_yesterday()
                 await process_games()
         except Exception as e:
             log(f"ERROR in final-game loop: {e}")
