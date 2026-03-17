@@ -10,176 +10,25 @@ STATE_FILE = "state/closers/closer_depth_chart.json"
 URL = "https://closermonkey.com"
 
 TEAM_ABBRS = {
-    "ARI", "ATL", "BAL", "BOS", "CHC", "CWS", "CIN", "CLE", "COL", "DET",
+    "ARI", "ATL", "BAL", "BOS", "CHC", "CWS", "CHW", "CIN", "CLE", "COL", "DET",
     "HOU", "KC", "LAA", "LAD", "MIA", "MIL", "MIN", "NYM", "NYY", "ATH",
-    "PHI", "PIT", "SD", "SF", "SEA", "STL", "TB", "TEX", "TOR", "WSH", "WAS",
+    "PHI", "PIT", "SD", "SF", "SEA", "STL", "TB", "TEX", "TOR", "WSH", "WAS"
 }
-
-DATE_RE = r"\d{1,2}/\d{1,2}/\d{2}"
-TEAM_RE = r"(?:ARI|ATL|BAL|BOS|CHC|CWS|CIN|CLE|COL|DET|HOU|KC|LAA|LAD|MIA|MIL|MIN|NYM|NYY|ATH|PHI|PIT|SD|SF|SEA|STL|TB|TEX|TOR|WSH|WAS)"
 
 
 def _normalize_team(team: str) -> str:
     team = team.strip().upper()
     if team == "WAS":
         return "WSH"
+    if team == "CHW":
+        return "CWS"
     return team
 
 
 def _clean_name(name: str) -> str:
     name = name.replace("*", "")
     name = re.sub(r"\s+", " ", name)
-    return name.strip(" -–—\u00a0")
-
-
-def _tokenize_payload(payload: str) -> list[str]:
-    payload = payload.replace("\xa0", " ")
-    payload = re.sub(r"\s+", " ", payload).strip()
-    if not payload:
-        return []
-    return payload.split()
-
-
-def _consume_name(tokens: list[str], i: int, remaining_names: int) -> tuple[str, int]:
-    remaining_tokens = len(tokens) - i
-    if remaining_tokens <= 0:
-        return "", i
-
-    tok = tokens[i]
-
-    # single-token fallback when counts line up exactly
-    if remaining_tokens == remaining_names:
-        return tok, i + 1
-
-    # initial + surname, e.g. R. Suarez or R Suarez
-    if remaining_tokens >= 2:
-        if re.fullmatch(r"[A-Za-z]\.?", tok):
-            return f"{tok} {tokens[i + 1]}", i + 2
-
-    # suffix handling, e.g. Leiter Jr.
-    if remaining_tokens >= 2 and tokens[i + 1] in {"Jr.", "Sr.", "II", "III", "IV"}:
-        return f"{tok} {tokens[i + 1]}", i + 2
-
-    # if we have one extra token beyond remaining names, use 2-token name here
-    if remaining_tokens == remaining_names + 1:
-        return f"{tok} {tokens[i + 1]}", i + 2
-
-    # otherwise default to single token
-    return tok, i + 1
-
-
-def _parse_payload(payload: str) -> tuple[str, str, str] | None:
-    payload = _clean_name(payload)
-    if not payload:
-        return None
-
-    # Committee-marked rows often wrap names in stars
-    starred = [_clean_name(x) for x in re.findall(r"\*([^*]+)\*", payload) if _clean_name(x)]
-    if len(starred) == 3:
-        return starred[0], starred[1], starred[2]
-
-    tokens = _tokenize_payload(payload)
-    if len(tokens) < 3:
-        return None
-
-    names = []
-    i = 0
-    for remaining_names in (3, 2, 1):
-        name, i = _consume_name(tokens, i, remaining_names)
-        if not name:
-            return None
-        names.append(_clean_name(name))
-
-    # if there are leftover tokens, append them to the last name
-    if i < len(tokens):
-        names[-1] = _clean_name(f"{names[-1]} {' '.join(tokens[i:])}")
-
-    if len(names) != 3 or not all(names):
-        return None
-
-    return names[0], names[1], names[2]
-
-
-def _extract_chart_text(soup: BeautifulSoup) -> str:
-    strings = [s.strip() for s in soup.stripped_strings if s.strip()]
-
-    start_idx = None
-    end_idx = None
-
-    for i, s in enumerate(strings):
-        if "Updated MLB Closer Depth Chart" in s:
-            start_idx = i
-            break
-
-    if start_idx is None:
-        print("[CLOSER WATCH] Could not find chart header", flush=True)
-        return ""
-
-    for i in range(start_idx, len(strings)):
-        if strings[i].startswith("* = closer-by-committee"):
-            end_idx = i
-            break
-
-    if end_idx is None:
-        print("[CLOSER WATCH] Could not find chart footer", flush=True)
-        return ""
-
-    chart_strings = strings[start_idx + 1:end_idx]
-
-    # remove repeated header labels if present
-    filtered = []
-    skip_labels = {"Closer", "1st in line", "2nd in line", "Updated"}
-    for s in chart_strings:
-        if s in skip_labels:
-            continue
-        filtered.append(s)
-
-    text = " ".join(filtered)
-    text = re.sub(r"\s+", " ", text).strip()
-    return text
-
-
-def _parse_chart_text(chart_text: str) -> dict:
-    teams = {}
-
-    if not chart_text:
-        return teams
-
-    # pull blocks like:
-    # ATL Iglesias R. Suarez Lee 3/13/26
-    # TB *Jax*Cleavinger*Baker 3/13/26
-    pattern = re.compile(
-        rf"\b(?P<team>{TEAM_RE})\b\s+"
-        rf"(?P<payload>.*?)\s+"
-        rf"(?P<date>{DATE_RE})"
-        rf"(?=\s+\b(?:{TEAM_RE})\b\s+|$)"
-    )
-
-    for m in pattern.finditer(chart_text):
-        team = _normalize_team(m.group("team"))
-        payload = m.group("payload").strip()
-        updated = m.group("date").strip()
-
-        if team not in TEAM_ABBRS:
-            continue
-
-        if not re.fullmatch(DATE_RE, updated):
-            print(f"[CLOSER WATCH] Bad date slot for {team}: {updated}", flush=True)
-            continue
-
-        parsed = _parse_payload(payload)
-        if not parsed:
-            print(f"[CLOSER WATCH] Could not parse payload for {team}: {payload}", flush=True)
-            continue
-
-        closer, next_man, second = parsed
-        teams[team] = {
-            "closer": closer,
-            "next": next_man,
-            "second": second,
-        }
-
-    return teams
+    return name.strip()
 
 
 def fetch_closer_depth_chart():
@@ -193,15 +42,87 @@ def fetch_closer_depth_chart():
         return {}
 
     soup = BeautifulSoup(r.text, "html.parser")
-    chart_text = _extract_chart_text(soup)
+    strings = [s.strip() for s in soup.stripped_strings if s.strip()]
 
-    if not chart_text:
+    teams = {}
+
+    start_idx = None
+    end_idx = None
+
+    for i, s in enumerate(strings):
+        if "Updated MLB Closer Depth Chart" in s:
+            start_idx = i
+            break
+
+    if start_idx is None:
+        print("[CLOSER WATCH] Could not find chart header", flush=True)
         return {}
 
-    teams = _parse_chart_text(chart_text)
+    for i in range(start_idx, len(strings)):
+        if strings[i].startswith("* = closer-by-committee"):
+            end_idx = i
+            break
+
+    if end_idx is None:
+        print("[CLOSER WATCH] Could not find chart footer", flush=True)
+        return {}
+
+    chart_strings = strings[start_idx:end_idx]
+
+    first_team_idx = None
+    for i, s in enumerate(chart_strings):
+        token = s.upper()
+        if token in TEAM_ABBRS:
+            first_team_idx = i
+            break
+
+    if first_team_idx is None:
+        print("[CLOSER WATCH] Could not find first team token", flush=True)
+        return {}
+
+    chart_strings = chart_strings[first_team_idx:]
+
+    i = 0
+    while i < len(chart_strings):
+        token = chart_strings[i].upper()
+
+        if token not in TEAM_ABBRS:
+            i += 1
+            continue
+
+        team = _normalize_team(token)
+
+        if i + 4 >= len(chart_strings):
+            break
+
+        closer = _clean_name(chart_strings[i + 1])
+        next_man = _clean_name(chart_strings[i + 2])
+        second = _clean_name(chart_strings[i + 3])
+        updated = chart_strings[i + 4]
+
+        if not re.fullmatch(r"\d{1,2}/\d{1,2}/\d{2}", updated):
+            print(
+                f"[CLOSER WATCH] Bad date slot for {team}: "
+                f"{closer} | {next_man} | {second} | {updated}",
+                flush=True,
+            )
+            i += 1
+            continue
+
+        teams[team] = {
+            "closer": closer,
+            "next": next_man,
+            "second": second,
+        }
+
+        i += 5
 
     if len(teams) != 30:
-        expected = {_normalize_team(t) for t in TEAM_ABBRS if t != "WAS"}
+        expected = {
+            "ARI", "ATH", "ATL", "BAL", "BOS", "CHC", "CWS", "CIN", "CLE", "COL",
+            "DET", "HOU", "KC", "LAA", "LAD", "MIA", "MIL", "MIN", "NYM", "NYY",
+            "PHI", "PIT", "SD", "SF", "SEA", "STL", "TB", "TEX", "TOR", "WSH"
+        }
         missing = sorted(expected - set(teams.keys()))
         print(
             f"[CLOSER WATCH] Parsed {len(teams)} teams instead of 30. Missing: {missing}. Refusing to save.",
