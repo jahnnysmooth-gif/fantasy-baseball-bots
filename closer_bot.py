@@ -28,6 +28,9 @@ CLOSER_WATCH_INTERVAL = 60
 OUTING_DELAY_SECONDS = 600  # 10 minutes
 MIN_LIVE_FEED_GAP = 0.35
 
+FINAL_RECHECK_INTERVAL_SECONDS = 1800  # 30 minutes
+FINAL_RECHECK_MAX_AGE_SECONDS = 21600  # 6 hours
+
 TEAM_COLORS = {
     "ARI": 0xA71930,
     "ATH": 0x003831,
@@ -97,17 +100,14 @@ TEAM_NAME_TO_ABBR = {
 intents = discord.Intents.default()
 client = discord.Client(intents=intents)
 
-# closer watch state
 tracked_pitchers = build_tracked_relief_map()
 last_depth_refresh_date = None
 last_seen_pitchers = {}
 active_outings = {}
 posted_outings = set()
 
-# request pacing
 last_live_feed_call_time = 0.0
 
-# back-to-back cache
 yesterday_pitchers_cache_date = None
 yesterday_pitchers_cache = set()
 
@@ -122,6 +122,19 @@ def now_utc() -> datetime:
 
 def now_et() -> datetime:
     return datetime.now(ET)
+
+
+def iso_utc_now() -> str:
+    return now_utc().isoformat()
+
+
+def parse_iso(dt_str: str | None) -> datetime | None:
+    if not dt_str:
+        return None
+    try:
+        return datetime.fromisoformat(dt_str.replace("Z", "+00:00"))
+    except Exception:
+        return None
 
 
 def within_operating_hours() -> bool:
@@ -142,6 +155,7 @@ def load_state() -> dict:
     if not os.path.exists(STATE_FILE):
         return {
             "posted_events": [],
+            "posted_outings": [],
             "processed_final_games": {},
         }
 
@@ -152,6 +166,7 @@ def load_state() -> dict:
         state = {}
 
     state.setdefault("posted_events", [])
+    state.setdefault("posted_outings", [])
     state.setdefault("processed_final_games", {})
     return state
 
@@ -163,6 +178,10 @@ def save_state(state: dict) -> None:
     if len(posted_events) > 5000:
         state["posted_events"] = posted_events[-3000:]
 
+    posted_outings_list = state.get("posted_outings", [])
+    if len(posted_outings_list) > 5000:
+        state["posted_outings"] = posted_outings_list[-3000:]
+
     processed_final_games = state.get("processed_final_games", {})
     if len(processed_final_games) > 500:
         items = list(processed_final_games.items())[-300:]
@@ -170,6 +189,22 @@ def save_state(state: dict) -> None:
 
     with open(STATE_FILE, "w", encoding="utf-8") as f:
         json.dump(state, f, indent=2)
+
+
+def persist_posted_outings() -> None:
+    state = load_state()
+    state["posted_outings"] = list(posted_outings)
+    save_state(state)
+
+
+def hydrate_runtime_state() -> None:
+    global posted_outings
+
+    state = load_state()
+    posted_outings = set(state.get("posted_outings", []))
+
+    if posted_outings:
+        log(f"Loaded {len(posted_outings)} posted outings from state")
 
 
 def get_logo(team_abbr: str) -> str | None:
@@ -256,6 +291,110 @@ def build_final_stamp(game: dict) -> str:
     home_score = game.get("teams", {}).get("home", {}).get("score", "")
     game_date = game.get("gameDate", "")
     return f"{status}|{away_score}|{home_score}|{game_date}"
+
+
+def normalize_final_record(record, final_stamp: str) -> dict | None:
+    if not record:
+        return None
+
+    if isinstance(record, str):
+        return {
+            "final_stamp": record,
+            "status": "done",
+            "first_seen_final_utc": None,
+            "last_checked_utc": None,
+            "retry_count": 0,
+        }
+
+    if isinstance(record, dict):
+        return {
+            "final_stamp": record.get("final_stamp", final_stamp),
+            "status": record.get("status", "pending"),
+            "first_seen_final_utc": record.get("first_seen_final_utc"),
+            "last_checked_utc": record.get("last_checked_utc"),
+            "retry_count": record.get("retry_count", 0),
+        }
+
+    return None
+
+
+def build_pending_final_record(existing: dict | None, final_stamp: str) -> dict:
+    first_seen = existing.get("first_seen_final_utc") if existing else None
+    retry_count = existing.get("retry_count", 0) if existing else 0
+
+    return {
+        "final_stamp": final_stamp,
+        "status": "pending",
+        "first_seen_final_utc": first_seen or iso_utc_now(),
+        "last_checked_utc": iso_utc_now(),
+        "retry_count": retry_count + 1,
+    }
+
+
+def build_done_final_record(existing: dict | None, final_stamp: str) -> dict:
+    first_seen = existing.get("first_seen_final_utc") if existing else None
+    retry_count = existing.get("retry_count", 0) if existing else 0
+
+    return {
+        "final_stamp": final_stamp,
+        "status": "done",
+        "first_seen_final_utc": first_seen or iso_utc_now(),
+        "last_checked_utc": iso_utc_now(),
+        "retry_count": retry_count,
+    }
+
+
+def build_done_no_event_record(existing: dict | None, final_stamp: str) -> dict:
+    first_seen = existing.get("first_seen_final_utc") if existing else None
+    retry_count = existing.get("retry_count", 0) if existing else 0
+
+    return {
+        "final_stamp": final_stamp,
+        "status": "done_no_event",
+        "first_seen_final_utc": first_seen or iso_utc_now(),
+        "last_checked_utc": iso_utc_now(),
+        "retry_count": retry_count,
+    }
+
+
+def pending_record_expired(record: dict, current_utc: datetime) -> bool:
+    first_seen = parse_iso(record.get("first_seen_final_utc"))
+    if first_seen is None:
+        return False
+    return (current_utc - first_seen).total_seconds() >= FINAL_RECHECK_MAX_AGE_SECONDS
+
+
+def pending_record_due(record: dict, current_utc: datetime) -> bool:
+    if record.get("status") != "pending":
+        return False
+
+    last_checked = parse_iso(record.get("last_checked_utc"))
+    if last_checked is None:
+        return True
+
+    return (current_utc - last_checked).total_seconds() >= FINAL_RECHECK_INTERVAL_SECONDS
+
+
+def should_skip_final_game(record: dict | None, final_stamp: str, current_utc: datetime) -> tuple[bool, str]:
+    if not record:
+        return False, ""
+
+    if record.get("final_stamp") != final_stamp:
+        return False, ""
+
+    status = record.get("status")
+
+    if status in {"done", "done_no_event"}:
+        return True, "already processed"
+
+    if status == "pending":
+        if pending_record_expired(record, current_utc):
+            return False, ""
+        if not pending_record_due(record, current_utc):
+            return True, "pending recheck not due"
+        return False, ""
+
+    return False, ""
 
 
 def build_save_embed(
@@ -397,11 +536,11 @@ def refresh_closer_depth_chart() -> None:
     if now.time() < time(12, 0):
         return
 
-    log("Refreshing Closer Monkey depth chart")
+    log("Refreshing closer depth chart")
 
     teams = fetch_closer_depth_chart()
     if not teams:
-        log("Closer Monkey refresh failed")
+        log("Closer depth chart refresh failed")
         return
 
     tracked_pitchers = build_tracked_relief_map()
@@ -846,8 +985,7 @@ async def post_closer_watch_outing(
     try:
         await channel.send(embed=embed)
         posted_outings.add(outing_id)
-        if len(posted_outings) > 5000:
-            posted_outings.clear()
+        persist_posted_outings()
         log(f"Posted closer watch outing: {outing['pitcher_name']} | {outing['team']} | {label}")
         await asyncio.sleep(1.5)
     except Exception as e:
@@ -920,6 +1058,7 @@ async def finalize_completed_outings() -> None:
 async def process_games() -> None:
     state = load_state()
     posted_events = set(state.get("posted_events", []))
+    posted_outings.update(state.get("posted_outings", []))
     processed_final_games = state.get("processed_final_games", {})
 
     channel = await get_channel()
@@ -927,6 +1066,8 @@ async def process_games() -> None:
         return
 
     games = get_games()
+    current_utc = now_utc()
+
     total_final_games_seen = 0
     total_new_final_games = 0
     total_saves_found = 0
@@ -948,23 +1089,31 @@ async def process_games() -> None:
 
         game_pk_str = str(game_pk)
         final_stamp = build_final_stamp(game)
+        record = normalize_final_record(processed_final_games.get(game_pk_str), final_stamp)
 
-        if processed_final_games.get(game_pk_str) == final_stamp:
-            log(f"Skipping already processed final game: {game_pk}")
+        skip_game, reason = should_skip_final_game(record, final_stamp, current_utc)
+        if skip_game:
+            if reason == "already processed":
+                log(f"Skipping already processed final game: {game_pk}")
+            elif reason == "pending recheck not due":
+                log(f"Skipping pending final not due yet: {game_pk}")
             continue
 
-        total_new_final_games += 1
-        log(f"Processing new final game: {game_pk}")
+        if record and record.get("status") == "pending":
+            log(f"Rechecking pending final game: {game_pk}")
+        else:
+            total_new_final_games += 1
+            log(f"Processing new final game: {game_pk}")
 
         data = fetch_live_feed(game_pk)
         if not data:
-            processed_final_games[game_pk_str] = final_stamp
+            processed_final_games[game_pk_str] = build_pending_final_record(record, final_stamp)
             continue
 
         box = data.get("liveData", {}).get("boxscore", {}).get("teams", {})
         if not box:
             log(f"No boxscore found for game {game_pk}")
-            processed_final_games[game_pk_str] = final_stamp
+            processed_final_games[game_pk_str] = build_pending_final_record(record, final_stamp)
             continue
 
         away_team_box = box.get("away", {})
@@ -1005,10 +1154,7 @@ async def process_games() -> None:
 
                 pitcher = p.get("person", {}).get("fullName", "Unknown Pitcher")
                 pitcher_id = p.get("person", {}).get("id", pitcher)
-
-                # Skip fallback posts for tracked Closer Monkey relievers
-                if is_tracked_pitcher_name(pitcher):
-                    continue
+                outing_key = f"{game_pk}_{pitcher_id}"
 
                 ip = pitching_stats.get("inningsPitched", "0.0")
                 h = pitching_stats.get("hits", 0)
@@ -1023,7 +1169,9 @@ async def process_games() -> None:
                     game_saves += 1
                     event_key = f"save_{game_pk}_{pitcher_id}"
 
-                    if event_key in posted_events:
+                    if is_tracked_pitcher_name(pitcher) and outing_key in posted_outings:
+                        log(f"Skipping tracked save already posted live: {pitcher} | {team}")
+                    elif event_key in posted_events:
                         log(f"Skipping duplicate save: {pitcher} | {team}")
                     else:
                         embed = build_save_embed(
@@ -1037,6 +1185,7 @@ async def process_games() -> None:
                         try:
                             await channel.send(embed=embed)
                             posted_events.add(event_key)
+                            posted_outings.add(outing_key)
                             total_posted += 1
                             game_posted += 1
                             log(f"SAVE: {pitcher} | {team}")
@@ -1054,7 +1203,9 @@ async def process_games() -> None:
 
                     event_key = f"blown_team_{game_pk}_{team}"
 
-                    if event_key in posted_events:
+                    if is_tracked_pitcher_name(pitcher) and outing_key in posted_outings:
+                        log(f"Skipping tracked blown save already posted live: {pitcher} | {team}")
+                    elif event_key in posted_events:
                         log(f"Skipping duplicate blown save team alert: {team}")
                     else:
                         embed = build_blown_embed(
@@ -1068,6 +1219,7 @@ async def process_games() -> None:
                         try:
                             await channel.send(embed=embed)
                             posted_events.add(event_key)
+                            posted_outings.add(outing_key)
                             blown_posted_teams.add(team)
                             total_posted += 1
                             game_posted += 1
@@ -1076,7 +1228,19 @@ async def process_games() -> None:
                         except Exception as e:
                             log(f"Discord send error on blown save: {e}")
 
-        processed_final_games[game_pk_str] = final_stamp
+        if game_saves > 0 or game_blown > 0:
+            processed_final_games[game_pk_str] = build_done_final_record(record, final_stamp)
+        else:
+            pending_record = build_pending_final_record(record, final_stamp)
+            if pending_record_expired(pending_record, current_utc):
+                processed_final_games[game_pk_str] = build_done_no_event_record(record, final_stamp)
+                log(f"Final game expired with no save/blown save after 6 hours: {game_pk}")
+            else:
+                processed_final_games[game_pk_str] = pending_record
+                log(
+                    f"Final game pending recheck | {game_pk} | "
+                    f"retry_count={pending_record['retry_count']}"
+                )
 
         log(
             f"Game {game_pk} complete | "
@@ -1086,6 +1250,7 @@ async def process_games() -> None:
         )
 
     state["posted_events"] = list(posted_events)
+    state["posted_outings"] = list(posted_outings)
     state["processed_final_games"] = processed_final_games
     save_state(state)
 
@@ -1104,6 +1269,8 @@ async def final_game_loop() -> None:
 
     log("=== FINAL GAME FALLBACK LOOP STARTED ===")
     log(f"Poll interval: {CLOSER_WATCH_POLL_MINUTES} minutes")
+    log(f"Pending recheck interval: {FINAL_RECHECK_INTERVAL_SECONDS // 60} minutes")
+    log(f"Pending max age: {FINAL_RECHECK_MAX_AGE_SECONDS // 3600} hours")
     log(f"State file: {STATE_FILE}")
 
     while not client.is_closed():
@@ -1148,6 +1315,10 @@ async def closer_watch_loop() -> None:
 @client.event
 async def on_ready():
     log(f"Logged in as {client.user}")
+
+    if not hasattr(client, "runtime_state_hydrated"):
+        hydrate_runtime_state()
+        client.runtime_state_hydrated = True
 
     if not hasattr(client, "final_game_task"):
         client.final_game_task = asyncio.create_task(final_game_loop())
