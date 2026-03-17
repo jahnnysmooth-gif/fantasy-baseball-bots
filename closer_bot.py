@@ -88,7 +88,6 @@ def build_summary(name, team, s, label):
     bb = s["bb"]
     k = s["k"]
 
-    # sentence 1 (result)
     if label == "SAVE":
         line1 = f"{name} entered in the 9th and shut the door for {team}, locking down the save."
     elif label == "BLOWN":
@@ -104,7 +103,6 @@ def build_summary(name, team, s, label):
     else:
         line1 = f"{name} worked a scoreless outing for {team}."
 
-    # sentence 2 (details)
     if er == 0 and h == 0 and bb == 0:
         line2 = f"He retired all hitters he faced over {ip}" + (f" with {k} strikeouts." if k >= 2 else ".")
     elif er == 0:
@@ -218,7 +216,13 @@ async def loop():
                 feed = get_feed(game_id)
                 pitchers = get_pitchers(feed)
 
-                matchup = f"{g['teams']['away']['team']['abbreviation']} @ {g['teams']['home']['team']['abbreviation']}"
+                away = g['teams']['away']['team']
+                home = g['teams']['home']['team']
+
+                away_abbr = away.get("abbreviation") or away.get("name", "AWAY")[:3].upper()
+                home_abbr = home.get("abbreviation") or home.get("name", "HOME")[:3].upper()
+
+                matchup = f"{away_abbr} @ {home_abbr}"
                 score = f"{g['teams']['away']['score']} - {g['teams']['home']['score']}"
 
                 for p in pitchers:
