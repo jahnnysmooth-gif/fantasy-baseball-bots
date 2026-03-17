@@ -12,10 +12,11 @@ URL = "https://closermonkey.com"
 TEAM_ABBRS = {
     "ARI", "ATL", "BAL", "BOS", "CHC", "CWS", "CIN", "CLE", "COL", "DET",
     "HOU", "KC", "LAA", "LAD", "MIA", "MIL", "MIN", "NYM", "NYY", "ATH",
-    "PHI", "PIT", "SD", "SF", "SEA", "STL", "TB", "TEX", "TOR", "WSH", "WAS"
+    "PHI", "PIT", "SD", "SF", "SEA", "STL", "TB", "TEX", "TOR", "WSH", "WAS",
 }
 
 DATE_RE = r"\d{1,2}/\d{1,2}/\d{2}"
+TEAM_RE = r"(?:ARI|ATL|BAL|BOS|CHC|CWS|CIN|CLE|COL|DET|HOU|KC|LAA|LAD|MIA|MIL|MIN|NYM|NYY|ATH|PHI|PIT|SD|SF|SEA|STL|TB|TEX|TOR|WSH|WAS)"
 
 
 def _normalize_team(team: str) -> str:
@@ -28,168 +29,155 @@ def _normalize_team(team: str) -> str:
 def _clean_name(name: str) -> str:
     name = name.replace("*", "")
     name = re.sub(r"\s+", " ", name)
-    return name.strip()
+    return name.strip(" -–—\u00a0")
 
 
-def _extract_chart_lines(soup: BeautifulSoup) -> list[str]:
-    text = soup.get_text("\n", strip=True)
-    lines = [line.strip() for line in text.splitlines() if line.strip()]
+def _tokenize_payload(payload: str) -> list[str]:
+    payload = payload.replace("\xa0", " ")
+    payload = re.sub(r"\s+", " ", payload).strip()
+    if not payload:
+        return []
+    return payload.split()
+
+
+def _consume_name(tokens: list[str], i: int, remaining_names: int) -> tuple[str, int]:
+    remaining_tokens = len(tokens) - i
+    if remaining_tokens <= 0:
+        return "", i
+
+    tok = tokens[i]
+
+    # single-token fallback when counts line up exactly
+    if remaining_tokens == remaining_names:
+        return tok, i + 1
+
+    # initial + surname, e.g. R. Suarez or R Suarez
+    if remaining_tokens >= 2:
+        if re.fullmatch(r"[A-Za-z]\.?", tok):
+            return f"{tok} {tokens[i + 1]}", i + 2
+
+    # suffix handling, e.g. Leiter Jr.
+    if remaining_tokens >= 2 and tokens[i + 1] in {"Jr.", "Sr.", "II", "III", "IV"}:
+        return f"{tok} {tokens[i + 1]}", i + 2
+
+    # if we have one extra token beyond remaining names, use 2-token name here
+    if remaining_tokens == remaining_names + 1:
+        return f"{tok} {tokens[i + 1]}", i + 2
+
+    # otherwise default to single token
+    return tok, i + 1
+
+
+def _parse_payload(payload: str) -> tuple[str, str, str] | None:
+    payload = _clean_name(payload)
+    if not payload:
+        return None
+
+    # Committee-marked rows often wrap names in stars
+    starred = [_clean_name(x) for x in re.findall(r"\*([^*]+)\*", payload) if _clean_name(x)]
+    if len(starred) == 3:
+        return starred[0], starred[1], starred[2]
+
+    tokens = _tokenize_payload(payload)
+    if len(tokens) < 3:
+        return None
+
+    names = []
+    i = 0
+    for remaining_names in (3, 2, 1):
+        name, i = _consume_name(tokens, i, remaining_names)
+        if not name:
+            return None
+        names.append(_clean_name(name))
+
+    # if there are leftover tokens, append them to the last name
+    if i < len(tokens):
+        names[-1] = _clean_name(f"{names[-1]} {' '.join(tokens[i:])}")
+
+    if len(names) != 3 or not all(names):
+        return None
+
+    return names[0], names[1], names[2]
+
+
+def _extract_chart_text(soup: BeautifulSoup) -> str:
+    strings = [s.strip() for s in soup.stripped_strings if s.strip()]
 
     start_idx = None
     end_idx = None
 
-    for i, line in enumerate(lines):
-        if "Updated MLB Closer Depth Chart" in line:
+    for i, s in enumerate(strings):
+        if "Updated MLB Closer Depth Chart" in s:
             start_idx = i
             break
 
     if start_idx is None:
         print("[CLOSER WATCH] Could not find chart header", flush=True)
-        return []
+        return ""
 
-    for i in range(start_idx, len(lines)):
-        if line := lines[i]:
-            if line.startswith("* = closer-by-committee"):
-                end_idx = i
-                break
+    for i in range(start_idx, len(strings)):
+        if strings[i].startswith("* = closer-by-committee"):
+            end_idx = i
+            break
 
     if end_idx is None:
         print("[CLOSER WATCH] Could not find chart footer", flush=True)
-        return []
+        return ""
 
-    chart_lines = lines[start_idx + 1:end_idx]
+    chart_strings = strings[start_idx + 1:end_idx]
 
-    # drop repeated header row if present
-    cleaned = []
-    for line in chart_lines:
-        if "Closer 1st in line 2nd in line Updated" in line:
+    # remove repeated header labels if present
+    filtered = []
+    skip_labels = {"Closer", "1st in line", "2nd in line", "Updated"}
+    for s in chart_strings:
+        if s in skip_labels:
             continue
-        cleaned.append(line)
+        filtered.append(s)
 
-    return cleaned
-
-
-def _parse_team_block(block: str):
-    """
-    Parse a single team block of the form:
-      TB *Jax*Cleavinger*Baker 3/13/26
-      ATH *Leiter Jr.*Harris*Sterner 3/13/26
-      ATL Iglesias R Suárez Lee 3/13/26
-      WAS *Beeter*Henry*C Pérez 3/13/26
-    """
-    block = re.sub(r"\s+", " ", block).strip()
-
-    m = re.match(rf"^([A-Z]{{2,3}})\s+(.+?)\s+({DATE_RE})$", block)
-    if not m:
-        return None
-
-    team = _normalize_team(m.group(1))
-    payload = m.group(2).strip()
-
-    if team not in TEAM_ABBRS:
-        return None
-
-    # Split payload into three names.
-    # Strategy:
-    # 1) If there are committee markers, names are often wrapped with *...*
-    # 2) Otherwise fall back to space splitting with support for common multi-token names.
-
-    star_names = re.findall(r"\*([^*]+)\*", payload)
-    if len(star_names) == 3:
-        closer, next_man, second = [_clean_name(x) for x in star_names]
-        return team, closer, next_man, second
-
-    if len(star_names) == 2:
-        # one non-starred name remains outside the starred names
-        temp = payload
-        for s in star_names:
-            temp = temp.replace(f"*{s}*", " ").strip()
-        non_star = _clean_name(temp)
-        names = [_clean_name(star_names[0]), non_star, _clean_name(star_names[1])]
-        if len([n for n in names if n]) == 3:
-            return team, names[0], names[1], names[2]
-
-    if len(star_names) == 1:
-        temp = payload.replace(f"*{star_names[0]}*", " ").strip()
-        rest_tokens = temp.split()
-        if len(rest_tokens) >= 2:
-            closer = _clean_name(star_names[0])
-            next_man = _clean_name(rest_tokens[0])
-            second = _clean_name(" ".join(rest_tokens[1:]))
-            return team, closer, next_man, second
-
-    # Fallback for standard non-star rows.
-    tokens = payload.split()
-
-    # Handle common two-token player formats in this chart:
-    # - single initial + surname: "R Suárez", "B King", "C Pérez", "E Díaz", "T Scott", "R Walker"
-    # - suffix name: "Leiter Jr."
-    # We parse from left to right into exactly 3 names.
-
-    names = []
-    i = 0
-    while i < len(tokens) and len(names) < 3:
-        tok = tokens[i]
-
-        # suffix handling
-        if i + 1 < len(tokens) and tokens[i + 1] in {"Jr.", "Sr.", "II", "III", "IV"}:
-            names.append(f"{tok} {tokens[i + 1]}")
-            i += 2
-            continue
-
-        # initial + surname handling
-        if len(tok) == 1 and i + 1 < len(tokens):
-            names.append(f"{tok} {tokens[i + 1]}")
-            i += 2
-            continue
-
-        names.append(tok)
-        i += 1
-
-    if len(names) != 3:
-        return None
-
-    closer, next_man, second = [_clean_name(x) for x in names]
-    return team, closer, next_man, second
+    text = " ".join(filtered)
+    text = re.sub(r"\s+", " ", text).strip()
+    return text
 
 
-def _parse_chart_lines(chart_lines: list[str]) -> dict:
+def _parse_chart_text(chart_text: str) -> dict:
     teams = {}
 
-    # Each chart line usually contains two team blocks:
-    # BAL ... 3/13/26 ATL ... 3/13/26
-    pair_pattern = re.compile(
-        rf"([A-Z]{{2,3}} .+? {DATE_RE})(?=[A-Z]{{2,3}} .+? {DATE_RE}|$)"
+    if not chart_text:
+        return teams
+
+    # pull blocks like:
+    # ATL Iglesias R. Suarez Lee 3/13/26
+    # TB *Jax*Cleavinger*Baker 3/13/26
+    pattern = re.compile(
+        rf"\b(?P<team>{TEAM_RE})\b\s+"
+        rf"(?P<payload>.*?)\s+"
+        rf"(?P<date>{DATE_RE})"
+        rf"(?=\s+\b(?:{TEAM_RE})\b\s+|$)"
     )
 
-    for line in chart_lines:
-        line = re.sub(r"\s+", " ", line).strip()
-        blocks = [b.strip() for b in pair_pattern.findall(line) if b.strip()]
+    for m in pattern.finditer(chart_text):
+        team = _normalize_team(m.group("team"))
+        payload = m.group("payload").strip()
+        updated = m.group("date").strip()
 
-        # fallback: if regex misses, try manual split by dates
-        if not blocks:
-            date_matches = list(re.finditer(DATE_RE, line))
-            if date_matches:
-                start = 0
-                for dm in date_matches:
-                    end = dm.end()
-                    block = line[start:end].strip()
-                    if block:
-                        blocks.append(block)
-                    start = end
+        if team not in TEAM_ABBRS:
+            continue
 
-        for block in blocks:
-            parsed = _parse_team_block(block)
-            if not parsed:
-                print(f"[CLOSER WATCH] Could not parse block: {block}", flush=True)
-                continue
+        if not re.fullmatch(DATE_RE, updated):
+            print(f"[CLOSER WATCH] Bad date slot for {team}: {updated}", flush=True)
+            continue
 
-            team, closer, next_man, second = parsed
-            teams[team] = {
-                "closer": closer,
-                "next": next_man,
-                "second": second,
-            }
+        parsed = _parse_payload(payload)
+        if not parsed:
+            print(f"[CLOSER WATCH] Could not parse payload for {team}: {payload}", flush=True)
+            continue
+
+        closer, next_man, second = parsed
+        teams[team] = {
+            "closer": closer,
+            "next": next_man,
+            "second": second,
+        }
 
     return teams
 
@@ -205,15 +193,16 @@ def fetch_closer_depth_chart():
         return {}
 
     soup = BeautifulSoup(r.text, "html.parser")
-    chart_lines = _extract_chart_lines(soup)
+    chart_text = _extract_chart_text(soup)
 
-    if not chart_lines:
+    if not chart_text:
         return {}
 
-    teams = _parse_chart_lines(chart_lines)
+    teams = _parse_chart_text(chart_text)
 
     if len(teams) != 30:
-        missing = sorted({_normalize_team(t) for t in TEAM_ABBRS if t != "WAS"} - set(teams.keys()))
+        expected = {_normalize_team(t) for t in TEAM_ABBRS if t != "WAS"}
+        missing = sorted(expected - set(teams.keys()))
         print(
             f"[CLOSER WATCH] Parsed {len(teams)} teams instead of 30. Missing: {missing}. Refusing to save.",
             flush=True,
