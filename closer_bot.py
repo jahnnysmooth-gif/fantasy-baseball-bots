@@ -98,6 +98,7 @@ TEAM_NAME_TO_ABBR = {
 }
 
 intents = discord.Intents.default()
+intents.message_content = True
 client = discord.Client(intents=intents)
 
 tracked_pitchers = build_tracked_relief_map()
@@ -247,16 +248,6 @@ def build_score_text(away_abbr: str, away_score: int, home_abbr: str, home_score
     if home_score > away_score:
         return f"{away_abbr} {away_score} - **{home_abbr} {home_score}**"
     return f"{away_abbr} {away_score} - {home_abbr} {home_score}"
-
-
-def ordinal(n: int | None) -> str:
-    if n is None:
-        return ""
-    if 10 <= (n % 100) <= 20:
-        suffix = "th"
-    else:
-        suffix = {1: "st", 2: "nd", 3: "rd"}.get(n % 10, "th")
-    return f"{n}{suffix}"
 
 
 def get_games() -> list:
@@ -474,7 +465,6 @@ def build_closer_watch_embed(
     label: str,
     stat_line: dict,
     summary: str,
-    fastest_pitch: float | None,
 ) -> discord.Embed:
     color = TEAM_COLORS.get(team_abbr, 0x2ECC71)
     logo = get_logo(team_abbr)
@@ -500,13 +490,6 @@ def build_closer_watch_embed(
         value=f"{stat_line['pitches']} P • {stat_line['strikes']} S",
         inline=False,
     )
-
-    if fastest_pitch is not None:
-        embed.add_field(
-            name="Fastest Pitch",
-            value=f"{fastest_pitch:.1f} mph",
-            inline=False,
-        )
 
     embed.add_field(
         name="Summary",
@@ -745,9 +728,24 @@ def get_pitcher_entry_context(feed: dict, pitcher_id: int, pitcher_side: str) ->
             inning = about.get("inning")
             half = about.get("halfInning", "")
 
-            inning_ordinal = ordinal(inning)
+            if inning is None:
+                return {
+                    "entry_phrase": "",
+                    "entry_game_state": "",
+                }
 
-            entry_phrase = f"the {half} of the {inning_ordinal}"
+            if half:
+                entry_phrase = f"the {half.lower()} of the {inning}"
+                if str(inning).endswith("1"):
+                    entry_phrase += "st"
+                elif str(inning).endswith("2"):
+                    entry_phrase += "nd"
+                elif str(inning).endswith("3") and str(inning) != "13":
+                    entry_phrase += "rd"
+                else:
+                    entry_phrase += "th"
+            else:
+                entry_phrase = f"the {inning}"
 
             return {
                 "entry_phrase": entry_phrase,
@@ -761,41 +759,6 @@ def get_pitcher_entry_context(feed: dict, pitcher_id: int, pitcher_side: str) ->
         "entry_phrase": "",
         "entry_game_state": "",
     }
-
-
-def get_fastest_pitch(feed: dict, pitcher_id: int) -> float | None:
-    try:
-        all_plays = feed.get("liveData", {}).get("plays", {}).get("allPlays", [])
-        fastest = None
-
-        for play in all_plays:
-            matchup = play.get("matchup", {})
-            pitcher = matchup.get("pitcher", {})
-            if pitcher.get("id") != pitcher_id:
-                continue
-
-            for event in play.get("playEvents", []):
-                pitch_data = event.get("pitchData")
-                if not pitch_data:
-                    continue
-
-                start_speed = pitch_data.get("startSpeed")
-                if start_speed is None:
-                    continue
-
-                try:
-                    velo = float(start_speed)
-                except (TypeError, ValueError):
-                    continue
-
-                if fastest is None or velo > fastest:
-                    fastest = velo
-
-        return fastest
-
-    except Exception as e:
-        log(f"Failed to get fastest pitch for pitcher {pitcher_id}: {e}")
-        return None
 
 
 def refresh_yesterday_pitchers_cache() -> None:
@@ -835,9 +798,9 @@ def refresh_yesterday_pitchers_cache() -> None:
                             continue
 
                         if pitching_stats.get("inningsPitched"):
-                            pid = person.get("id")
-                            if pid is not None:
-                                pitchers.add(pid)
+                            name = person.get("fullName", "")
+                            if name:
+                                pitchers.add(normalize_name(name))
 
         yesterday_pitchers_cache = pitchers
         yesterday_pitchers_cache_date = target_date
@@ -850,56 +813,15 @@ def refresh_yesterday_pitchers_cache() -> None:
 
 
 def debug_tracked_usage_yesterday() -> None:
-    today_et = now_et().date()
-    yesterday_et = today_et - timedelta(days=1)
-
-    tracked_used = set()
-    tracked_names = set(tracked_pitchers.keys())
-
-    try:
-        url = f"{MLB_SCHEDULE_URL}&date={yesterday_et.isoformat()}"
-        r = requests.get(url, timeout=30)
-        r.raise_for_status()
-        data = r.json()
-
-        for date_block in data.get("dates", []):
-            for game in date_block.get("games", []):
-                game_pk = game.get("gamePk")
-                if not game_pk:
-                    continue
-
-                feed = fetch_live_feed(game_pk)
-                if not feed:
-                    continue
-
-                box = feed.get("liveData", {}).get("boxscore", {}).get("teams", {})
-
-                for side in ["home", "away"]:
-                    players = box.get(side, {}).get("players", {})
-
-                    for p in players.values():
-                        pitching_stats = p.get("stats", {}).get("pitching")
-                        if not pitching_stats:
-                            continue
-
-                        if not pitching_stats.get("inningsPitched"):
-                            continue
-
-                        name = p.get("person", {}).get("fullName", "")
-                        norm = normalize_name(name)
-
-                        if norm in tracked_names:
-                            tracked_used.add(norm)
-
-        log(f"Tracked relievers used yesterday: {len(tracked_used)} / {len(tracked_pitchers)}")
-
-    except Exception as e:
-        log(f"Failed tracked-usage check: {e}")
-
-
-def pitched_yesterday(pitcher_id: int) -> bool:
     refresh_yesterday_pitchers_cache()
-    return pitcher_id in yesterday_pitchers_cache
+    tracked_used = {norm for norm in tracked_pitchers.keys() if norm in yesterday_pitchers_cache}
+    log(f"Tracked relievers used yesterday: {len(tracked_used)} / {len(tracked_pitchers)}")
+
+
+def pitched_yesterday(pitcher_name: str) -> bool:
+    refresh_yesterday_pitchers_cache()
+    return normalize_name(pitcher_name) in yesterday_pitchers_cache
+
 
 def get_tracked_pitchers_who_pitched_yesterday():
     refresh_yesterday_pitchers_cache()
@@ -907,18 +829,14 @@ def get_tracked_pitchers_who_pitched_yesterday():
     results = []
 
     for norm_name, info in tracked_pitchers.items():
-        pitcher_id = info.get("id")
-        if not pitcher_id:
-            continue
-
-        if pitcher_id in yesterday_pitchers_cache:
+        if norm_name in yesterday_pitchers_cache:
             results.append({
                 "name": info.get("name"),
                 "team": info.get("team"),
                 "role": info.get("role"),
             })
 
-    return sorted(results, key=lambda x: x["team"])
+    return sorted(results, key=lambda x: (x["team"], x["role"], x["name"]))
 
 
 def classify_outing(stat_line: dict) -> str:
@@ -988,6 +906,8 @@ def build_summary(
         line1 = f"{intro} and slammed the door to record the save."
     elif stat_line.get("blownSaves", 0) > 0:
         line1 = f"{intro} but was charged with a blown save."
+    elif stat_line.get("holds", 0) > 0:
+        line1 = f"{intro} and protected the lead to earn the hold."
     elif ip_float >= 2:
         line1 = f"{intro} and provided valuable length out of the bullpen."
     elif er == 0:
@@ -1009,12 +929,12 @@ def build_summary(
 
     return " ".join(parts)
 
+
 async def post_closer_watch_outing(
     outing: dict,
     stat_line: dict,
     label: str,
     summary: str,
-    fastest_pitch: float | None,
 ) -> None:
     channel = await get_channel()
     if channel is None:
@@ -1032,7 +952,6 @@ async def post_closer_watch_outing(
         label=label,
         stat_line=stat_line,
         summary=summary,
-        fastest_pitch=fastest_pitch,
     )
 
     try:
@@ -1082,8 +1001,7 @@ async def finalize_completed_outings() -> None:
 
             stat_line = get_pitcher_stat_line(feed, side, pitcher_id)
             context = get_pitcher_entry_context(feed, pitcher_id, side)
-            fastest_pitch = get_fastest_pitch(feed, pitcher_id)
-            worked_yesterday = pitched_yesterday(pitcher_id)
+            worked_yesterday = pitched_yesterday(outing["pitcher_name"])
 
             label = classify_outing(stat_line)
             summary = build_summary(
@@ -1098,7 +1016,6 @@ async def finalize_completed_outings() -> None:
                 stat_line=stat_line,
                 label=label,
                 summary=summary,
-                fastest_pitch=fastest_pitch,
             )
 
             to_remove.append(outing_key)
@@ -1220,7 +1137,7 @@ async def process_games() -> None:
 
                 full_stat_line = get_pitcher_stat_line(data, side, pitcher_id)
                 context = get_pitcher_entry_context(data, pitcher_id, side)
-                worked_yesterday = pitched_yesterday(pitcher_id)
+                worked_yesterday = pitched_yesterday(pitcher)
 
                 summary_outing = {
                     "pitcher_name": pitcher,
@@ -1390,37 +1307,47 @@ async def closer_watch_loop() -> None:
 async def on_ready():
     log(f"Logged in as {client.user}")
 
-    if not hasattr(client, "runtime_state_hydrated"):
+    if not getattr(client, "runtime_state_hydrated", False):
         hydrate_runtime_state()
         client.runtime_state_hydrated = True
 
-    if not hasattr(client, "final_game_task"):
+    final_task = getattr(client, "final_game_task", None)
+    if final_task is None or final_task.done():
         client.final_game_task = asyncio.create_task(final_game_loop())
 
-    if not hasattr(client, "closer_watch_task"):
+    closer_task = getattr(client, "closer_watch_task", None)
+    if closer_task is None or closer_task.done():
         client.closer_watch_task = asyncio.create_task(closer_watch_loop())
+
+
 @client.event
 async def on_message(message):
     if message.author == client.user:
         return
 
-    if message.content.lower() == "!yesterday":
+    if message.content.lower().strip() == "!yesterday":
         pitchers = get_tracked_pitchers_who_pitched_yesterday()
 
         if not pitchers:
             await message.channel.send("No tracked relievers pitched yesterday.")
             return
 
-        lines = []
+        chunks = []
+        current_chunk = "🔥 **Tracked Relievers Used Yesterday**\n\n"
+
         for p in pitchers:
-            lines.append(f"{p['team']} — {p['name']} ({p['role']})")
+            line = f"{p['team']} — {p['name']} ({p['role']})\n"
+            if len(current_chunk) + len(line) > 1800:
+                chunks.append(current_chunk)
+                current_chunk = ""
+            current_chunk += line
 
-        output = "\n".join(lines[:50])
+        if current_chunk:
+            current_chunk += f"\nTotal: {len(pitchers)}"
+            chunks.append(current_chunk)
 
-        await message.channel.send(
-            f"🔥 **Tracked Relievers Used Yesterday**\n\n{output}\n\nTotal: {len(pitchers)}"
-        )
-        
+        for chunk in chunks:
+            await message.channel.send(chunk)
 
 
 if not DISCORD_TOKEN:
