@@ -404,6 +404,7 @@ def build_save_embed(
     score: str,
     team_abbr: str,
     matchup: str,
+    summary: str,
 ) -> discord.Embed:
     color = TEAM_COLORS.get(team_abbr, 0x2ECC71)
     logo = get_logo(team_abbr)
@@ -413,6 +414,7 @@ def build_save_embed(
         description=(
             f"⚾ **{matchup}**\n\n"
             f"**{stats}**\n\n"
+            f"**Summary**\n{summary}\n\n"
             f"🏁 **Final Score**\n{score}"
         ),
         color=color,
@@ -435,6 +437,7 @@ def build_blown_embed(
     score: str,
     team_abbr: str,
     matchup: str,
+    summary: str,
 ) -> discord.Embed:
     color = TEAM_COLORS.get(team_abbr, 0xE74C3C)
     logo = get_logo(team_abbr)
@@ -444,6 +447,7 @@ def build_blown_embed(
         description=(
             f"⚾ **{matchup}**\n\n"
             f"**{stats}**\n\n"
+            f"**Summary**\n{summary}\n\n"
             f"🏁 **Final Score**\n{score}"
         ),
         color=color,
@@ -816,7 +820,7 @@ def refresh_yesterday_pitchers_cache() -> None:
                 if not game_pk:
                     continue
 
-                feed = fetch_live_feed(game_pk)
+                    feed = fetch_live_feed(game_pk)
                 if not feed:
                     continue
 
@@ -1056,6 +1060,8 @@ async def finalize_completed_outings() -> None:
 
 
 async def process_games() -> None:
+    global posted_outings
+
     state = load_state()
     posted_events = set(state.get("posted_events", []))
     posted_outings.update(state.get("posted_outings", []))
@@ -1164,6 +1170,25 @@ async def process_games() -> None:
 
                 stat_line = format_stat_line(ip, h, er, bb, k)
 
+                full_stat_line = get_pitcher_stat_line(data, side, pitcher_id)
+                context = get_game_context(data, side)
+                fastest_pitch = get_fastest_pitch(data, pitcher_id)
+                worked_yesterday = pitched_yesterday(pitcher_id)
+
+                summary_outing = {
+                    "pitcher_name": pitcher,
+                    "team": team_abbr or team,
+                    "role": tracked_pitchers.get(normalize_name(pitcher), {}).get("role", "Tracked"),
+                }
+
+                summary = build_summary(
+                    summary_outing,
+                    full_stat_line,
+                    context,
+                    fastest_pitch=fastest_pitch,
+                    worked_yesterday=worked_yesterday,
+                )
+
                 if pitching_stats.get("saves", 0) > 0:
                     total_saves_found += 1
                     game_saves += 1
@@ -1181,6 +1206,7 @@ async def process_games() -> None:
                             score=score,
                             team_abbr=team_abbr,
                             matchup=matchup,
+                            summary=summary,
                         )
                         try:
                             await channel.send(embed=embed)
@@ -1215,6 +1241,7 @@ async def process_games() -> None:
                             score=score,
                             team_abbr=team_abbr,
                             matchup=matchup,
+                            summary=summary,
                         )
                         try:
                             await channel.send(embed=embed)
