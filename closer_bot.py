@@ -737,63 +737,29 @@ def get_pitcher_entry_context(feed: dict, pitcher_id: int, pitcher_side: str) ->
         for play in all_plays:
             matchup = play.get("matchup", {})
             pitcher = matchup.get("pitcher", {})
+
             if pitcher.get("id") != pitcher_id:
                 continue
 
             about = play.get("about", {})
             inning = about.get("inning")
-            half_inning = about.get("halfInning", "").lower()
-
-            linescore_teams = feed.get("liveData", {}).get("linescore", {}).get("teams", {})
-            current_home_runs = linescore_teams.get("home", {}).get("runs", 0)
-            current_away_runs = linescore_teams.get("away", {}).get("runs", 0)
-
-            result = play.get("result", {})
-            home_score = result.get("homeScore", current_home_runs)
-            away_score = result.get("awayScore", current_away_runs)
+            half = about.get("halfInning", "")
 
             inning_ordinal = ordinal(inning)
 
-            if pitcher_side == "home":
-                team_runs = home_score
-                opp_runs = away_score
-            else:
-                team_runs = away_score
-                opp_runs = home_score
-
-            diff = team_runs - opp_runs
-
-            if diff > 0:
-                game_state = f"protecting a {diff}-run lead"
-            elif diff < 0:
-                game_state = f"with his team trailing by {abs(diff)}"
-            else:
-                game_state = "with the game tied"
-
-            if half_inning in {"top", "bottom"} and inning_ordinal:
-                entry_phrase = f"the {half_inning} of the {inning_ordinal}"
-            elif inning_ordinal:
-                entry_phrase = f"the {inning_ordinal}"
-            else:
-                entry_phrase = ""
+            entry_phrase = f"the {half} of the {inning_ordinal}"
 
             return {
-                "entry_inning": inning,
-                "entry_inning_ordinal": inning_ordinal,
-                "entry_half": half_inning,
                 "entry_phrase": entry_phrase,
-                "entry_game_state": game_state,
+                "entry_game_state": "",
             }
 
     except Exception as e:
-        log(f"Failed to get pitcher entry context for pitcher {pitcher_id}: {e}")
+        log(f"Entry context error: {e}")
 
     return {
-        "entry_inning": None,
-        "entry_inning_ordinal": "",
-        "entry_half": "",
         "entry_phrase": "",
-        "entry_game_state": "in a bullpen spot",
+        "entry_game_state": "",
     }
 
 
@@ -935,6 +901,25 @@ def pitched_yesterday(pitcher_id: int) -> bool:
     refresh_yesterday_pitchers_cache()
     return pitcher_id in yesterday_pitchers_cache
 
+def get_tracked_pitchers_who_pitched_yesterday():
+    refresh_yesterday_pitchers_cache()
+
+    results = []
+
+    for norm_name, info in tracked_pitchers.items():
+        pitcher_id = info.get("id")
+        if not pitcher_id:
+            continue
+
+        if pitcher_id in yesterday_pitchers_cache:
+            results.append({
+                "name": info.get("name"),
+                "team": info.get("team"),
+                "role": info.get("role"),
+            })
+
+    return sorted(results, key=lambda x: x["team"])
+
 
 def classify_outing(stat_line: dict) -> str:
     if stat_line.get("saves", 0) > 0:
@@ -976,57 +961,53 @@ def build_summary(
     team = outing["team"]
 
     ip = stat_line["ip"]
+    try:
+        ip_float = float(ip)
+    except Exception:
+        ip_float = 0.0
+
     h = stat_line["h"]
     er = stat_line["er"]
     bb = stat_line["bb"]
     k = stat_line["k"]
 
     entry_phrase = context.get("entry_phrase", "")
-    situation = context.get("entry_game_state", "in a bullpen spot")
-
-    baserunners = h + bb
-    parts = []
+    situation = context.get("entry_game_state", "")
 
     if entry_phrase:
-        opening_prefix = f"{name} entered in {entry_phrase} {situation} for {team}"
+        intro = f"{name} took over in {entry_phrase}"
     else:
-        opening_prefix = f"{name} entered {situation} for {team}"
+        intro = f"{name} entered in relief"
 
-    opening_prefix = " ".join(opening_prefix.split())
+    if situation:
+        intro += f" {situation}"
+
+    intro += f" for {team}"
 
     if stat_line.get("saves", 0) > 0:
-        parts.append(f"{opening_prefix} and finished the game with a save.")
-    elif stat_line.get("holds", 0) > 0:
-        parts.append(f"{opening_prefix} and recorded a hold before turning the game over to the next reliever.")
+        line1 = f"{intro} and slammed the door to record the save."
     elif stat_line.get("blownSaves", 0) > 0:
-        parts.append(f"{opening_prefix} but was charged with a blown save.")
-    elif er == 0 and baserunners == 0 and k >= 2:
-        parts.append(f"{opening_prefix} and turned in a dominant outing.")
-    elif er == 0 and baserunners == 0:
-        parts.append(f"{opening_prefix} and delivered a clean scoreless appearance.")
-    elif er == 0 and baserunners >= 2:
-        parts.append(f"{opening_prefix} and worked through traffic to keep the outing scoreless.")
-    elif er >= 3:
-        parts.append(f"{opening_prefix} but the outing unraveled quickly.")
+        line1 = f"{intro} but was charged with a blown save."
+    elif ip_float >= 2:
+        line1 = f"{intro} and provided valuable length out of the bullpen."
+    elif er == 0:
+        line1 = f"{intro} and delivered a scoreless outing."
     else:
-        parts.append(f"{opening_prefix} and allowed runs in relief.")
+        line1 = f"{intro} and allowed runs in relief."
 
-    if er == 0 and baserunners == 0 and k >= 2:
-        parts.append(f"He worked {ip} innings without allowing a baserunner and struck out {k}.")
-    elif er == 0 and baserunners == 0:
-        parts.append(f"He covered {ip} innings and kept traffic off the bases.")
-    elif er == 0 and baserunners >= 2:
-        parts.append(f"He allowed {baserunners} baserunners over {ip} innings but escaped the jam.")
-    elif er >= 3:
-        parts.append(f"He was charged with {er} earned runs over {ip} innings while allowing {h} hits and {bb} walks.")
+    if er == 0 and h == 0 and bb == 0:
+        line2 = f"He was dominant over {ip} innings, striking out {k}."
+    elif er == 0:
+        line2 = f"He worked {ip} scoreless innings, allowing {h} hits and {bb} walks while striking out {k}."
     else:
-        parts.append(f"He finished with {ip} innings pitched, {er} earned runs, {h} hits, {bb} walks and {k} strikeouts.")
+        line2 = f"He allowed {er} earned runs over {ip} innings on {h} hits and {bb} walks, striking out {k}."
+
+    parts = [line1, line2]
 
     if worked_yesterday:
         parts.append(f"He worked a second straight day for {team}.")
 
     return " ".join(parts)
-
 
 async def post_closer_watch_outing(
     outing: dict,
@@ -1418,6 +1399,28 @@ async def on_ready():
 
     if not hasattr(client, "closer_watch_task"):
         client.closer_watch_task = asyncio.create_task(closer_watch_loop())
+@client.event
+async def on_message(message):
+    if message.author == client.user:
+        return
+
+    if message.content.lower() == "!yesterday":
+        pitchers = get_tracked_pitchers_who_pitched_yesterday()
+
+        if not pitchers:
+            await message.channel.send("No tracked relievers pitched yesterday.")
+            return
+
+        lines = []
+        for p in pitchers:
+            lines.append(f"{p['team']} — {p['name']} ({p['role']})")
+
+        output = "\n".join(lines[:50])
+
+        await message.channel.send(
+            f"🔥 **Tracked Relievers Used Yesterday**\n\n{output}\n\nTotal: {len(pitchers)}"
+        )
+        
 
 
 if not DISCORD_TOKEN:
