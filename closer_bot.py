@@ -829,12 +829,14 @@ def get_tracked_pitchers_who_pitched_yesterday():
     results = []
 
     for norm_name, info in tracked_pitchers.items():
-        if norm_name in yesterday_pitchers_cache:
-            results.append({
-                "name": info.get("name"),
-                "team": info.get("team"),
-                "role": info.get("role"),
-            })
+        for y_name in yesterday_pitchers_cache:
+            if norm_name in y_name or y_name in norm_name:
+                results.append({
+                    "name": info.get("name"),
+                    "team": info.get("team"),
+                    "role": info.get("role"),
+                })
+                break
 
     return sorted(results, key=lambda x: (x["team"], x["role"], x["name"]))
 
