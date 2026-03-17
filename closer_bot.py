@@ -642,7 +642,7 @@ def maybe_start_outing(game_id: int, pitcher_info: dict) -> None:
     active_outings[outing_key] = {
         "game_id": game_id,
         "pitcher_id": pitcher_info["id"],
-        "pitcher_name": tracked_info.get("name", raw_name),
+        "pitcher_name": raw_name,
         "team": tracked_info.get("team", pitcher_info.get("team")),
         "role": tracked_info.get("role", "Tracked"),
         "side": pitcher_info.get("side"),
@@ -652,7 +652,7 @@ def maybe_start_outing(game_id: int, pitcher_info: dict) -> None:
     }
 
     log(
-        f"Started outing | {tracked_info.get('name', raw_name)} | "
+        f"Started outing | {raw_name} | "
         f"{tracked_info.get('team')} | {tracked_info.get('role')} | game {game_id}"
     )
 
@@ -887,7 +887,6 @@ def classify_outing(stat_line: dict) -> str:
     hits = stat_line["h"]
     bb = stat_line["bb"]
     k = stat_line["k"]
-
     baserunners = hits + bb
 
     if er >= 3:
@@ -944,6 +943,10 @@ def build_summary(
         line1 = f"{intro} but was charged with a blown save."
     elif stat_line.get("holds", 0) > 0:
         line1 = f"{intro} and protected the lead to earn the hold."
+    elif er >= 3:
+        line1 = f"{intro} but was hit hard in a rough outing."
+    elif er >= 1 and ip_float >= 2:
+        line1 = f"{intro} and gave the bullpen length, but not without damage."
     elif ip_float >= 2:
         line1 = f"{intro} and provided valuable length out of the bullpen."
     elif er == 0:
@@ -1180,7 +1183,7 @@ async def process_games() -> None:
 
                 tracked_info = find_tracked_pitcher_info(pitcher)
                 summary_outing = {
-                    "pitcher_name": tracked_info.get("name", pitcher) if tracked_info else pitcher,
+                    "pitcher_name": pitcher,
                     "team": tracked_info.get("team", team_abbr or team) if tracked_info else (team_abbr or team),
                     "role": tracked_info.get("role", "Tracked") if tracked_info else "Tracked",
                 }
@@ -1197,7 +1200,7 @@ async def process_games() -> None:
                         "outing": {
                             "game_id": game_pk,
                             "pitcher_id": pitcher_id,
-                            "pitcher_name": tracked_info.get("name", pitcher),
+                            "pitcher_name": pitcher,
                             "team": tracked_info.get("team", team_abbr or team),
                             "role": tracked_info.get("role", "Tracked"),
                             "side": side,
