@@ -814,13 +814,24 @@ def refresh_yesterday_pitchers_cache() -> None:
 
 def debug_tracked_usage_yesterday() -> None:
     refresh_yesterday_pitchers_cache()
-    tracked_used = {norm for norm in tracked_pitchers.keys() if norm in yesterday_pitchers_cache}
+    tracked_used = {
+        norm for norm in tracked_pitchers.keys()
+        if any(norm.split()[-1] in y for y in yesterday_pitchers_cache)
+    }
     log(f"Tracked relievers used yesterday: {len(tracked_used)} / {len(tracked_pitchers)}")
 
 
 def pitched_yesterday(pitcher_name: str) -> bool:
     refresh_yesterday_pitchers_cache()
-    return normalize_name(pitcher_name) in yesterday_pitchers_cache
+
+    norm = normalize_name(pitcher_name)
+    last = norm.split()[-1] if norm else ""
+
+    for y_name in yesterday_pitchers_cache:
+        if last and last in y_name:
+            return True
+
+    return False
 
 
 def get_tracked_pitchers_who_pitched_yesterday():
