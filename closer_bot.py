@@ -249,6 +249,16 @@ def build_score_text(away_abbr: str, away_score: int, home_abbr: str, home_score
     return f"{away_abbr} {away_score} - {home_abbr} {home_score}"
 
 
+def ordinal(n: int | None) -> str:
+    if n is None:
+        return ""
+    if 10 <= (n % 100) <= 20:
+        suffix = "th"
+    else:
+        suffix = {1: "st", 2: "nd", 3: "rd"}.get(n % 10, "th")
+    return f"{n}{suffix}"
+
+
 def get_games() -> list:
     today_et = now_et().date()
     yesterday_et = today_et - timedelta(days=1)
@@ -422,10 +432,7 @@ def build_save_embed(
     )
 
     if logo:
-        embed.set_author(name=team, icon_url=logo)
         embed.set_thumbnail(url=logo)
-    else:
-        embed.set_author(name=f"{team} Bullpen Alert")
 
     return embed
 
@@ -455,10 +462,7 @@ def build_blown_embed(
     )
 
     if logo:
-        embed.set_author(name=team, icon_url=logo)
         embed.set_thumbnail(url=logo)
-    else:
-        embed.set_author(name=f"{team} Bullpen Alert")
 
     return embed
 
@@ -726,41 +730,71 @@ def get_pitcher_stat_line(feed: dict, side: str, pitcher_id: int) -> dict:
         }
 
 
-def get_game_context(feed: dict, side: str) -> dict:
+def get_pitcher_entry_context(feed: dict, pitcher_id: int, pitcher_side: str) -> dict:
     try:
-        linescore = feed.get("liveData", {}).get("linescore", {})
-        inning = linescore.get("currentInning", 0)
-        inning_ordinal = linescore.get("currentInningOrdinal", str(inning))
+        all_plays = feed.get("liveData", {}).get("plays", {}).get("allPlays", [])
 
-        home_runs = linescore.get("teams", {}).get("home", {}).get("runs", 0)
-        away_runs = linescore.get("teams", {}).get("away", {}).get("runs", 0)
+        for play in all_plays:
+            matchup = play.get("matchup", {})
+            pitcher = matchup.get("pitcher", {})
+            if pitcher.get("id") != pitcher_id:
+                continue
 
-        if side == "home":
-            team_runs = home_runs
-            opp_runs = away_runs
-        else:
-            team_runs = away_runs
-            opp_runs = home_runs
+            about = play.get("about", {})
+            inning = about.get("inning")
+            half_inning = about.get("halfInning", "").lower()
 
-        diff = team_runs - opp_runs
+            linescore_teams = feed.get("liveData", {}).get("linescore", {}).get("teams", {})
+            current_home_runs = linescore_teams.get("home", {}).get("runs", 0)
+            current_away_runs = linescore_teams.get("away", {}).get("runs", 0)
 
-        if diff > 0:
-            game_state = f"protecting a {diff}-run lead"
-        elif diff < 0:
-            game_state = f"working while trailing by {abs(diff)}"
-        else:
-            game_state = "with the game tied"
+            result = play.get("result", {})
+            home_score = result.get("homeScore", current_home_runs)
+            away_score = result.get("awayScore", current_away_runs)
 
-        return {
-            "inning_ordinal": inning_ordinal,
-            "game_state": game_state,
-        }
+            inning_ordinal = ordinal(inning)
 
-    except Exception:
-        return {
-            "inning_ordinal": "",
-            "game_state": "in a bullpen spot",
-        }
+            if pitcher_side == "home":
+                team_runs = home_score
+                opp_runs = away_score
+            else:
+                team_runs = away_score
+                opp_runs = home_score
+
+            diff = team_runs - opp_runs
+
+            if diff > 0:
+                game_state = f"protecting a {diff}-run lead"
+            elif diff < 0:
+                game_state = f"with his team trailing by {abs(diff)}"
+            else:
+                game_state = "with the game tied"
+
+            if half_inning in {"top", "bottom"} and inning_ordinal:
+                entry_phrase = f"the {half_inning} of the {inning_ordinal}"
+            elif inning_ordinal:
+                entry_phrase = f"the {inning_ordinal}"
+            else:
+                entry_phrase = ""
+
+            return {
+                "entry_inning": inning,
+                "entry_inning_ordinal": inning_ordinal,
+                "entry_half": half_inning,
+                "entry_phrase": entry_phrase,
+                "entry_game_state": game_state,
+            }
+
+    except Exception as e:
+        log(f"Failed to get pitcher entry context for pitcher {pitcher_id}: {e}")
+
+    return {
+        "entry_inning": None,
+        "entry_inning_ordinal": "",
+        "entry_half": "",
+        "entry_phrase": "",
+        "entry_game_state": "in a bullpen spot",
+    }
 
 
 def get_fastest_pitch(feed: dict, pitcher_id: int) -> float | None:
@@ -936,7 +970,6 @@ def build_summary(
     outing: dict,
     stat_line: dict,
     context: dict,
-    fastest_pitch: float | None = None,
     worked_yesterday: bool = False,
 ) -> str:
     name = outing["pitcher_name"]
@@ -948,45 +981,35 @@ def build_summary(
     bb = stat_line["bb"]
     k = stat_line["k"]
 
-    inning = context["inning_ordinal"]
-    situation = context["game_state"]
+    entry_phrase = context.get("entry_phrase", "")
+    situation = context.get("entry_game_state", "in a bullpen spot")
 
     baserunners = h + bb
-
     parts = []
 
-    if stat_line.get("saves", 0) > 0:
-        parts.append(
-            f"{name} entered in the {inning} {situation} for {team} and finished the game with a save."
-        )
-    elif stat_line.get("holds", 0) > 0:
-        parts.append(
-            f"{name} entered in the {inning} {situation} for {team} and recorded a hold before turning the game over to the next reliever."
-        )
-    elif stat_line.get("blownSaves", 0) > 0:
-        parts.append(
-            f"{name} entered in the {inning} {situation} for {team} but was charged with a blown save."
-        )
-    elif er == 0 and baserunners == 0 and k >= 2:
-        parts.append(
-            f"{name} entered in the {inning} {situation} for {team} and turned in a dominant outing."
-        )
-    elif er == 0 and baserunners == 0:
-        parts.append(
-            f"{name} entered in the {inning} {situation} for {team} and delivered a clean scoreless appearance."
-        )
-    elif er == 0 and baserunners >= 2:
-        parts.append(
-            f"{name} entered in the {inning} {situation} for {team} and worked through traffic to keep the outing scoreless."
-        )
-    elif er >= 3:
-        parts.append(
-            f"{name} entered in the {inning} {situation} for {team} but the outing unraveled quickly."
-        )
+    if entry_phrase:
+        opening_prefix = f"{name} entered in {entry_phrase} {situation} for {team}"
     else:
-        parts.append(
-            f"{name} entered in the {inning} {situation} for {team} and allowed runs in relief."
-        )
+        opening_prefix = f"{name} entered {situation} for {team}"
+
+    opening_prefix = " ".join(opening_prefix.split())
+
+    if stat_line.get("saves", 0) > 0:
+        parts.append(f"{opening_prefix} and finished the game with a save.")
+    elif stat_line.get("holds", 0) > 0:
+        parts.append(f"{opening_prefix} and recorded a hold before turning the game over to the next reliever.")
+    elif stat_line.get("blownSaves", 0) > 0:
+        parts.append(f"{opening_prefix} but was charged with a blown save.")
+    elif er == 0 and baserunners == 0 and k >= 2:
+        parts.append(f"{opening_prefix} and turned in a dominant outing.")
+    elif er == 0 and baserunners == 0:
+        parts.append(f"{opening_prefix} and delivered a clean scoreless appearance.")
+    elif er == 0 and baserunners >= 2:
+        parts.append(f"{opening_prefix} and worked through traffic to keep the outing scoreless.")
+    elif er >= 3:
+        parts.append(f"{opening_prefix} but the outing unraveled quickly.")
+    else:
+        parts.append(f"{opening_prefix} and allowed runs in relief.")
 
     if er == 0 and baserunners == 0 and k >= 2:
         parts.append(f"He worked {ip} innings without allowing a baserunner and struck out {k}.")
@@ -998,9 +1021,6 @@ def build_summary(
         parts.append(f"He was charged with {er} earned runs over {ip} innings while allowing {h} hits and {bb} walks.")
     else:
         parts.append(f"He finished with {ip} innings pitched, {er} earned runs, {h} hits, {bb} walks and {k} strikeouts.")
-
-    if fastest_pitch is not None:
-        parts.append(f"His fastest pitch was {fastest_pitch:.1f} mph.")
 
     if worked_yesterday:
         parts.append(f"He worked a second straight day for {team}.")
@@ -1080,7 +1100,7 @@ async def finalize_completed_outings() -> None:
                 continue
 
             stat_line = get_pitcher_stat_line(feed, side, pitcher_id)
-            context = get_game_context(feed, side)
+            context = get_pitcher_entry_context(feed, pitcher_id, side)
             fastest_pitch = get_fastest_pitch(feed, pitcher_id)
             worked_yesterday = pitched_yesterday(pitcher_id)
 
@@ -1089,7 +1109,6 @@ async def finalize_completed_outings() -> None:
                 outing,
                 stat_line,
                 context,
-                fastest_pitch=fastest_pitch,
                 worked_yesterday=worked_yesterday,
             )
 
@@ -1219,8 +1238,7 @@ async def process_games() -> None:
                 stat_line = format_stat_line(ip, h, er, bb, k)
 
                 full_stat_line = get_pitcher_stat_line(data, side, pitcher_id)
-                context = get_game_context(data, side)
-                fastest_pitch = get_fastest_pitch(data, pitcher_id)
+                context = get_pitcher_entry_context(data, pitcher_id, side)
                 worked_yesterday = pitched_yesterday(pitcher_id)
 
                 summary_outing = {
@@ -1233,7 +1251,6 @@ async def process_games() -> None:
                     summary_outing,
                     full_stat_line,
                     context,
-                    fastest_pitch=fastest_pitch,
                     worked_yesterday=worked_yesterday,
                 )
 
