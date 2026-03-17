@@ -1,91 +1,128 @@
 import json
 import os
+import re
 from datetime import datetime
 
 import requests
 from bs4 import BeautifulSoup
 
 STATE_FILE = "state/closers/closer_depth_chart.json"
-URL = "https://www.fangraphs.com/roster-resource/closer-depth-chart"
+URL = "https://closermonkey.com"
 
 TEAM_ABBRS = {
-    "ARI","ATL","BAL","BOS","CHC","CWS","CIN","CLE","COL","DET",
-    "HOU","KC","LAA","LAD","MIA","MIL","MIN","NYM","NYY","ATH",
-    "PHI","PIT","SD","SF","SEA","STL","TB","TEX","TOR","WSH"
+    "ARI", "ATL", "BAL", "BOS", "CHC", "CWS", "CIN", "CLE", "COL", "DET",
+    "HOU", "KC", "LAA", "LAD", "MIA", "MIL", "MIN", "NYM", "NYY", "ATH",
+    "PHI", "PIT", "SD", "SF", "SEA", "STL", "TB", "TEX", "TOR", "WSH", "WAS"
 }
 
 
+def _normalize_team(team: str) -> str:
+    team = team.strip().upper()
+    if team == "WAS":
+        return "WSH"
+    return team
+
+
+def _clean_name(name: str) -> str:
+    name = name.replace("*", "")
+    name = re.sub(r"\s+", " ", name)
+    return name.strip()
+
+
 def fetch_closer_depth_chart():
-    print("[CLOSER WATCH] Fetching FanGraphs closer depth chart", flush=True)
+    print("[CLOSER WATCH] Fetching Closer Monkey depth chart", flush=True)
 
     try:
-        r = requests.get(
-            URL,
-            timeout=20,
-            headers={"User-Agent": "Mozilla/5.0"}
-        )
+        r = requests.get(URL, timeout=20)
         r.raise_for_status()
     except requests.RequestException as e:
-        print(f"[CLOSER WATCH] Failed to load FanGraphs page: {e}", flush=True)
+        print(f"[CLOSER WATCH] Failed to load site: {e}", flush=True)
         return {}
 
     soup = BeautifulSoup(r.text, "html.parser")
+    strings = [s.strip() for s in soup.stripped_strings if s.strip()]
 
     teams = {}
 
-    tables = soup.find_all("table")
+    # Find chart start and stop markers
+    start_idx = None
+    end_idx = None
 
-    for table in tables:
+    for i, s in enumerate(strings):
+        if "Updated MLB Closer Depth Chart" in s:
+            start_idx = i
+            break
 
-        rows = table.find_all("tr")
+    if start_idx is None:
+        print("[CLOSER WATCH] Could not find chart header", flush=True)
+        return {}
 
-        if not rows:
+    for i in range(start_idx, len(strings)):
+        if strings[i].startswith("* = closer-by-committee"):
+            end_idx = i
+            break
+
+    if end_idx is None:
+        print("[CLOSER WATCH] Could not find chart footer", flush=True)
+        return {}
+
+    chart_strings = strings[start_idx:end_idx]
+
+    # Keep only the actual chart tokens after the repeated header row
+    # We expect sequence like:
+    # BAL, Helsley, Wells, Akin, 3/13/26, ATL, Iglesias, R Suárez, Lee, 3/13/26, ...
+    first_team_idx = None
+    for i, s in enumerate(chart_strings):
+        if s.upper() in TEAM_ABBRS:
+            first_team_idx = i
+            break
+
+    if first_team_idx is None:
+        print("[CLOSER WATCH] Could not find first team token", flush=True)
+        return {}
+
+    chart_strings = chart_strings[first_team_idx:]
+
+    i = 0
+    while i < len(chart_strings):
+        token = chart_strings[i].upper()
+
+        if token not in TEAM_ABBRS:
+            i += 1
             continue
 
-        team = None
-        closer = None
-        setup = []
+        team = _normalize_team(token)
 
-        for row in rows:
+        if i + 4 >= len(chart_strings):
+            break
 
-            cols = [c.get_text(strip=True) for c in row.find_all(["td","th"])]
+        closer = _clean_name(chart_strings[i + 1])
+        next_man = _clean_name(chart_strings[i + 2])
+        second = _clean_name(chart_strings[i + 3])
+        updated = chart_strings[i + 4]
 
-            if not cols:
-                continue
+        if not re.fullmatch(r"\d{1,2}/\d{1,2}/\d{2}", updated):
+            print(
+                f"[CLOSER WATCH] Bad date slot for {team}: "
+                f"{closer} | {next_man} | {second} | {updated}",
+                flush=True,
+            )
+            i += 1
+            continue
 
-            # Detect team header
-            if len(cols) == 1 and cols[0].upper() in TEAM_ABBRS:
-                team = cols[0].upper()
-                closer = None
-                setup = []
-                continue
+        teams[team] = {
+            "closer": closer,
+            "next": next_man,
+            "second": second,
+        }
 
-            if not team:
-                continue
+        i += 5
 
-            if len(cols) < 2:
-                continue
-
-            role = cols[0]
-            name = cols[1]
-
-            if role in ["Closer","Co-Closer"] and not closer:
-                closer = name
-
-            elif role == "Setup Man":
-                setup.append(name)
-
-        if team and closer:
-            teams[team] = {
-                "closer": closer,
-                "next": setup[0] if len(setup) > 0 else "",
-                "second": setup[1] if len(setup) > 1 else "",
-            }
-
-    print(f"[CLOSER WATCH] Parsed {len(teams)} bullpens", flush=True)
-
-    if len(teams) < 28:
-        print("[CLOSER WATCH] Suspicious team count, refusing to save", flush=True)
+    if len(teams) < 25 or len(teams) > 35:
+        print(
+            f"[CLOSER WATCH] Parsed suspicious bullpen count: {len(teams)}. Refusing to save.",
+            flush=True,
+        )
         return {}
 
     os.makedirs(os.path.dirname(STATE_FILE), exist_ok=True)
@@ -97,36 +134,31 @@ def fetch_closer_depth_chart():
     }
 
     with open(STATE_FILE, "w", encoding="utf-8") as f:
-        json.dump(payload, f, indent=2)
+        json.dump(payload, f, indent=2, ensure_ascii=False)
 
     print(f"[CLOSER WATCH] Stored {len(teams)} bullpens in {STATE_FILE}", flush=True)
-
     return teams
 
 
 def load_depth_chart():
-
     if not os.path.exists(STATE_FILE):
         return {}
 
     try:
-        with open(STATE_FILE,"r") as f:
+        with open(STATE_FILE, "r", encoding="utf-8") as f:
             data = json.load(f)
-            return data.get("teams",{})
+        return data.get("teams", {})
     except Exception as e:
-        print(f"[CLOSER WATCH] Failed to load depth chart: {e}", flush=True)
+        print(f"[CLOSER WATCH] Failed to load saved depth chart: {e}", flush=True)
         return {}
 
 
 if __name__ == "__main__":
-
     teams = fetch_closer_depth_chart()
 
     if teams:
-        print("[CLOSER WATCH] Sample:", flush=True)
-
-        for i,(team,data) in enumerate(sorted(teams.items())):
-            print(team,data)
-
+        print("[CLOSER WATCH] Sample entries:", flush=True)
+        for i, (team, roles) in enumerate(sorted(teams.items())):
+            print(f"{team}: {roles}", flush=True)
             if i >= 4:
                 break
