@@ -804,8 +804,6 @@ def refresh_yesterday_pitchers_cache() -> None:
                 if not game_pk:
                     continue
 
-                    # no-op
-
                 feed = fetch_live_feed(game_pk)
                 if not feed:
                     continue
@@ -1082,6 +1080,7 @@ async def process_games() -> None:
     total_saves_found = 0
     total_blown_found = 0
     total_posted = 0
+    total_tracked_fallback_posted = 0
 
     log(f"Games found: {len(games)}")
 
@@ -1148,7 +1147,9 @@ async def process_games() -> None:
         game_saves = 0
         game_blown = 0
         game_posted = 0
+        game_tracked_fallback_posted = 0
         blown_posted_teams = set()
+        tracked_final_outings = []
 
         for side in ["away", "home"]:
             team_box = box.get(side, {})
@@ -1177,10 +1178,11 @@ async def process_games() -> None:
                 context = get_pitcher_entry_context(data, pitcher_id, side)
                 worked_yesterday = pitched_yesterday(pitcher)
 
+                tracked_info = find_tracked_pitcher_info(pitcher)
                 summary_outing = {
-                    "pitcher_name": pitcher,
-                    "team": team_abbr or team,
-                    "role": tracked_pitchers.get(normalize_name(pitcher), {}).get("role", "Tracked"),
+                    "pitcher_name": tracked_info.get("name", pitcher) if tracked_info else pitcher,
+                    "team": tracked_info.get("team", team_abbr or team) if tracked_info else (team_abbr or team),
+                    "role": tracked_info.get("role", "Tracked") if tracked_info else "Tracked",
                 }
 
                 summary = build_summary(
@@ -1189,6 +1191,20 @@ async def process_games() -> None:
                     context,
                     worked_yesterday=worked_yesterday,
                 )
+
+                if tracked_info and ip not in {"0.0", "0", ""}:
+                    tracked_final_outings.append({
+                        "outing": {
+                            "game_id": game_pk,
+                            "pitcher_id": pitcher_id,
+                            "pitcher_name": tracked_info.get("name", pitcher),
+                            "team": tracked_info.get("team", team_abbr or team),
+                            "role": tracked_info.get("role", "Tracked"),
+                            "side": side,
+                        },
+                        "stat_line": full_stat_line,
+                        "summary": summary,
+                    })
 
                 if pitching_stats.get("saves", 0) > 0:
                     total_saves_found += 1
@@ -1256,13 +1272,33 @@ async def process_games() -> None:
                         except Exception as e:
                             log(f"Discord send error on blown save: {e}")
 
-        if game_saves > 0 or game_blown > 0:
+        for tracked_item in tracked_final_outings:
+            outing = tracked_item["outing"]
+            outing_key = f"{outing['game_id']}_{outing['pitcher_id']}"
+
+            if outing_key in posted_outings:
+                continue
+
+            label = classify_outing(tracked_item["stat_line"])
+
+            await post_closer_watch_outing(
+                outing=outing,
+                stat_line=tracked_item["stat_line"],
+                label=label,
+                summary=tracked_item["summary"],
+            )
+            total_posted += 1
+            game_posted += 1
+            total_tracked_fallback_posted += 1
+            game_tracked_fallback_posted += 1
+
+        if game_saves > 0 or game_blown > 0 or game_tracked_fallback_posted > 0:
             processed_final_games[game_pk_str] = build_done_final_record(record, final_stamp)
         else:
             pending_record = build_pending_final_record(record, final_stamp)
             if pending_record_expired(pending_record, current_utc):
                 processed_final_games[game_pk_str] = build_done_no_event_record(record, final_stamp)
-                log(f"Final game expired with no save/blown save after 6 hours: {game_pk}")
+                log(f"Final game expired with no tracked event after 6 hours: {game_pk}")
             else:
                 processed_final_games[game_pk_str] = pending_record
                 log(
@@ -1274,6 +1310,7 @@ async def process_games() -> None:
             f"Game {game_pk} complete | "
             f"Saves found: {game_saves} | "
             f"Blown saves found: {game_blown} | "
+            f"Tracked fallback posted: {game_tracked_fallback_posted} | "
             f"Posted: {game_posted}"
         )
 
@@ -1288,6 +1325,7 @@ async def process_games() -> None:
         f"New finals processed: {total_new_final_games} | "
         f"Saves found: {total_saves_found} | "
         f"Blown saves found: {total_blown_found} | "
+        f"Tracked fallback posted: {total_tracked_fallback_posted} | "
         f"Posted this loop: {total_posted}"
     )
 
