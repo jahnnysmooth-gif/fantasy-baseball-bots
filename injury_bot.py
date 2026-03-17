@@ -18,9 +18,6 @@ POLL_INTERVAL = int(os.getenv("INJURY_POLL_INTERVAL", "900"))
 ESPN_URL = "https://www.espn.com/mlb/injuries"
 ET = ZoneInfo("America/New_York")
 
-# Keep the same practical behavior as your current bot.
-# You can override this in Render later if you ever want:
-# CUTOFF_DATE_ET=2026-03-01
 CUTOFF_DATE_STR = os.getenv("CUTOFF_DATE_ET", "2026-03-01")
 CUTOFF_DATE_ET = datetime.strptime(CUTOFF_DATE_STR, "%Y-%m-%d").replace(tzinfo=ET)
 
@@ -32,7 +29,6 @@ HEADERS = {
     )
 }
 
-# Use Render persistent disk so duplicate protection survives redeploys/restarts
 STATE_DIR = Path("state/injury")
 STATE_FILE = STATE_DIR / "posted_injuries.json"
 STATE_FILE_TMP = STATE_DIR / "posted_injuries.json.tmp"
@@ -191,192 +187,11 @@ def should_run_now() -> bool:
     return True
 
 
-def load_state() -> dict:
-    STATE_DIR.mkdir(parents=True, exist_ok=True)
-
-    if not STATE_FILE.exists():
-        return {"posted_ids": []}
-
-    try:
-        with open(STATE_FILE, "r", encoding="utf-8") as f:
-            state = json.load(f)
-
-        posted_ids = state.get("posted_ids", [])
-        if not isinstance(posted_ids, list):
-            posted_ids = []
-
-        seen = set()
-        ordered = []
-        for item in posted_ids:
-            if isinstance(item, str) and item not in seen:
-                seen.add(item)
-                ordered.append(item)
-
-        return {"posted_ids": ordered[-MAX_STORED_IDS:]}
-    except Exception as e:
-        log(f"Failed to load state, starting fresh: {e}")
-        return {"posted_ids": []}
-
-
-def save_state(state: dict) -> None:
-    STATE_DIR.mkdir(parents=True, exist_ok=True)
-
-    posted_ids = state.get("posted_ids", [])
-    if not isinstance(posted_ids, list):
-        posted_ids = []
-
-    payload = {"posted_ids": posted_ids[-MAX_STORED_IDS:]}
-
-    with open(STATE_FILE_TMP, "w", encoding="utf-8") as f:
-        json.dump(payload, f, indent=2)
-
-    STATE_FILE_TMP.replace(STATE_FILE)
-
-
-def normalize_posted_ids(posted_ids_list: list[str]) -> list[str]:
-    seen = set()
-    ordered = []
-    for uid in posted_ids_list:
-        if uid not in seen:
-            seen.add(uid)
-            ordered.append(uid)
-    return ordered[-MAX_STORED_IDS:]
-
-
-def make_update_id(item: dict) -> str:
-    raw = "|".join([
-        item["team"],
-        item["player"],
-        item["position"],
-        item["est_return"],
-        item["status"],
-        item["comment"],
-    ])
-    return hashlib.sha256(raw.encode("utf-8")).hexdigest()
-
-
-def fetch_html() -> str:
-    response = requests.get(ESPN_URL, headers=HEADERS, timeout=30)
-    response.raise_for_status()
-    return response.text
-
-
-def parse_comment_date(comment: str) -> datetime | None:
-    match = COMMENT_DATE_RE.match(comment)
-    if not match:
-        return None
-
-    month_day = match.group(1)
-    now_year = datetime.now(ET).year
-
-    for year in (now_year, now_year - 1):
-        try:
-            dt = datetime.strptime(f"{month_day} {year}", "%b %d %Y").replace(tzinfo=ET)
-            if dt > datetime.now(ET).replace(hour=23, minute=59, second=59, microsecond=0):
-                continue
-            return dt
-        except ValueError:
-            continue
-
-    return None
-
-
-def is_allowed_update(comment: str) -> bool:
-    comment_dt = parse_comment_date(comment)
-    if comment_dt is None:
-        return False
-    return comment_dt >= CUTOFF_DATE_ET
-
-
-def looks_like_valid_row(player: str, position: str, est_return: str, status: str, comment: str, team_names: set[str]) -> bool:
-    if not player or player in team_names or player in PAGE_HEADER_TOKENS:
-        return False
-    if position not in VALID_POSITIONS:
-        return False
-    if status not in VALID_STATUSES:
-        return False
-    if not est_return or est_return in PAGE_HEADER_TOKENS:
-        return False
-    if ":" not in comment:
-        return False
-    if not is_allowed_update(comment):
-        return False
-    return True
-
-
-def parse_espn_injuries(html: str) -> list[dict]:
-    soup = BeautifulSoup(html, "html.parser")
-    lines = [clean_text(x) for x in soup.get_text("\n").splitlines()]
-    lines = [x for x in lines if x]
-
-    items = []
-    team_names = set(TEAM_NAME_TO_ABBR.keys())
-
-    start_index = 0
-    for idx, line in enumerate(lines):
-        if line in team_names:
-            start_index = idx
-            break
-
-    i = start_index
-    current_team = None
-
-    while i < len(lines):
-        line = lines[i]
-
-        if line in team_names:
-            current_team = line
-            i += 1
-
-            while i < len(lines) and lines[i] in PAGE_HEADER_TOKENS:
-                i += 1
-            continue
-
-        if not current_team:
-            i += 1
-            continue
-
-        if i + 4 >= len(lines):
-            break
-
-        player = lines[i]
-        position = lines[i + 1]
-        est_return = lines[i + 2]
-        status = lines[i + 3]
-        comment = lines[i + 4]
-
-        if looks_like_valid_row(player, position, est_return, status, comment, team_names):
-            items.append({
-                "team_name": current_team,
-                "team": TEAM_NAME_TO_ABBR[current_team],
-                "player": player,
-                "position": position,
-                "est_return": est_return,
-                "status": status,
-                "comment": comment,
-            })
-            i += 5
-            continue
-
-        i += 1
-
-    return items
-
-
-def get_role_tag(position: str) -> str:
-    if position == "SP":
-        return "Starter"
-    if position in {"RP", "P"}:
-        return "Reliever"
-    return "Hitter"
-
-
 def build_embed(item: dict) -> discord.Embed:
     team = item["team"]
     color = TEAM_COLORS.get(team, DEFAULT_COLOR)
     logo_url = TEAM_LOGOS.get(team)
     position = item["position"]
-    role_tag = get_role_tag(position)
 
     status_title = "🚑 MLB INJURY UPDATE"
     if item["status"] == "60-Day-IL":
@@ -394,9 +209,9 @@ def build_embed(item: dict) -> discord.Embed:
 
     embed.description = f"**{status_title}**"
 
-    embed.add_field(name="Role", value=f"`{role_tag}`", inline=True)
     embed.add_field(name="Status", value=f"`{item['status']}`", inline=True)
     embed.add_field(name="Est. Return", value=f"`{short_date(item['est_return'])}`", inline=True)
+    embed.add_field(name="Source", value="`ESPN`", inline=True)
     embed.add_field(name="Update", value=clamp_update(item["comment"]), inline=False)
 
     if logo_url:
@@ -404,119 +219,3 @@ def build_embed(item: dict) -> discord.Embed:
 
     embed.set_footer(text="ESPN MLB Injuries")
     return embed
-
-
-intents = discord.Intents.default()
-client = discord.Client(intents=intents)
-background_task_started = False
-
-
-async def post_allowed_updates() -> None:
-    channel = client.get_channel(CHANNEL_ID)
-    if channel is None:
-        log("Channel not found.")
-        return
-
-    state = load_state()
-    posted_ids_list = state.get("posted_ids", [])
-    posted_ids_set = set(posted_ids_list)
-    log(f"Loaded posted_ids: {len(posted_ids_list)}")
-
-    try:
-        html = fetch_html()
-        items = parse_espn_injuries(html)
-        log(f"Parsed {len(items)} allowed injury items")
-
-        for item in items[:5]:
-            log(f"Sample allowed item: {item}")
-    except Exception as e:
-        log(f"Failed to fetch/parse ESPN page: {e}")
-        return
-
-    if not items:
-        log("No allowed items found.")
-        return
-
-    items.sort(
-        key=lambda x: (
-            parse_comment_date(x["comment"]) or CUTOFF_DATE_ET,
-            x["team"],
-            x["player"]
-        )
-    )
-
-    current_ids = []
-    new_items = []
-
-    for item in items:
-        update_id = make_update_id(item)
-        item["update_id"] = update_id
-        current_ids.append(update_id)
-
-        if update_id not in posted_ids_set:
-            new_items.append(item)
-
-    # First-run safeguard:
-    # if the state file is empty, seed all current injuries without posting.
-    if not posted_ids_list:
-        state["posted_ids"] = normalize_posted_ids(current_ids)
-        save_state(state)
-        log(f"First run detected. Seeded posted_ids with {len(state['posted_ids'])} existing injuries. No posts sent.")
-        return
-
-    log(f"New items: {len(new_items)}")
-    for item in new_items[:5]:
-        log(f"Will post: {item['player']} {item['team']} {item['status']}")
-
-    for item in new_items:
-        try:
-            embed = build_embed(item)
-            await channel.send(embed=embed)
-
-            posted_ids_set.add(item["update_id"])
-            posted_ids_list.append(item["update_id"])
-            state["posted_ids"] = normalize_posted_ids(posted_ids_list)
-            save_state(state)
-
-            log(f"Posted: {item['player']} | {item['team']} | {item['status']}")
-            await asyncio.sleep(1.0)
-        except Exception as e:
-            log(f"Failed to post {item['player']}: {e}")
-
-    state["posted_ids"] = normalize_posted_ids(posted_ids_list)
-    save_state(state)
-    log(f"Saved posted_ids: {len(state['posted_ids'])}")
-
-
-async def background_loop() -> None:
-    await client.wait_until_ready()
-    log("ESPN injury bot started")
-
-    while not client.is_closed():
-        if should_run_now():
-            log("Running injury check")
-            await post_allowed_updates()
-        else:
-            log("Outside allowed hours. Skipping check.")
-
-        await asyncio.sleep(POLL_INTERVAL)
-
-
-@client.event
-async def on_ready():
-    global background_task_started
-    log(f"Logged in as {client.user}")
-
-    if not background_task_started:
-        background_task_started = True
-        asyncio.create_task(background_loop())
-
-
-async def start_injury_bot():
-    if not DISCORD_TOKEN:
-        raise RuntimeError("INJURY_BOT_TOKEN is not set")
-    if not CHANNEL_ID:
-        raise RuntimeError("INJURY_CHANNEL_ID is not set")
-
-    log(f"Using cutoff date: {CUTOFF_DATE_ET.strftime('%Y-%m-%d')}")
-    await client.start(DISCORD_TOKEN)
