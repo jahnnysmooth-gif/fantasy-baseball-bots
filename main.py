@@ -1,3 +1,4 @@
+print("=== NEW MAIN.PY IS RUNNING ===", flush=True)
 import asyncio
 import traceback
 

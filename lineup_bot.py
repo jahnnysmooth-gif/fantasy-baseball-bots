@@ -1,3 +1,4 @@
+print("=== NEW LINEUP_BOT.PY IS LOADED ===", flush=True)
 import os
 import re
 import json
