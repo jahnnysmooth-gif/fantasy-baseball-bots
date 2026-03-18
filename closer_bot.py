@@ -419,7 +419,7 @@ def build_summary(name, team, role, s, label, context):
         context_bits.append(entry_state_text)
 
     if context_bits:
-        opening_context = " ".join([context_bits[0], *[f', {bit}' for bit in context_bits[1:]]]).replace(" ,", ",")
+        opening_context = " ".join([context_bits[0], *[f", {bit}" for bit in context_bits[1:]]]).replace(" ,", ",")
     else:
         opening_context = "in relief"
 
@@ -481,13 +481,13 @@ def refresh_tracked_pitchers():
     return tracked
 
 
-def find_tracked_pitcher_info(raw_name: str, tracked: dict):
+def find_tracked_pitcher_info(raw_name: str, team_abbr: str, tracked: dict):
     norm = normalize_name(raw_name)
     if not norm:
         return None
 
     exact = tracked.get(norm)
-    if exact:
+    if exact and exact.get("team") == team_abbr:
         return exact
 
     last = norm.split()[-1] if norm else ""
@@ -497,7 +497,7 @@ def find_tracked_pitcher_info(raw_name: str, tracked: dict):
     matches = []
     for tracked_norm, info in tracked.items():
         tracked_last = tracked_norm.split()[-1] if tracked_norm else ""
-        if tracked_last == last:
+        if tracked_last == last and info.get("team") == team_abbr:
             matches.append(info)
 
     if len(matches) == 1:
@@ -591,14 +591,6 @@ async def post_card(channel, p, matchup, score, tracked_info, context):
         title = f"🚨 SAVE — {p['name']} ({p['team']})"
     elif label == "BLOWN":
         title = f"⚠️ BLOWN SAVE — {p['name']} ({p['team']})"
-    elif label == "HOLD":
-        title = f"{p['name']} ({p['team']}) — Hold"
-    elif label == "DOM":
-        title = f"{p['name']} ({p['team']}) — Dominant outing"
-    elif label == "TRAFFIC":
-        title = f"{p['name']} ({p['team']}) — Escaped trouble"
-    elif label == "ROUGH":
-        title = f"{p['name']} ({p['team']}) — Rough outing"
     else:
         title = f"{p['name']} ({p['team']})"
 
@@ -692,7 +684,7 @@ async def loop():
                     if key in posted:
                         continue
 
-                    tracked_info = find_tracked_pitcher_info(p["name"], tracked)
+                    tracked_info = find_tracked_pitcher_info(p["name"], p["team"], tracked)
                     is_save = safe_int(p["stats"].get("saves", 0), 0) > 0
                     is_tracked = tracked_info is not None
 
