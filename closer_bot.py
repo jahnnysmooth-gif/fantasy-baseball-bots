@@ -190,8 +190,6 @@ def format_pitch_count(stats):
 
 
 def format_season_line(season):
-    wins = safe_int(season.get("wins", 0), 0)
-    losses = safe_int(season.get("losses", 0), 0)
     saves = safe_int(season.get("saves", 0), 0)
     holds = safe_int(season.get("holds", 0), 0)
     strikeouts = safe_int(season.get("strikeOuts", 0), 0)
@@ -233,7 +231,7 @@ def format_season_line(season):
         except Exception:
             k9 = "0.0"
 
-    parts = [f"{wins}-{losses}"]
+    parts = []
 
     if saves > 0:
         parts.append(f"{saves} SV")
@@ -242,8 +240,8 @@ def format_season_line(season):
 
     parts.extend([
         f"{era} ERA",
-        f"{strikeouts} K",
         f"{whip} WHIP",
+        f"{strikeouts} K",
         f"{k9} K/9",
     ])
 
@@ -259,19 +257,23 @@ def build_score_line(away_abbr, away_score, home_abbr, home_score):
 # ---------------- CLASSIFICATION ----------------
 
 def classify(s):
+    outs = baseball_ip_to_outs(s["ip"])
+
     if s.get("saves"):
         return "SAVE"
     if s.get("blownSaves"):
         return "BLOWN"
     if s.get("holds"):
         return "HOLD"
-    if s["er"] == 0 and s["h"] == 0 and s["bb"] == 0:
+    if outs >= 3 and s["er"] == 0 and s["h"] == 0 and s["bb"] == 0:
         return "DOM"
     if s["er"] == 0 and (s["h"] + s["bb"]) >= 2:
         return "TRAFFIC"
     if s["er"] >= 3:
         return "ROUGH"
-    return "CLEAN"
+    if s["er"] == 0:
+        return "CLEAN"
+    return "RELIEF"
 
 
 def impact_tag(label, s):
@@ -298,6 +300,9 @@ def impact_tag(label, s):
 
     if label == "ROUGH":
         return "💀 Rough outing"
+
+    if label == "CLEAN":
+        return "🧊 Clean inning"
 
     return "⚾ Relief outing"
 
@@ -397,7 +402,7 @@ def get_pitcher_entry_context(feed, pitcher_id: int, pitcher_side: str):
 
 # ---------------- SUMMARY ----------------
 
-def build_summary(name, team, role, s, label, context):
+def build_summary(name, team, s, label, context):
     ip_text = format_ip_summary(s["ip"])
     outs_recorded = baseball_ip_to_outs(s["ip"])
     er = s["er"]
@@ -423,29 +428,27 @@ def build_summary(name, team, role, s, label, context):
     else:
         opening_context = "in relief"
 
-    role_text = ""
-    if role and role != "Tracked":
-        role_text = f" in his {role.lower()} role"
-
     if label == "SAVE":
         if outs_recorded >= 6:
-            line1 = f"{name} entered {opening_context} for {team}{role_text} and covered the final {ip_text} to earn the save."
+            line1 = f"{name} entered {opening_context} for {team} and covered the final {ip_text} to earn the save."
         elif finished_game and context.get("entry_inning") == 9:
-            line1 = f"{name} entered {opening_context} for {team}{role_text} and shut the door for the save."
+            line1 = f"{name} entered {opening_context} for {team} and shut the door for the save."
         else:
-            line1 = f"{name} entered {opening_context} for {team}{role_text} and locked down the save."
+            line1 = f"{name} entered {opening_context} for {team} and locked down the save."
     elif label == "BLOWN":
-        line1 = f"{name} entered {opening_context} for {team}{role_text} but couldn’t hold the lead and was charged with a blown save."
+        line1 = f"{name} entered {opening_context} for {team} but couldn’t hold the lead and was charged with a blown save."
     elif label == "HOLD":
-        line1 = f"{name} entered {opening_context} for {team}{role_text} and protected the lead to earn the hold."
+        line1 = f"{name} entered {opening_context} for {team} and protected the lead to earn the hold."
     elif label == "DOM":
-        line1 = f"{name} entered {opening_context} for {team}{role_text} and dominated."
+        line1 = f"{name} entered {opening_context} for {team} and dominated."
     elif label == "TRAFFIC":
-        line1 = f"{name} entered {opening_context} for {team}{role_text} and worked through traffic to keep the game under control."
+        line1 = f"{name} entered {opening_context} for {team} and worked through traffic to keep the game under control."
     elif label == "ROUGH":
-        line1 = f"{name} entered {opening_context} for {team}{role_text} but was hit hard in a rough outing."
+        line1 = f"{name} entered {opening_context} for {team} but was hit hard in a rough outing."
+    elif label == "CLEAN":
+        line1 = f"{name} entered {opening_context} for {team} and turned in a clean outing."
     else:
-        line1 = f"{name} entered {opening_context} for {team}{role_text} and turned in a scoreless outing."
+        line1 = f"{name} entered {opening_context} for {team} for a relief outing."
 
     if er == 0 and h == 0 and bb == 0:
         if k >= 2:
@@ -585,7 +588,6 @@ async def post_card(channel, p, matchup, score, tracked_info, context):
     }
 
     label = classify(s)
-    role = tracked_info.get("role", "Tracked") if tracked_info else ""
 
     if label == "SAVE":
         title = f"🚨 SAVE — {p['name']} ({p['team']})"
@@ -607,16 +609,12 @@ async def post_card(channel, p, matchup, score, tracked_info, context):
 
     embed.add_field(name="", value=f"**{impact_tag(label, s)}**", inline=False)
     embed.add_field(name="⚾ Matchup", value=matchup, inline=False)
-
-    if tracked_info:
-        embed.add_field(name="Role", value=tracked_info.get("role", "Tracked"), inline=False)
-
     embed.add_field(name="Game Line", value=format_line(s), inline=False)
     embed.add_field(name="Pitch Count", value=format_pitch_count(p["stats"]), inline=False)
     embed.add_field(name="Season", value=format_season_line(p.get("season_stats", {})), inline=False)
     embed.add_field(
         name="Summary",
-        value=build_summary(p["name"], p["team"], role, s, label, context),
+        value=build_summary(p["name"], p["team"], s, label, context),
         inline=False,
     )
     embed.add_field(name="Final", value=score, inline=False)
