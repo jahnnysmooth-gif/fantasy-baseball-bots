@@ -467,23 +467,23 @@ def get_pitcher_entry_context(feed: dict, pitcher_id: int, pitcher_side: str):
     diff = team_score - opp_score
     if diff > 0:
         if diff == 1:
-            state_text = "his club protecting a one-run lead"
+            state_text = "holding a one-run lead"
         elif diff == 2:
-            state_text = "his club protecting a two-run lead"
+            state_text = "holding a two-run lead"
         elif diff == 3:
-            state_text = "his club protecting a three-run lead"
+            state_text = "holding a three-run lead"
         else:
-            state_text = f"his club protecting a {diff}-run lead"
+            state_text = f"holding a {diff}-run lead"
     elif diff < 0:
         deficit = abs(diff)
         if deficit == 1:
-            state_text = "his club trailing by a run"
+            state_text = "trailing by one"
         elif deficit == 2:
-            state_text = "his club trailing by two"
+            state_text = "trailing by two"
         else:
-            state_text = f"his club trailing by {deficit}"
+            state_text = f"trailing by {deficit}"
     else:
-        state_text = "the game tied"
+        state_text = "in a tie game"
 
     return {
         "entry_phrase": entry_phrase,
@@ -611,6 +611,114 @@ def strikeout_phrase(k: int) -> str:
     return f"while striking out {k} {plural('batter', k)}"
 
 
+def build_analysis(label: str, s: dict) -> str:
+    baserunners = s["h"] + s["bb"]
+    is_shaky_save = label == "SAVE" and (baserunners >= 2 or s["er"] > 0)
+
+    def maybe_prefix(sentence: str) -> str:
+        if random.random() < 0.5:
+            return sentence
+        return f"He {sentence}"
+
+    if label == "SAVE":
+        if is_shaky_save:
+            options = [
+                "still leads the bullpen, though this wasn’t his sharpest outing.",
+                "got the job done, but with more stress than you’d like.",
+                "remains the closer, even if this outing wasn’t clean.",
+                "held on, but this adds a little volatility.",
+                "continues to get chances, though not dominant here.",
+                "is still trusted in the ninth despite some stress.",
+                "owns the role, but this wasn’t convincing.",
+                "converted, but not without some concern.",
+            ]
+        else:
+            options = [
+                "remains firmly in control of the ninth inning.",
+                "still looks like the clear closer here.",
+                "continues to lock down save chances.",
+                "keeps a strong grip on the ninth.",
+                "remains a top option for saves in this bullpen.",
+                "continues to convert chances with authority.",
+                "shows no signs of losing the role.",
+                "remains the go-to arm in the ninth.",
+            ]
+
+    elif label == "BLOWN":
+        options = [
+            "adds some short-term uncertainty to the bullpen picture.",
+            "could open the door for other late-inning options.",
+            "didn’t give you the kind of outing you want from a closer.",
+            "could muddy the save situation a bit.",
+            "raises some questions about the ninth inning.",
+            "took a tough result in a high-leverage spot.",
+            "may put a little pressure on his role.",
+            "wasn’t ideal for someone handling save chances.",
+        ]
+
+    elif label == "HOLD":
+        options = [
+            "continues to handle important late-inning work.",
+            "remains a trusted setup option.",
+            "keeps himself firmly in the leverage mix.",
+            "continues to bridge games effectively.",
+            "holds his place in the late-inning hierarchy.",
+            "remains a reliable option before the ninth.",
+            "keeps earning high-leverage opportunities.",
+            "continues to do his job in key spots.",
+        ]
+
+    elif label == "DOM":
+        options = [
+            "is trending up in leverage situations.",
+            "could earn more high-leverage work.",
+            "continues to impress in late-game spots.",
+            "is making a strong case for bigger opportunities.",
+            "could continue to grow his role from here.",
+            "looks like a rising leverage arm.",
+            "continues to look like a dominant late-inning weapon.",
+            "is building momentum in this bullpen.",
+        ]
+
+    elif label == "TRAFFIC":
+        options = [
+            "managed a tough spot and got the job done.",
+            "wasn’t at his cleanest, but was effective when it mattered.",
+            "limited damage in a high-pressure situation.",
+            "kept things from getting out of hand.",
+            "handled a tricky inning without letting it unravel.",
+            "wasn’t clean, but it was effective.",
+            "got through it despite some stress.",
+            "gave you a bend-but-don’t-break inning.",
+        ]
+
+    elif label == "ROUGH":
+        options = [
+            "could cost him some ground in the bullpen hierarchy.",
+            "didn’t give you a strong showing in a key spot.",
+            "may lose some leverage opportunities after this.",
+            "took a step back in terms of trust.",
+            "didn’t do his role any favors with this outing.",
+            "struggled to keep things under control.",
+            "didn’t turn in the kind of performance that earns more chances.",
+            "could impact his standing in the bullpen.",
+        ]
+
+    else:
+        options = [
+            "turned in a steady outing that keeps him in the mix.",
+            "did his job without much trouble.",
+            "continues to provide solid innings.",
+            "keeps things stable in his role.",
+            "gave them a clean and effective appearance.",
+            "handled his assignment with no issues.",
+            "added another reliable outing.",
+            "continues to deliver when called upon.",
+        ]
+
+    return maybe_prefix(random.choice(options))
+
+
 # ---------------- SUMMARY ----------------
 
 def build_summary(name: str, team: str, s: dict, label: str, context: dict, streak_count: int) -> str:
@@ -626,32 +734,32 @@ def build_summary(name: str, team: str, s: dict, label: str, context: dict, stre
 
     if label == "SAVE":
         if outs_recorded >= 6:
-            line1 = f"{name} entered {ctx} for {team} and covered the final {ip_text} to earn the save."
+            line1 = f"{name} entered {ctx} and covered the final {ip_text} to earn the save."
         elif finished_game and context.get("entry_inning") == 9:
-            line1 = f"{name} entered {ctx} for {team} and shut the door for the save."
+            line1 = f"{name} entered {ctx} and shut the door for the save."
         else:
-            line1 = f"{name} entered {ctx} for {team} and locked down the save."
+            line1 = f"{name} entered {ctx} and locked down the save."
 
     elif label == "BLOWN":
-        line1 = f"{name} entered {ctx} for {team} but couldn’t hold the lead and was charged with a blown save."
+        line1 = f"{name} entered {ctx} but couldn’t hold the lead and was charged with a blown save."
 
     elif label == "HOLD":
-        line1 = f"{name} entered {ctx} for {team} and protected the lead to earn the hold."
+        line1 = f"{name} entered {ctx} and held the line to earn the hold."
 
     elif label == "DOM":
-        line1 = f"{name} entered {ctx} for {team} and dominated."
+        line1 = f"{name} entered {ctx} and dominated."
 
     elif label == "TRAFFIC":
-        line1 = f"{name} entered {ctx} for {team} and navigated traffic to keep the game under control."
+        line1 = f"{name} entered {ctx} and navigated traffic to keep things under control."
 
     elif label == "ROUGH":
-        line1 = f"{name} entered {ctx} for {team} but was hit hard in a rough outing."
+        line1 = f"{name} entered {ctx} but was hit hard in a rough outing."
 
     elif label == "CLEAN":
-        line1 = f"{name} entered {ctx} for {team} and turned in a clean outing."
+        line1 = f"{name} entered {ctx} and turned in a clean outing."
 
     else:
-        line1 = f"{name} entered {ctx} for {team} for a relief outing."
+        line1 = f"{name} entered {ctx} for a relief outing."
 
     if er == 0 and h == 0 and bb == 0:
         if k > 0:
@@ -675,11 +783,13 @@ def build_summary(name: str, team: str, s: dict, label: str, context: dict, stre
         else:
             line2 += "."
 
+    analysis = build_analysis(label, s)
     streak_sentence = get_streak_sentence(streak_count)
-    if streak_sentence:
-        return f"{line1} {line2} {streak_sentence}"
 
-    return f"{line1} {line2}"
+    if streak_sentence:
+        return f"{line1} {line2} {analysis} {streak_sentence}"
+
+    return f"{line1} {line2} {analysis}"
 
 
 # ---------------- CORE ----------------
