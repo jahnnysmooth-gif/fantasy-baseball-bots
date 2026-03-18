@@ -7,6 +7,7 @@ from zoneinfo import ZoneInfo
 import discord
 import requests
 
+from utils.closer_depth_chart import fetch_closer_depth_chart
 from utils.closer_tracker import build_tracked_relief_map, normalize_name
 
 # ---------------- CONFIG ----------------
@@ -28,15 +29,41 @@ RESET_CLOSER_STATE = os.getenv("RESET_CLOSER_STATE", "").lower() in {"1", "true"
 # ---------------- TEAM STYLE ----------------
 
 TEAM_COLORS = {
-    "ARI": 0xA71930, "ATL": 0xCE1141, "BAL": 0xDF4601, "BOS": 0xBD3039,
-    "CHC": 0x0E3386, "CWS": 0x27251F, "CIN": 0xC6011F, "CLE": 0xE31937,
-    "COL": 0x33006F, "DET": 0x0C2340, "HOU": 0xEB6E1F, "KC": 0x004687,
-    "LAA": 0xBA0021, "LAD": 0x005A9C, "MIA": 0x00A3E0, "MIL": 0x12284B,
-    "MIN": 0x002B5C, "NYM": 0xFF5910, "NYY": 0x0C2340, "PHI": 0xE81828,
-    "PIT": 0xFDB827, "SD": 0x2F241D, "SF": 0xFD5A1E, "SEA": 0x005C5C,
-    "STL": 0xC41E3A, "TB": 0x092C5C, "TEX": 0x003278, "TOR": 0x134A8E,
-    "WSH": 0xAB0003
+    "ARI": 0xA71930,
+    "ATH": 0x003831,
+    "ATL": 0xCE1141,
+    "BAL": 0xDF4601,
+    "BOS": 0xBD3039,
+    "CHC": 0x0E3386,
+    "CWS": 0x27251F,
+    "CIN": 0xC6011F,
+    "CLE": 0xE31937,
+    "COL": 0x33006F,
+    "DET": 0x0C2340,
+    "HOU": 0xEB6E1F,
+    "KC": 0x004687,
+    "LAA": 0xBA0021,
+    "LAD": 0x005A9C,
+    "MIA": 0x00A3E0,
+    "MIL": 0x12284B,
+    "MIN": 0x002B5C,
+    "NYM": 0xFF5910,
+    "NYY": 0x0C2340,
+    "PHI": 0xE81828,
+    "PIT": 0xFDB827,
+    "SD": 0x2F241D,
+    "SF": 0xFD5A1E,
+    "SEA": 0x005C5C,
+    "STL": 0xC41E3A,
+    "TB": 0x092C5C,
+    "TEX": 0x003278,
+    "TOR": 0x134A8E,
+    "WSH": 0xAB0003,
 }
+
+
+def log(msg: str):
+    print(f"[CLOSER] {msg}", flush=True)
 
 
 def get_logo(team: str) -> str:
@@ -69,7 +96,7 @@ def save_state(state):
         json.dump(state, f, indent=2)
 
 
-# ---------------- HELPERS ----------------
+# ---------------- FORMATTING / HELPERS ----------------
 
 def ordinal(n: int) -> str:
     if 10 <= n % 100 <= 20:
@@ -85,32 +112,19 @@ def safe_int(value, default=0):
             return default
         return int(value)
     except Exception:
-        return default
-
-
-def safe_float(value, default=0.0):
-    try:
-        if value in (None, "", "-"):
+        try:
+            return int(float(value))
+        except Exception:
             return default
-        return float(value)
-    except Exception:
-        return default
 
 
 def baseball_ip_to_outs(ip: str) -> int:
-    """
-    Baseball IP format:
-      1.0 = 3 outs
-      1.1 = 4 outs
-      1.2 = 5 outs
-    """
-    if not ip:
+    text = str(ip).strip()
+    if not text:
         return 0
 
-    text = str(ip).strip()
     if "." not in text:
-        whole = safe_int(text, 0)
-        return whole * 3
+        return safe_int(text, 0) * 3
 
     whole_str, frac_str = text.split(".", 1)
     whole = safe_int(whole_str, 0)
@@ -132,7 +146,7 @@ def format_ip_for_line(ip: str) -> str:
     return f"{text} IP"
 
 
-def format_ip_for_summary(ip: str) -> str:
+def format_ip_summary(ip: str) -> str:
     outs = baseball_ip_to_outs(ip)
 
     if outs == 1:
@@ -160,13 +174,14 @@ def format_ip_for_summary(ip: str) -> str:
     return f"{text} innings"
 
 
-def format_game_line(s):
+def format_line(s):
     return f"{format_ip_for_line(s['ip'])} • {s['h']} H • {s['er']} ER • {s['bb']} BB • {s['k']} K"
 
 
-def format_pitch_count(s):
-    pitches = safe_int(s.get("pitches", 0))
-    strikes = safe_int(s.get("strikes", 0))
+def format_pitch_count(stats):
+    pitches = safe_int(stats.get("numberOfPitches", 0), 0)
+    strikes = safe_int(stats.get("strikes", 0), 0)
+
     if pitches <= 0:
         return "N/A"
     if strikes <= 0:
@@ -175,24 +190,22 @@ def format_pitch_count(s):
 
 
 def format_season_line(season):
-    wins = safe_int(season.get("wins", 0))
-    losses = safe_int(season.get("losses", 0))
-    saves = safe_int(season.get("saves", 0))
-    holds = safe_int(season.get("holds", 0))
-    strikeouts = safe_int(season.get("strikeOuts", 0))
+    wins = safe_int(season.get("wins", 0), 0)
+    losses = safe_int(season.get("losses", 0), 0)
+    saves = safe_int(season.get("saves", 0), 0)
+    holds = safe_int(season.get("holds", 0), 0)
+    strikeouts = safe_int(season.get("strikeOuts", 0), 0)
 
-    era = season.get("era")
-    if era in (None, "", "-"):
-        era = season.get("earnedRunAverage", "0.00")
+    era = season.get("era") or season.get("earnedRunAverage") or "0.00"
     try:
         era = f"{float(era):.2f}"
     except Exception:
         era = "0.00"
 
-    season_ip = season.get("inningsPitched", "0.0")
-    season_outs = baseball_ip_to_outs(str(season_ip))
-    hits = safe_int(season.get("hits", 0))
-    walks = safe_int(season.get("baseOnBalls", 0))
+    season_ip = str(season.get("inningsPitched", "0.0"))
+    season_outs = baseball_ip_to_outs(season_ip)
+    hits = safe_int(season.get("hits", 0), 0)
+    walks = safe_int(season.get("baseOnBalls", 0), 0)
 
     whip = season.get("whip")
     if whip in (None, "", "-"):
@@ -238,11 +251,9 @@ def format_season_line(season):
 
 
 def build_score_line(away_abbr, away_score, home_abbr, home_score):
-    if away_score > home_score:
-        return f"**{away_abbr} {away_score}** - {home_abbr} {home_score}"
     if home_score > away_score:
-        return f"{away_abbr} {away_score} - **{home_abbr} {home_score}**"
-    return f"{away_abbr} {away_score} - {home_abbr} {home_score}"
+        return f"{home_abbr} {home_score}, {away_abbr} {away_score}"
+    return f"{away_abbr} {away_score}, {home_abbr} {home_score}"
 
 
 # ---------------- CLASSIFICATION ----------------
@@ -263,16 +274,32 @@ def classify(s):
     return "CLEAN"
 
 
-def impact_tag(label):
-    return {
-        "SAVE": "🔒 Locked it down",
-        "BLOWN": "💥 Lead blown",
-        "HOLD": "🧱 Held the line",
-        "DOM": "🔥 Dominant outing",
-        "TRAFFIC": "⚠️ Escaped trouble",
-        "ROUGH": "💀 Rough outing",
-        "CLEAN": "🧊 Clean inning",
-    }.get(label, "⚾ Relief outing")
+def impact_tag(label, s):
+    outs = baseball_ip_to_outs(s["ip"])
+
+    if label == "SAVE":
+        if outs >= 6:
+            return "🧰 Finished the job"
+        return "🔒 Locked it down"
+
+    if label == "BLOWN":
+        return "💥 Lead blown"
+
+    if label == "HOLD":
+        if s["er"] == 0:
+            return "🧱 Held the line"
+        return "⚠️ Hold with traffic"
+
+    if label == "DOM":
+        return "🔥 Dominant outing"
+
+    if label == "TRAFFIC":
+        return "⚠️ Escaped trouble"
+
+    if label == "ROUGH":
+        return "💀 Rough outing"
+
+    return "⚾ Relief outing"
 
 
 # ---------------- ENTRY CONTEXT ----------------
@@ -290,8 +317,7 @@ def get_pitcher_entry_context(feed, pitcher_id: int, pitcher_side: str):
 
     pitcher_indices = []
     for idx, play in enumerate(plays):
-        matchup = play.get("matchup", {})
-        pitcher = matchup.get("pitcher", {})
+        pitcher = play.get("matchup", {}).get("pitcher", {})
         if pitcher.get("id") == pitcher_id:
             pitcher_indices.append(idx)
 
@@ -311,7 +337,7 @@ def get_pitcher_entry_context(feed, pitcher_id: int, pitcher_side: str):
     about = first_play.get("about", {})
     inning = about.get("inning")
     half = about.get("halfInning", "")
-    outs = safe_int(first_play.get("count", {}).get("outs"), 0)
+    outs = safe_int(first_play.get("count", {}).get("outs", 0), 0)
 
     entry_phrase = ""
     if inning is not None and half:
@@ -324,11 +350,10 @@ def get_pitcher_entry_context(feed, pitcher_id: int, pitcher_side: str):
     else:
         entry_outs_text = "with two outs"
 
-    # score before the first play by this pitcher
     if first_idx > 0:
         prev_result = plays[first_idx - 1].get("result", {})
-        prev_away = safe_int(prev_result.get("awayScore"), 0)
-        prev_home = safe_int(prev_result.get("homeScore"), 0)
+        prev_away = safe_int(prev_result.get("awayScore", 0), 0)
+        prev_home = safe_int(prev_result.get("homeScore", 0), 0)
     else:
         prev_away = 0
         prev_home = 0
@@ -370,10 +395,10 @@ def get_pitcher_entry_context(feed, pitcher_id: int, pitcher_side: str):
     }
 
 
-# ---------------- ELITE SUMMARY ----------------
+# ---------------- SUMMARY ----------------
 
 def build_summary(name, team, role, s, label, context):
-    ip_text = format_ip_for_summary(s["ip"])
+    ip_text = format_ip_summary(s["ip"])
     outs_recorded = baseball_ip_to_outs(s["ip"])
     er = s["er"]
     h = s["h"]
@@ -409,22 +434,16 @@ def build_summary(name, team, role, s, label, context):
             line1 = f"{name} entered {opening_context} for {team}{role_text} and shut the door for the save."
         else:
             line1 = f"{name} entered {opening_context} for {team}{role_text} and locked down the save."
-
     elif label == "BLOWN":
         line1 = f"{name} entered {opening_context} for {team}{role_text} but couldn’t hold the lead and was charged with a blown save."
-
     elif label == "HOLD":
         line1 = f"{name} entered {opening_context} for {team}{role_text} and protected the lead to earn the hold."
-
     elif label == "DOM":
         line1 = f"{name} entered {opening_context} for {team}{role_text} and dominated."
-
     elif label == "TRAFFIC":
         line1 = f"{name} entered {opening_context} for {team}{role_text} and worked through traffic to keep the game under control."
-
     elif label == "ROUGH":
         line1 = f"{name} entered {opening_context} for {team}{role_text} but was hit hard in a rough outing."
-
     else:
         line1 = f"{name} entered {opening_context} for {team}{role_text} and turned in a scoreless outing."
 
@@ -449,11 +468,28 @@ def build_summary(name, team, role, s, label, context):
 
 # ---------------- CORE ----------------
 
+def refresh_tracked_pitchers():
+    try:
+        teams = fetch_closer_depth_chart()
+        if teams:
+            tracked = build_tracked_relief_map()
+            log(f"Loaded {len(tracked)} tracked relievers from Closer Monkey")
+            return tracked
+        log("Closer Monkey refresh returned no teams; using saved depth chart if available")
+    except Exception as e:
+        log(f"Closer Monkey refresh failed: {e}")
+
+    tracked = build_tracked_relief_map()
+    log(f"Loaded {len(tracked)} tracked relievers from saved depth chart")
+    return tracked
+
+
 def get_games():
     today = datetime.now(ET).date()
     yesterday = today - timedelta(days=1)
 
     games = []
+
     for d in [today, yesterday]:
         try:
             r = requests.get(f"{SCHEDULE_URL}&date={d}", timeout=30)
@@ -461,8 +497,8 @@ def get_games():
             data = r.json()
             for date_block in data.get("dates", []):
                 games.extend(date_block.get("games", []))
-        except Exception:
-            continue
+        except Exception as e:
+            log(f"Schedule fetch error for {d}: {e}")
 
     return games
 
@@ -512,32 +548,37 @@ def get_pitchers(feed):
 # ---------------- POST ----------------
 
 async def post_card(channel, p, matchup, score, tracked_info, context):
-    stats = p["stats"]
-
     s = {
-        "ip": str(stats.get("inningsPitched", "0.0")),
-        "h": safe_int(stats.get("hits"), 0),
-        "er": safe_int(stats.get("earnedRuns"), 0),
-        "bb": safe_int(stats.get("baseOnBalls"), 0),
-        "k": safe_int(stats.get("strikeOuts"), 0),
-        "pitches": safe_int(stats.get("numberOfPitches"), 0),
-        "strikes": safe_int(stats.get("strikes"), 0),
-        "saves": safe_int(stats.get("saves"), 0),
-        "holds": safe_int(stats.get("holds"), 0),
-        "blownSaves": safe_int(stats.get("blownSaves"), 0),
+        "ip": str(p["stats"].get("inningsPitched", "0.0")),
+        "h": safe_int(p["stats"].get("hits", 0), 0),
+        "er": safe_int(p["stats"].get("earnedRuns", 0), 0),
+        "bb": safe_int(p["stats"].get("baseOnBalls", 0), 0),
+        "k": safe_int(p["stats"].get("strikeOuts", 0), 0),
+        "saves": safe_int(p["stats"].get("saves", 0), 0),
+        "holds": safe_int(p["stats"].get("holds", 0), 0),
+        "blownSaves": safe_int(p["stats"].get("blownSaves", 0), 0),
     }
 
     label = classify(s)
     role = tracked_info.get("role", "Tracked") if tracked_info else ""
 
-    prefix = ""
     if label == "SAVE":
-        prefix = "🚨 SAVE — "
+        title = f"🚨 SAVE — {p['name']} ({p['team']})"
     elif label == "BLOWN":
-        prefix = "⚠️ BLOWN SAVE — "
+        title = f"⚠️ BLOWN SAVE — {p['name']} ({p['team']})"
+    elif label == "HOLD":
+        title = f"{p['name']} ({p['team']}) — Hold"
+    elif label == "DOM":
+        title = f"{p['name']} ({p['team']}) — Dominant outing"
+    elif label == "TRAFFIC":
+        title = f"{p['name']} ({p['team']}) — Escaped trouble"
+    elif label == "ROUGH":
+        title = f"{p['name']} ({p['team']}) — Rough outing"
+    else:
+        title = f"{p['name']} ({p['team']})"
 
     embed = discord.Embed(
-        title=f"{prefix}{p['name']} ({p['team']})",
+        title=title,
         color=TEAM_COLORS.get(p["team"], 0x2ECC71),
         timestamp=datetime.now(timezone.utc),
     )
@@ -547,21 +588,21 @@ async def post_card(channel, p, matchup, score, tracked_info, context):
     except Exception:
         pass
 
-    embed.add_field(name="", value=f"**{impact_tag(label)}**", inline=False)
+    embed.add_field(name="", value=f"**{impact_tag(label, s)}**", inline=False)
     embed.add_field(name="⚾ Matchup", value=matchup, inline=False)
 
     if tracked_info:
         embed.add_field(name="Role", value=tracked_info.get("role", "Tracked"), inline=False)
 
-    embed.add_field(name="Game Line", value=format_game_line(s), inline=False)
-    embed.add_field(name="Pitch Count", value=format_pitch_count(s), inline=False)
+    embed.add_field(name="Game Line", value=format_line(s), inline=False)
+    embed.add_field(name="Pitch Count", value=format_pitch_count(p["stats"]), inline=False)
     embed.add_field(name="Season", value=format_season_line(p.get("season_stats", {})), inline=False)
     embed.add_field(
         name="Summary",
         value=build_summary(p["name"], p["team"], role, s, label, context),
         inline=False,
     )
-    embed.add_field(name="Final Score", value=score, inline=False)
+    embed.add_field(name="Final", value=score, inline=False)
 
     await channel.send(embed=embed)
 
@@ -574,15 +615,22 @@ async def loop():
 
     state = load_state()
     posted = set(state.get("posted", []))
-    tracked = build_tracked_relief_map()
 
     if RESET_CLOSER_STATE:
-        print("[CLOSER] RESET_CLOSER_STATE enabled — posted state cleared for this run.", flush=True)
+        log("RESET_CLOSER_STATE enabled — posted state cleared for this run")
+
+    tracked = refresh_tracked_pitchers()
+    last_refresh_date = datetime.now(ET).date()
 
     while True:
         try:
+            current_date = datetime.now(ET).date()
+            if current_date != last_refresh_date:
+                tracked = refresh_tracked_pitchers()
+                last_refresh_date = current_date
+
             games = get_games()
-            print(f"[CLOSER] Checking {len(games)} games", flush=True)
+            log(f"Checking {len(games)} games")
 
             for g in games:
                 if g.get("status", {}).get("detailedState") != "Final":
@@ -601,8 +649,8 @@ async def loop():
                 away_abbr = away.get("abbreviation") or away.get("name", "AWAY")[:3].upper()
                 home_abbr = home.get("abbreviation") or home.get("name", "HOME")[:3].upper()
 
-                away_score = safe_int(g.get("teams", {}).get("away", {}).get("score"), 0)
-                home_score = safe_int(g.get("teams", {}).get("home", {}).get("score"), 0)
+                away_score = safe_int(g.get("teams", {}).get("away", {}).get("score", 0), 0)
+                home_score = safe_int(g.get("teams", {}).get("home", {}).get("score", 0), 0)
 
                 matchup = f"{away_abbr} @ {home_abbr}"
                 score = build_score_line(away_abbr, away_score, home_abbr, home_score)
@@ -618,15 +666,14 @@ async def loop():
 
                     norm = normalize_name(p["name"])
                     tracked_info = tracked.get(norm)
-                    is_save = safe_int(p["stats"].get("saves"), 0) > 0
+                    is_save = safe_int(p["stats"].get("saves", 0), 0) > 0
                     is_tracked = tracked_info is not None
 
                     if not (is_save or is_tracked):
                         continue
 
                     context = get_pitcher_entry_context(feed, pitcher_id, p["side"])
-
-                    print(f"[POST] {p['name']} | {p['team']} | {matchup}", flush=True)
+                    log(f"Posting {p['name']} | {p['team']} | {matchup}")
                     await post_card(channel, p, matchup, score, tracked_info, context)
                     posted.add(key)
 
@@ -634,7 +681,7 @@ async def loop():
             save_state(state)
 
         except Exception as e:
-            print("[CLOSER] Loop error:", e, flush=True)
+            log(f"Loop error: {e}")
 
         await asyncio.sleep(POLL_MINUTES * 60)
 
@@ -647,7 +694,7 @@ client = discord.Client(intents=intents)
 
 @client.event
 async def on_ready():
-    print(f"Logged in as {client.user}", flush=True)
+    log(f"Logged in as {client.user}")
     asyncio.create_task(loop())
 
 
