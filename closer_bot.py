@@ -62,6 +62,9 @@ TEAM_COLORS = {
     "WSH": 0xAB0003,
 }
 
+appearance_cache = {}
+pitching_stats_cache = {}
+
 
 def log(msg: str):
     print(f"[CLOSER] {msg}", flush=True)
@@ -306,7 +309,6 @@ def classify(s: dict) -> str:
     if s.get("holds"):
         return "HOLD"
 
-    # dominant only if at least one full inning
     if outs >= 3 and s["er"] == 0 and s["h"] == 0 and s["bb"] == 0:
         return "DOM"
 
@@ -323,6 +325,31 @@ def classify(s: dict) -> str:
         return "RELIEF"
 
     return "RELIEF"
+
+
+def grade_outing(s: dict) -> str:
+    outs = baseball_ip_to_outs(s["ip"])
+    baserunners = s["h"] + s["bb"]
+
+    if outs <= 1:
+        return "MICRO"
+
+    if s["er"] >= 3:
+        return "ROUGH"
+
+    if s["er"] in {1, 2}:
+        return "SHAKY"
+
+    if s["er"] == 0 and s["h"] == 0 and s["bb"] == 0 and outs >= 3:
+        return "DOMINANT"
+
+    if s["er"] == 0 and baserunners <= 1 and outs >= 3:
+        return "CLEAN"
+
+    if s["er"] == 0 and baserunners >= 2:
+        return "TRAFFIC"
+
+    return "NEUTRAL"
 
 
 def impact_tag(label: str, s: dict) -> str:
@@ -400,6 +427,50 @@ def find_tracked_pitcher_info(raw_name: str, team_abbr: str, tracked: dict):
     return None
 
 
+def infer_role_from_tracked_info(tracked_info: dict) -> str:
+    """
+    Conservative role inference:
+    - only call someone a closer if the depth chart clearly says so
+    - otherwise fall back to committee/setup/relief language
+    """
+    if not tracked_info:
+        return "relief"
+
+    fields_to_check = [
+        "role",
+        "tier",
+        "slot",
+        "label",
+        "bucket",
+        "depth_role",
+        "status",
+        "type",
+        "group",
+        "rank_label",
+    ]
+
+    texts = []
+    for field in fields_to_check:
+        value = tracked_info.get(field)
+        if value is not None:
+            texts.append(str(value).strip().lower())
+
+    combined = " | ".join(texts)
+
+    if any(term in combined for term in ["committee", "co-closer", "co closer", "save mix", "shared", "timeshare"]):
+        return "committee"
+
+    if any(term in combined for term in ["closer", "primary closer", "clear closer"]):
+        return "closer"
+
+    if any(term in combined for term in ["setup", "set-up", "high leverage", "high-leverage", "8th inning", "8th", "fireman"]):
+        return "setup"
+
+    # Conservative fallback:
+    # tracked, but role not explicit -> setup mix language is safer than closer language.
+    return "setup"
+
+
 # ---------------- ENTRY CONTEXT ----------------
 
 def get_pitcher_entry_context(feed: dict, pitcher_id: int, pitcher_side: str):
@@ -409,6 +480,7 @@ def get_pitcher_entry_context(feed: dict, pitcher_id: int, pitcher_side: str):
             "entry_phrase": "",
             "entry_outs_text": "",
             "entry_state_text": "",
+            "entry_state_kind": "",
             "entry_inning": None,
             "finished_game": False,
         }
@@ -424,6 +496,7 @@ def get_pitcher_entry_context(feed: dict, pitcher_id: int, pitcher_side: str):
             "entry_phrase": "",
             "entry_outs_text": "",
             "entry_state_text": "",
+            "entry_state_kind": "",
             "entry_inning": None,
             "finished_game": False,
         }
@@ -448,7 +521,6 @@ def get_pitcher_entry_context(feed: dict, pitcher_id: int, pitcher_side: str):
     else:
         entry_outs_text = "with two outs"
 
-    # score before first pitch by this pitcher
     if first_idx > 0:
         prev_result = plays[first_idx - 1].get("result", {})
         prev_away = safe_int(prev_result.get("awayScore", 0), 0)
@@ -465,7 +537,9 @@ def get_pitcher_entry_context(feed: dict, pitcher_id: int, pitcher_side: str):
         opp_score = prev_home
 
     diff = team_score - opp_score
+
     if diff > 0:
+        state_kind = "lead"
         if diff == 1:
             state_text = "holding a one-run lead"
         elif diff == 2:
@@ -475,6 +549,7 @@ def get_pitcher_entry_context(feed: dict, pitcher_id: int, pitcher_side: str):
         else:
             state_text = f"holding a {diff}-run lead"
     elif diff < 0:
+        state_kind = "trailing"
         deficit = abs(diff)
         if deficit == 1:
             state_text = "trailing by one"
@@ -483,12 +558,14 @@ def get_pitcher_entry_context(feed: dict, pitcher_id: int, pitcher_side: str):
         else:
             state_text = f"trailing by {deficit}"
     else:
+        state_kind = "tie"
         state_text = "in a tie game"
 
     return {
         "entry_phrase": entry_phrase,
         "entry_outs_text": entry_outs_text,
         "entry_state_text": state_text,
+        "entry_state_kind": state_kind,
         "entry_inning": inning,
         "finished_game": (last_idx == len(plays) - 1),
     }
@@ -515,16 +592,13 @@ def build_context_phrase(context: dict) -> str:
     return f"{bits[0]} {bits[1]}, {bits[2]}"
 
 
-# ---------------- STREAK TRACKING ----------------
+# ---------------- RECENT APPEARANCES / TRENDS ----------------
 
-appearance_cache = {}
+def get_pitching_stats_for_date(target_date):
+    if target_date in pitching_stats_cache:
+        return pitching_stats_cache[target_date]
 
-
-def get_pitcher_ids_for_date(target_date):
-    if target_date in appearance_cache:
-        return appearance_cache[target_date]
-
-    pitcher_ids = set()
+    stats_by_pitcher = {}
 
     try:
         r = requests.get(f"{SCHEDULE_URL}&date={target_date.isoformat()}", timeout=30)
@@ -550,15 +624,84 @@ def get_pitcher_ids_for_date(target_date):
                 players = box.get(side, {}).get("players", {})
                 for p in players.values():
                     stats = p.get("stats", {}).get("pitching")
-                    if not stats:
-                        continue
-                    if not stats.get("inningsPitched"):
+                    if not stats or not stats.get("inningsPitched"):
                         continue
 
                     pid = p.get("person", {}).get("id")
-                    if pid is not None:
-                        pitcher_ids.add(pid)
+                    if pid is None:
+                        continue
 
+                    stats_by_pitcher[pid] = {
+                        "ip": str(stats.get("inningsPitched", "0.0")),
+                        "h": safe_int(stats.get("hits", 0), 0),
+                        "er": safe_int(stats.get("earnedRuns", 0), 0),
+                        "bb": safe_int(stats.get("baseOnBalls", 0), 0),
+                        "k": safe_int(stats.get("strikeOuts", 0), 0),
+                        "saves": safe_int(stats.get("saves", 0), 0),
+                        "holds": safe_int(stats.get("holds", 0), 0),
+                        "blownSaves": safe_int(stats.get("blownSaves", 0), 0),
+                    }
+
+    except Exception as e:
+        log(f"Pitching stats cache load failed for {target_date}: {e}")
+
+    pitching_stats_cache[target_date] = stats_by_pitcher
+    return stats_by_pitcher
+
+
+def get_recent_appearances(pitcher_id: int, game_date_et, limit=5, max_days=21):
+    appearances = []
+    if pitcher_id is None or game_date_et is None:
+        return appearances
+
+    check_date = game_date_et - timedelta(days=1)
+
+    for _ in range(max_days):
+        stats_by_pitcher = get_pitching_stats_for_date(check_date)
+        if pitcher_id in stats_by_pitcher:
+            appearances.append(stats_by_pitcher[pitcher_id])
+            if len(appearances) >= limit:
+                break
+        check_date -= timedelta(days=1)
+
+    return appearances
+
+
+def get_recent_trend(recent_appearances):
+    if len(recent_appearances) < 3:
+        return "NONE"
+
+    scoreless_count = sum(1 for app in recent_appearances[:5] if app["er"] == 0)
+    runs_count = sum(1 for app in recent_appearances[:5] if app["er"] > 0)
+
+    first_three = recent_appearances[:3]
+    if len(first_three) == 3 and all(app["er"] == 0 for app in first_three):
+        return "UP"
+
+    if scoreless_count >= 4 and len(recent_appearances) >= 5:
+        return "UP"
+
+    first_two = recent_appearances[:2]
+    if len(first_two) == 2 and all(app["er"] >= 2 for app in first_two):
+        return "DOWN"
+
+    if runs_count >= 3 and len(recent_appearances) >= 5:
+        return "DOWN"
+
+    return "STABLE"
+
+
+# ---------------- STREAK TRACKING ----------------
+
+def get_pitcher_ids_for_date(target_date):
+    if target_date in appearance_cache:
+        return appearance_cache[target_date]
+
+    pitcher_ids = set()
+
+    try:
+        stats_by_pitcher = get_pitching_stats_for_date(target_date)
+        pitcher_ids = set(stats_by_pitcher.keys())
     except Exception as e:
         log(f"Appearance cache load failed for {target_date}: {e}")
 
@@ -611,117 +754,265 @@ def strikeout_phrase(k: int) -> str:
     return f"while striking out {k} {plural('batter', k)}"
 
 
-def build_analysis(label: str, s: dict) -> str:
-    baserunners = s["h"] + s["bb"]
-    is_shaky_save = label == "SAVE" and (baserunners >= 2 or s["er"] > 0)
+# ---------------- ANALYSIS ----------------
 
-    def maybe_prefix(sentence: str) -> str:
-        if random.random() < 0.5:
-            return sentence
-        return f"He {sentence}"
+def build_analysis(p: dict, s: dict, label: str, context: dict, tracked_info: dict, recent_appearances):
+    role = infer_role_from_tracked_info(tracked_info)
+    outing_grade = grade_outing(s)
+    trend = get_recent_trend(recent_appearances)
 
-    if label == "SAVE":
-        if is_shaky_save:
+    outs = baseball_ip_to_outs(s["ip"])
+    inning = context.get("entry_inning")
+    state_kind = context.get("entry_state_kind", "")
+    finished_game = context.get("finished_game", False)
+
+    early_closer_usage = (
+        role == "closer"
+        and inning is not None
+        and inning < 9
+        and state_kind in {"lead", "tie"}
+    )
+
+    # Micro outings should stay short and neutral.
+    if outing_grade == "MICRO":
+        if role == "closer" and early_closer_usage:
             options = [
-                "still leads the bullpen, though this wasn’t his sharpest outing.",
-                "got the job done, but with more stress than you’d like.",
-                "remains the closer, even if this outing wasn’t clean.",
-                "held on, but this adds a little volatility.",
-                "continues to get chances, though not dominant here.",
-                "is still trusted in the ninth despite some stress.",
-                "owns the role, but this wasn’t convincing.",
-                "converted, but not without some concern.",
+                "He was called on early for a high-leverage spot and got the out.",
+                "He handled an early leverage pocket and recorded the out.",
+                "He was used before the ninth in an important spot and did his job.",
+                "He got the lone hitter he faced in a leverage spot.",
             ]
-        else:
+            return random.choice(options)
+
+        if label == "HOLD":
             options = [
-                "remains firmly in control of the ninth inning.",
-                "still looks like the clear closer here.",
-                "continues to lock down save chances.",
-                "keeps a strong grip on the ninth.",
-                "remains a top option for saves in this bullpen.",
-                "continues to convert chances with authority.",
-                "shows no signs of losing the role.",
-                "remains the go-to arm in the ninth.",
+                "He got the one hitter he faced to help secure the hold.",
+                "He retired the lone batter he faced and helped finish the bridge inning.",
+                "He handled his one matchup cleanly in a hold situation.",
             ]
+            return random.choice(options)
 
-    elif label == "BLOWN":
         options = [
-            "adds some short-term uncertainty to the bullpen picture.",
-            "could open the door for other late-inning options.",
-            "didn’t give you the kind of outing you want from a closer.",
-            "could muddy the save situation a bit.",
-            "raises some questions about the ninth inning.",
-            "took a tough result in a high-leverage spot.",
-            "may put a little pressure on his role.",
-            "wasn’t ideal for someone handling save chances.",
+            "He got the one hitter he faced.",
+            "He retired the lone batter he faced.",
+            "He handled his brief assignment cleanly.",
+            "He recorded the out he was asked to get.",
         ]
+        return random.choice(options)
 
-    elif label == "HOLD":
+    # Bad lines override label positivity.
+    if outing_grade in {"SHAKY", "ROUGH"}:
+        if label == "SAVE":
+            options = [
+                "He got the save, but this wasn’t a clean outing.",
+                "He finished it off, though the line was shakier than you’d want from a closer.",
+                "The save counts, but this one came with some blemishes.",
+                "He converted the chance, but the outing itself was far from crisp.",
+            ]
+            return random.choice(options)
+
+        if label == "HOLD":
+            options = [
+                "He got the hold, but this wasn’t a clean outing.",
+                "The hold is there, though the line itself was shaky.",
+                "He picked up the hold, but the appearance brought more damage than you’d like.",
+                "He escaped with the hold, even if the outing itself was messy.",
+            ]
+            return random.choice(options)
+
+        if label == "BLOWN":
+            options = [
+                "This was a rough result in a leverage spot.",
+                "He couldn’t keep the inning under control when the game tightened up.",
+                "It was a tough look in a high-leverage chance.",
+                "The line reflects a costly outing late in the game.",
+            ]
+            return random.choice(options)
+
+        if trend == "DOWN":
+            options = [
+                "This was another shaky outing, and the recent form isn’t helping his case.",
+                "He’s in a rough patch right now, and this one added to it.",
+                "The recent trend has been uneven, and this outing didn’t change that.",
+            ]
+            return random.choice(options)
+
         options = [
-            "continues to handle important late-inning work.",
-            "remains a trusted setup option.",
-            "keeps himself firmly in the leverage mix.",
-            "continues to bridge games effectively.",
-            "holds his place in the late-inning hierarchy.",
-            "remains a reliable option before the ninth.",
-            "keeps earning high-leverage opportunities.",
-            "continues to do his job in key spots.",
+            "This wasn’t a clean line, even if he got through the inning.",
+            "He allowed too much traffic for this to qualify as a sharp outing.",
+            "The line was more uneven than effective here.",
+            "This was more survival than dominance.",
         ]
+        return random.choice(options)
 
-    elif label == "DOM":
+    # Closer-specific clean outcomes, only if role is verified.
+    if role == "closer":
+        if early_closer_usage and label in {"SAVE", "HOLD"}:
+            early_options = [
+                "He was called on before the ninth in a high-leverage spot and handled it like the bullpen anchor.",
+                "The early usage shows this was one of the biggest spots in the game, and he answered it.",
+                "Being used before the ninth speaks to the leverage of the moment, and he came through.",
+                "He got the biggest pocket before the ninth and handled it cleanly.",
+            ]
+            if outing_grade in {"DOMINANT", "CLEAN", "TRAFFIC"}:
+                return random.choice(early_options)
+
+        if label == "SAVE":
+            if outing_grade == "DOMINANT":
+                base = [
+                    "He remains firmly in control of the ninth inning.",
+                    "He still looks like the clear closer here.",
+                    "He keeps a strong hold on save chances in this bullpen.",
+                    "He continues to look like the go-to arm in the ninth.",
+                ]
+                trend_up = [
+                    "He remains firmly in control of the ninth and has backed it up over his recent outings.",
+                    "He still looks like the clear closer here, and the recent form supports it.",
+                    "He keeps a strong hold on the ninth with another good outing in a solid recent stretch.",
+                ]
+                if trend == "UP":
+                    return random.choice(trend_up)
+                return random.choice(base)
+
+            if outing_grade in {"CLEAN", "TRAFFIC", "NEUTRAL"}:
+                options = [
+                    "He still looks like the clear ninth-inning option here.",
+                    "He remains the top save arm in this bullpen.",
+                    "He continues to hold the closer role here.",
+                    "He still looks like the primary answer for saves.",
+                ]
+                return random.choice(options)
+
+        if label == "BLOWN":
+            options = [
+                "One outing doesn’t rewrite the hierarchy, but this does add a little short-term pressure.",
+                "He’s still the closer here, though this result will draw more attention than usual.",
+                "The role may still be his, but this is the kind of outing that gets noticed.",
+                "This doesn’t erase the role, but it does create some short-term doubt.",
+            ]
+            return random.choice(options)
+
+        # verified closer, but not in a save event
         options = [
-            "is trending up in leverage situations.",
-            "could earn more high-leverage work.",
-            "continues to impress in late-game spots.",
-            "is making a strong case for bigger opportunities.",
-            "could continue to grow his role from here.",
-            "looks like a rising leverage arm.",
-            "continues to look like a dominant late-inning weapon.",
-            "is building momentum in this bullpen.",
+            "He remains one of the key late-game arms in this bullpen.",
+            "He still looks like a central leverage piece for this staff.",
+            "He continues to handle important late-game work.",
         ]
+        return random.choice(options)
 
-    elif label == "TRAFFIC":
+    # Committee / save-mix language
+    if role == "committee":
+        if label == "SAVE":
+            options = [
+                "This keeps him firmly in the save mix.",
+                "He helped his case for future save chances.",
+                "In a fluid bullpen, this outing keeps him squarely in the conversation.",
+                "This should keep him in the late-inning mix for chances.",
+            ]
+            return random.choice(options)
+
+        if label in {"HOLD", "DOM", "CLEAN"}:
+            options = [
+                "He remains in the late-inning mix for this bullpen.",
+                "This keeps him relevant in a bullpen without a fully settled pecking order.",
+                "He continues to strengthen his case for meaningful leverage work.",
+                "In a fluid bullpen, outings like this help his standing.",
+            ]
+            return random.choice(options)
+
+    # Setup / high-leverage but not closer
+    if role == "setup":
+        if label == "HOLD":
+            if outing_grade == "DOMINANT" and trend == "UP":
+                options = [
+                    "He remains a trusted setup option and has been trending the right way lately.",
+                    "He continues to handle leverage work well, and the recent run supports that.",
+                    "He’s one of the steadier bridge arms here, and the recent form has been strong.",
+                ]
+                return random.choice(options)
+
+            if outing_grade == "DOMINANT":
+                options = [
+                    "He continues to handle important late-inning work.",
+                    "He remains a trusted setup option here.",
+                    "He keeps himself firmly in the leverage mix.",
+                    "He continues to hold a meaningful late-inning role.",
+                ]
+                return random.choice(options)
+
+            if outing_grade in {"CLEAN", "TRAFFIC", "NEUTRAL"}:
+                options = [
+                    "He remains one of the more trusted bridge arms here.",
+                    "He continues to work meaningful late-inning spots.",
+                    "He stays in the leverage mix with another useful outing.",
+                    "He continues to be a factor in setup situations.",
+                ]
+                return random.choice(options)
+
+        if outing_grade == "DOMINANT":
+            if trend == "UP":
+                options = [
+                    "He’s putting together a strong run and looks like a rising leverage arm.",
+                    "The recent form has been good, and outings like this keep him moving up the leverage ladder.",
+                    "He’s been building momentum lately, and this was another strong step.",
+                ]
+                return random.choice(options)
+
+            options = [
+                "This was a strong outing from a pitcher already working in meaningful spots.",
+                "He looked sharp in another important inning for this bullpen.",
+                "He continues to make his case as a trusted late-inning arm.",
+            ]
+            return random.choice(options)
+
+    # Generic relief language
+    if outing_grade == "DOMINANT":
+        if trend == "UP":
+            options = [
+                "He’s putting together a solid recent run of work.",
+                "The recent form has been good, and this outing fit that trend.",
+                "He’s been stringing together cleaner appearances lately.",
+            ]
+            return random.choice(options)
+
         options = [
-            "managed a tough spot and got the job done.",
-            "wasn’t at his cleanest, but was effective when it mattered.",
-            "limited damage in a high-pressure situation.",
-            "kept things from getting out of hand.",
-            "handled a tricky inning without letting it unravel.",
-            "wasn’t clean, but it was effective.",
-            "got through it despite some stress.",
-            "gave you a bend-but-don’t-break inning.",
+            "This was a strong outing.",
+            "He turned in one of his sharper appearances here.",
+            "He handled the inning cleanly and effectively.",
+            "It was a crisp line from start to finish.",
         ]
+        return random.choice(options)
 
-    elif label == "ROUGH":
+    if outing_grade == "CLEAN":
         options = [
-            "could cost him some ground in the bullpen hierarchy.",
-            "didn’t give you a strong showing in a key spot.",
-            "may lose some leverage opportunities after this.",
-            "took a step back in terms of trust.",
-            "didn’t do his role any favors with this outing.",
-            "struggled to keep things under control.",
-            "didn’t turn in the kind of performance that earns more chances.",
-            "could impact his standing in the bullpen.",
+            "He handled the inning cleanly.",
+            "This was a steady, effective appearance.",
+            "He did his job without much trouble.",
+            "He gave them a solid inning here.",
         ]
+        return random.choice(options)
 
-    else:
+    if outing_grade == "TRAFFIC":
         options = [
-            "turned in a steady outing that keeps him in the mix.",
-            "did his job without much trouble.",
-            "continues to provide solid innings.",
-            "keeps things stable in his role.",
-            "gave them a clean and effective appearance.",
-            "handled his assignment with no issues.",
-            "added another reliable outing.",
-            "continues to deliver when called upon.",
+            "He worked through traffic and still got the job done.",
+            "It wasn’t spotless, but he managed the inning well enough.",
+            "He navigated some traffic and kept the game from turning.",
+            "He bent a bit but kept the inning intact.",
         ]
+        return random.choice(options)
 
-    return maybe_prefix(random.choice(options))
+    options = [
+        "He turned in a usable inning for this bullpen.",
+        "This was a neutral relief appearance overall.",
+        "He got through the inning without changing much about his standing.",
+        "He gave them a serviceable inning here.",
+    ]
+    return random.choice(options)
 
 
 # ---------------- SUMMARY ----------------
 
-def build_summary(name: str, team: str, s: dict, label: str, context: dict, streak_count: int) -> str:
+def build_summary(name: str, team: str, s: dict, label: str, context: dict, streak_count: int, tracked_info: dict, recent_appearances):
     ip_text = format_ip_for_summary(s["ip"])
     outs_recorded = baseball_ip_to_outs(s["ip"])
     er = s["er"]
@@ -731,9 +1022,18 @@ def build_summary(name: str, team: str, s: dict, label: str, context: dict, stre
 
     ctx = build_context_phrase(context)
     finished_game = context.get("finished_game", False)
+    role = infer_role_from_tracked_info(tracked_info)
+    early_closer_usage = (
+        role == "closer"
+        and context.get("entry_inning") is not None
+        and context.get("entry_inning") < 9
+        and context.get("entry_state_kind") in {"lead", "tie"}
+    )
 
     if label == "SAVE":
-        if outs_recorded >= 6:
+        if early_closer_usage and finished_game:
+            line1 = f"{name} was called on {ctx} before the ninth in a high-leverage spot and finished the game for the save."
+        elif outs_recorded >= 6:
             line1 = f"{name} entered {ctx} and covered the final {ip_text} to earn the save."
         elif finished_game and context.get("entry_inning") == 9:
             line1 = f"{name} entered {ctx} and shut the door for the save."
@@ -759,14 +1059,21 @@ def build_summary(name: str, team: str, s: dict, label: str, context: dict, stre
         line1 = f"{name} entered {ctx} and turned in a clean outing."
 
     else:
-        line1 = f"{name} entered {ctx} for a relief outing."
+        line1 = f"{name} entered {ctx} in relief."
 
-    if er == 0 and h == 0 and bb == 0:
+    # One-batter / one-out handling
+    if outs_recorded == 1:
+        if er == 0 and h == 0 and bb == 0:
+            line2 = "He retired the lone batter he faced."
+        elif er == 0:
+            line2 = f"He got the out he was asked to get, allowing {h} {plural('hit', h)} and {bb} {plural('walk', bb)}."
+        else:
+            line2 = f"He recorded one out while allowing {er} {plural('run', er)} on {h} {plural('hit', h)} and {bb} {plural('walk', bb)}."
+    elif er == 0 and h == 0 and bb == 0:
         if k > 0:
             line2 = f"He retired all hitters he faced over {ip_text} {strikeout_phrase(k).replace('while ', '')}."
         else:
             line2 = f"He retired all hitters he faced over {ip_text}."
-
     elif er == 0:
         line2 = f"He worked {ip_text}, allowing {h} {plural('hit', h)} and {bb} {plural('walk', bb)}"
         k_part = strikeout_phrase(k)
@@ -774,7 +1081,6 @@ def build_summary(name: str, team: str, s: dict, label: str, context: dict, stre
             line2 += f" {k_part}."
         else:
             line2 += "."
-
     else:
         line2 = f"He allowed {er} {plural('run', er)} over {ip_text} on {h} {plural('hit', h)} and {bb} {plural('walk', bb)}"
         k_part = strikeout_phrase(k)
@@ -783,7 +1089,15 @@ def build_summary(name: str, team: str, s: dict, label: str, context: dict, stre
         else:
             line2 += "."
 
-    analysis = build_analysis(label, s)
+    analysis = build_analysis(
+        p={"name": name, "team": team},
+        s=s,
+        label=label,
+        context=context,
+        tracked_info=tracked_info,
+        recent_appearances=recent_appearances,
+    )
+
     streak_sentence = get_streak_sentence(streak_count)
 
     if streak_sentence:
@@ -858,7 +1172,7 @@ def get_pitchers(feed: dict):
 
 # ---------------- POST ----------------
 
-async def post_card(channel, p: dict, matchup: str, score: str, context: dict, streak_count: int):
+async def post_card(channel, p: dict, matchup: str, score: str, context: dict, streak_count: int, tracked_info: dict, recent_appearances):
     s = {
         "ip": str(p["stats"].get("inningsPitched", "0.0")),
         "h": safe_int(p["stats"].get("hits", 0), 0),
@@ -897,7 +1211,16 @@ async def post_card(channel, p: dict, matchup: str, score: str, context: dict, s
     embed.add_field(name="Season", value=format_season_line(p.get("season_stats", {})), inline=False)
     embed.add_field(
         name="Summary",
-        value=build_summary(p["name"], p["team"], s, label, context, streak_count),
+        value=build_summary(
+            p["name"],
+            p["team"],
+            s,
+            label,
+            context,
+            streak_count,
+            tracked_info,
+            recent_appearances,
+        ),
         inline=False,
     )
     embed.add_field(name="Final", value=score, inline=False)
@@ -975,9 +1298,19 @@ async def loop():
 
                     context = get_pitcher_entry_context(feed, pitcher_id, p["side"])
                     streak_count = get_streak_count(pitcher_id, game_date_et)
+                    recent_appearances = get_recent_appearances(pitcher_id, game_date_et, limit=5, max_days=21)
 
                     log(f"Posting {p['name']} | {p['team']} | {matchup}")
-                    await post_card(channel, p, matchup, score, context, streak_count)
+                    await post_card(
+                        channel,
+                        p,
+                        matchup,
+                        score,
+                        context,
+                        streak_count,
+                        tracked_info,
+                        recent_appearances,
+                    )
                     posted.add(key)
 
             state["posted"] = list(posted)
