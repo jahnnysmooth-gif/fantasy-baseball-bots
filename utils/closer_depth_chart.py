@@ -7,12 +7,18 @@ import requests
 from bs4 import BeautifulSoup
 
 STATE_FILE = "state/closers/closer_depth_chart.json"
-URL = "https://closermonkey.com"
+URL = "https://closermonkey.com/2015/05/04/updated-closer-depth-chart/"
 
 TEAM_ABBRS = {
     "ARI", "ATL", "BAL", "BOS", "CHC", "CWS", "CHW", "CIN", "CLE", "COL", "DET",
     "HOU", "KC", "LAA", "LAD", "MIA", "MIL", "MIN", "NYM", "NYY", "ATH",
     "PHI", "PIT", "SD", "SF", "SEA", "STL", "TB", "TEX", "TOR", "WSH", "WAS"
+}
+
+EXPECTED_TEAMS = {
+    "ARI", "ATH", "ATL", "BAL", "BOS", "CHC", "CWS", "CIN", "CLE", "COL",
+    "DET", "HOU", "KC", "LAA", "LAD", "MIA", "MIL", "MIN", "NYM", "NYY",
+    "PHI", "PIT", "SD", "SF", "SEA", "STL", "TB", "TEX", "TOR", "WSH"
 }
 
 
@@ -50,7 +56,7 @@ def fetch_closer_depth_chart():
     end_idx = None
 
     for i, s in enumerate(strings):
-        if "Updated MLB Closer Depth Chart" in s:
+        if "MLB Bullpen Depth Charts" in s or "Updated MLB Closer Depth Chart" in s:
             start_idx = i
             break
 
@@ -118,12 +124,7 @@ def fetch_closer_depth_chart():
         i += 5
 
     if len(teams) != 30:
-        expected = {
-            "ARI", "ATH", "ATL", "BAL", "BOS", "CHC", "CWS", "CIN", "CLE", "COL",
-            "DET", "HOU", "KC", "LAA", "LAD", "MIA", "MIL", "MIN", "NYM", "NYY",
-            "PHI", "PIT", "SD", "SF", "SEA", "STL", "TB", "TEX", "TOR", "WSH"
-        }
-        missing = sorted(expected - set(teams.keys()))
+        missing = sorted(EXPECTED_TEAMS - set(teams.keys()))
         print(
             f"[CLOSER WATCH] Parsed {len(teams)} teams instead of 30. Missing: {missing}. Refusing to save.",
             flush=True,
