@@ -1,6 +1,7 @@
 import asyncio
 import json
 import os
+import random
 from datetime import datetime, timedelta, timezone
 from zoneinfo import ZoneInfo
 
@@ -96,15 +97,7 @@ def save_state(state):
         json.dump(state, f, indent=2)
 
 
-# ---------------- HELPERS ----------------
-
-def ordinal(n: int) -> str:
-    if 10 <= n % 100 <= 20:
-        suffix = "th"
-    else:
-        suffix = {1: "st", 2: "nd", 3: "rd"}.get(n % 10, "th")
-    return f"{n}{suffix}"
-
+# ---------------- BASIC HELPERS ----------------
 
 def safe_int(value, default=0):
     try:
@@ -118,7 +111,34 @@ def safe_int(value, default=0):
             return default
 
 
+def safe_float(value, default=0.0):
+    try:
+        if value in (None, "", "-"):
+            return default
+        return float(value)
+    except Exception:
+        return default
+
+
+def plural(word: str, count: int) -> str:
+    return word if count == 1 else f"{word}s"
+
+
+def ordinal(n: int) -> str:
+    if 10 <= n % 100 <= 20:
+        suffix = "th"
+    else:
+        suffix = {1: "st", 2: "nd", 3: "rd"}.get(n % 10, "th")
+    return f"{n}{suffix}"
+
+
 def baseball_ip_to_outs(ip: str) -> int:
+    """
+    Baseball IP format:
+      1.0 = 3 outs
+      1.1 = 4 outs
+      1.2 = 5 outs
+    """
     text = str(ip).strip()
     if not text:
         return 0
@@ -135,18 +155,22 @@ def baseball_ip_to_outs(ip: str) -> int:
 
 def format_ip_for_line(ip: str) -> str:
     text = str(ip).strip()
+
     if text.endswith(".0"):
         return f"{safe_int(float(text), 0)} IP"
+
     if text.endswith(".1"):
         whole = safe_int(text.split(".")[0], 0)
         return "⅓ IP" if whole == 0 else f"{whole}⅓ IP"
+
     if text.endswith(".2"):
         whole = safe_int(text.split(".")[0], 0)
         return "⅔ IP" if whole == 0 else f"{whole}⅔ IP"
+
     return f"{text} IP"
 
 
-def format_ip_summary(ip: str) -> str:
+def format_ip_for_summary(ip: str) -> str:
     outs = baseball_ip_to_outs(ip)
 
     if outs == 1:
@@ -159,6 +183,7 @@ def format_ip_summary(ip: str) -> str:
         return "two innings"
 
     text = str(ip).strip()
+
     if text.endswith(".0"):
         whole = safe_int(float(text), 0)
         return f"{whole} innings"
@@ -174,11 +199,11 @@ def format_ip_summary(ip: str) -> str:
     return f"{text} innings"
 
 
-def format_line(s):
+def format_game_line(s: dict) -> str:
     return f"{format_ip_for_line(s['ip'])} • {s['h']} H • {s['er']} ER • {s['bb']} BB • {s['k']} K"
 
 
-def format_pitch_count(stats):
+def format_pitch_count(stats: dict) -> str:
     pitches = safe_int(stats.get("numberOfPitches", 0), 0)
     strikes = safe_int(stats.get("strikes", 0), 0)
 
@@ -189,7 +214,26 @@ def format_pitch_count(stats):
     return f"{pitches} pitches • {strikes} strikes"
 
 
-def format_season_line(season):
+def build_score_line(away_abbr: str, away_score: int, home_abbr: str, home_score: int) -> str:
+    if home_score > away_score:
+        return f"{home_abbr} {home_score}, {away_abbr} {away_score}"
+    return f"{away_abbr} {away_score}, {home_abbr} {home_score}"
+
+
+def parse_game_date_et(game: dict):
+    game_date = game.get("gameDate")
+    if not game_date:
+        return None
+    try:
+        dt = datetime.fromisoformat(game_date.replace("Z", "+00:00"))
+        return dt.astimezone(ET).date()
+    except Exception:
+        return None
+
+
+# ---------------- SEASON STATS ----------------
+
+def format_season_line(season: dict) -> str:
     saves = safe_int(season.get("saves", 0), 0)
     holds = safe_int(season.get("holds", 0), 0)
     strikeouts = safe_int(season.get("strikeOuts", 0), 0)
@@ -248,35 +292,40 @@ def format_season_line(season):
     return " • ".join(parts)
 
 
-def build_score_line(away_abbr, away_score, home_abbr, home_score):
-    if home_score > away_score:
-        return f"{home_abbr} {home_score}, {away_abbr} {away_score}"
-    return f"{away_abbr} {away_score}, {home_abbr} {home_score}"
-
-
 # ---------------- CLASSIFICATION ----------------
 
-def classify(s):
+def classify(s: dict) -> str:
     outs = baseball_ip_to_outs(s["ip"])
 
     if s.get("saves"):
         return "SAVE"
+
     if s.get("blownSaves"):
         return "BLOWN"
+
     if s.get("holds"):
         return "HOLD"
+
+    # dominant only if at least one full inning
     if outs >= 3 and s["er"] == 0 and s["h"] == 0 and s["bb"] == 0:
         return "DOM"
-    if s["er"] == 0 and (s["h"] + s["bb"]) >= 2:
-        return "TRAFFIC"
+
     if s["er"] >= 3:
         return "ROUGH"
-    if s["er"] == 0:
+
+    if s["er"] == 0 and (s["h"] + s["bb"]) >= 2:
+        return "TRAFFIC"
+
+    if s["er"] == 0 and outs >= 3:
         return "CLEAN"
+
+    if s["er"] == 0:
+        return "RELIEF"
+
     return "RELIEF"
 
 
-def impact_tag(label, s):
+def impact_tag(label: str, s: dict) -> str:
     outs = baseball_ip_to_outs(s["ip"])
 
     if label == "SAVE":
@@ -296,7 +345,7 @@ def impact_tag(label, s):
         return "🔥 Dominant outing"
 
     if label == "TRAFFIC":
-        return "⚠️ Escaped trouble"
+        return "⚠️ Navigated traffic"
 
     if label == "ROUGH":
         return "💀 Rough outing"
@@ -307,9 +356,53 @@ def impact_tag(label, s):
     return "⚾ Relief outing"
 
 
+# ---------------- CLOSER MONKEY TRACKING ----------------
+
+def refresh_tracked_pitchers():
+    try:
+        teams = fetch_closer_depth_chart()
+        if not teams:
+            log("Closer Monkey refresh returned no teams, using saved depth chart")
+    except Exception as e:
+        log(f"Closer Monkey refresh failed: {e}")
+
+    tracked = build_tracked_relief_map()
+    log(f"Loaded {len(tracked)} tracked relievers from Closer Monkey")
+    return tracked
+
+
+def find_tracked_pitcher_info(raw_name: str, team_abbr: str, tracked: dict):
+    """
+    Exact normalized name match first, with team validation.
+    Fallback to unique last-name match, also with team validation.
+    """
+    norm = normalize_name(raw_name)
+    if not norm:
+        return None
+
+    exact = tracked.get(norm)
+    if exact and exact.get("team") == team_abbr:
+        return exact
+
+    last = norm.split()[-1] if norm else ""
+    if not last:
+        return None
+
+    matches = []
+    for tracked_norm, info in tracked.items():
+        tracked_last = tracked_norm.split()[-1] if tracked_norm else ""
+        if tracked_last == last and info.get("team") == team_abbr:
+            matches.append(info)
+
+    if len(matches) == 1:
+        return matches[0]
+
+    return None
+
+
 # ---------------- ENTRY CONTEXT ----------------
 
-def get_pitcher_entry_context(feed, pitcher_id: int, pitcher_side: str):
+def get_pitcher_entry_context(feed: dict, pitcher_id: int, pitcher_side: str):
     plays = feed.get("liveData", {}).get("plays", {}).get("allPlays", [])
     if not plays:
         return {
@@ -346,7 +439,7 @@ def get_pitcher_entry_context(feed, pitcher_id: int, pitcher_side: str):
 
     entry_phrase = ""
     if inning is not None and half:
-        entry_phrase = f"the {half.lower()} of the {ordinal(inning)}"
+        entry_phrase = f"in the {half.lower()} of the {ordinal(inning)}"
 
     if outs == 0:
         entry_outs_text = "with nobody out"
@@ -355,6 +448,7 @@ def get_pitcher_entry_context(feed, pitcher_id: int, pitcher_side: str):
     else:
         entry_outs_text = "with two outs"
 
+    # score before first pitch by this pitcher
     if first_idx > 0:
         prev_result = plays[first_idx - 1].get("result", {})
         prev_away = safe_int(prev_result.get("awayScore", 0), 0)
@@ -373,23 +467,23 @@ def get_pitcher_entry_context(feed, pitcher_id: int, pitcher_side: str):
     diff = team_score - opp_score
     if diff > 0:
         if diff == 1:
-            state_text = "protecting a one-run lead"
+            state_text = "his club protecting a one-run lead"
         elif diff == 2:
-            state_text = "protecting a two-run lead"
+            state_text = "his club protecting a two-run lead"
         elif diff == 3:
-            state_text = "protecting a three-run lead"
+            state_text = "his club protecting a three-run lead"
         else:
-            state_text = f"protecting a {diff}-run lead"
+            state_text = f"his club protecting a {diff}-run lead"
     elif diff < 0:
         deficit = abs(diff)
         if deficit == 1:
-            state_text = "with his club trailing by a run"
+            state_text = "his club trailing by a run"
         elif deficit == 2:
-            state_text = "with his club trailing by two"
+            state_text = "his club trailing by two"
         else:
-            state_text = f"with his club trailing by {deficit}"
+            state_text = f"his club trailing by {deficit}"
     else:
-        state_text = "with the game tied"
+        state_text = "the game tied"
 
     return {
         "entry_phrase": entry_phrase,
@@ -400,113 +494,192 @@ def get_pitcher_entry_context(feed, pitcher_id: int, pitcher_side: str):
     }
 
 
+def build_context_phrase(context: dict) -> str:
+    bits = []
+    if context.get("entry_phrase"):
+        bits.append(context["entry_phrase"])
+    if context.get("entry_outs_text"):
+        bits.append(context["entry_outs_text"])
+    if context.get("entry_state_text"):
+        bits.append(context["entry_state_text"])
+
+    if not bits:
+        return "in relief"
+
+    if len(bits) == 1:
+        return bits[0]
+
+    if len(bits) == 2:
+        return f"{bits[0]} {bits[1]}"
+
+    return f"{bits[0]} {bits[1]}, {bits[2]}"
+
+
+# ---------------- STREAK TRACKING ----------------
+
+appearance_cache = {}
+
+
+def get_pitcher_ids_for_date(target_date):
+    if target_date in appearance_cache:
+        return appearance_cache[target_date]
+
+    pitcher_ids = set()
+
+    try:
+        r = requests.get(f"{SCHEDULE_URL}&date={target_date.isoformat()}", timeout=30)
+        r.raise_for_status()
+        data = r.json()
+
+        games = []
+        for date_block in data.get("dates", []):
+            games.extend(date_block.get("games", []))
+
+        for game in games:
+            game_id = game.get("gamePk")
+            if not game_id:
+                continue
+
+            try:
+                feed = get_feed(game_id)
+            except Exception:
+                continue
+
+            box = feed.get("liveData", {}).get("boxscore", {}).get("teams", {})
+            for side in ["home", "away"]:
+                players = box.get(side, {}).get("players", {})
+                for p in players.values():
+                    stats = p.get("stats", {}).get("pitching")
+                    if not stats:
+                        continue
+                    if not stats.get("inningsPitched"):
+                        continue
+
+                    pid = p.get("person", {}).get("id")
+                    if pid is not None:
+                        pitcher_ids.add(pid)
+
+    except Exception as e:
+        log(f"Appearance cache load failed for {target_date}: {e}")
+
+    appearance_cache[target_date] = pitcher_ids
+    return pitcher_ids
+
+
+def get_streak_count(pitcher_id: int, game_date_et):
+    if pitcher_id is None or game_date_et is None:
+        return 0
+
+    yesterday = game_date_et - timedelta(days=1)
+    two_days_ago = game_date_et - timedelta(days=2)
+
+    yesterday_ids = get_pitcher_ids_for_date(yesterday)
+    two_days_ids = get_pitcher_ids_for_date(two_days_ago)
+
+    if pitcher_id in yesterday_ids and pitcher_id in two_days_ids:
+        return 3
+
+    if pitcher_id in yesterday_ids:
+        return 2
+
+    return 0
+
+
+def get_streak_sentence(streak_count: int) -> str:
+    if streak_count == 2:
+        return random.choice([
+            "Second straight appearance.",
+            "It was his second straight day of work.",
+        ])
+    if streak_count == 3:
+        return random.choice([
+            "Third straight appearance.",
+            "It was his third straight day of work.",
+        ])
+    return ""
+
+
+# ---------------- LANGUAGE HELPERS ----------------
+
+def strikeout_phrase(k: int) -> str:
+    if k <= 0:
+        return ""
+
+    if k >= 3:
+        return f"while punching out {k} {plural('batter', k)}"
+
+    return f"while striking out {k} {plural('batter', k)}"
+
+
 # ---------------- SUMMARY ----------------
 
-def build_summary(name, team, s, label, context):
-    ip_text = format_ip_summary(s["ip"])
+def build_summary(name: str, team: str, s: dict, label: str, context: dict, streak_count: int) -> str:
+    ip_text = format_ip_for_summary(s["ip"])
     outs_recorded = baseball_ip_to_outs(s["ip"])
     er = s["er"]
     h = s["h"]
     bb = s["bb"]
     k = s["k"]
 
-    entry_phrase = context.get("entry_phrase", "")
-    entry_outs_text = context.get("entry_outs_text", "")
-    entry_state_text = context.get("entry_state_text", "")
+    ctx = build_context_phrase(context)
     finished_game = context.get("finished_game", False)
-
-    context_bits = []
-    if entry_phrase:
-        context_bits.append(f"in {entry_phrase}")
-    if entry_outs_text:
-        context_bits.append(entry_outs_text)
-    if entry_state_text:
-        context_bits.append(entry_state_text)
-
-    if context_bits:
-        opening_context = " ".join([context_bits[0], *[f", {bit}" for bit in context_bits[1:]]]).replace(" ,", ",")
-    else:
-        opening_context = "in relief"
 
     if label == "SAVE":
         if outs_recorded >= 6:
-            line1 = f"{name} entered {opening_context} for {team} and covered the final {ip_text} to earn the save."
+            line1 = f"{name} entered {ctx} for {team} and covered the final {ip_text} to earn the save."
         elif finished_game and context.get("entry_inning") == 9:
-            line1 = f"{name} entered {opening_context} for {team} and shut the door for the save."
+            line1 = f"{name} entered {ctx} for {team} and shut the door for the save."
         else:
-            line1 = f"{name} entered {opening_context} for {team} and locked down the save."
+            line1 = f"{name} entered {ctx} for {team} and locked down the save."
+
     elif label == "BLOWN":
-        line1 = f"{name} entered {opening_context} for {team} but couldn’t hold the lead and was charged with a blown save."
+        line1 = f"{name} entered {ctx} for {team} but couldn’t hold the lead and was charged with a blown save."
+
     elif label == "HOLD":
-        line1 = f"{name} entered {opening_context} for {team} and protected the lead to earn the hold."
+        line1 = f"{name} entered {ctx} for {team} and protected the lead to earn the hold."
+
     elif label == "DOM":
-        line1 = f"{name} entered {opening_context} for {team} and dominated."
+        line1 = f"{name} entered {ctx} for {team} and dominated."
+
     elif label == "TRAFFIC":
-        line1 = f"{name} entered {opening_context} for {team} and worked through traffic to keep the game under control."
+        line1 = f"{name} entered {ctx} for {team} and navigated traffic to keep the game under control."
+
     elif label == "ROUGH":
-        line1 = f"{name} entered {opening_context} for {team} but was hit hard in a rough outing."
+        line1 = f"{name} entered {ctx} for {team} but was hit hard in a rough outing."
+
     elif label == "CLEAN":
-        line1 = f"{name} entered {opening_context} for {team} and turned in a clean outing."
+        line1 = f"{name} entered {ctx} for {team} and turned in a clean outing."
+
     else:
-        line1 = f"{name} entered {opening_context} for {team} for a relief outing."
+        line1 = f"{name} entered {ctx} for {team} for a relief outing."
 
     if er == 0 and h == 0 and bb == 0:
-        if k >= 2:
-            line2 = f"He retired all hitters he faced over {ip_text} and struck out {k}."
+        if k > 0:
+            line2 = f"He retired all hitters he faced over {ip_text} {strikeout_phrase(k).replace('while ', '')}."
         else:
             line2 = f"He retired all hitters he faced over {ip_text}."
+
     elif er == 0:
-        if k >= 2:
-            line2 = f"He worked {ip_text}, allowing {h} hits and {bb} walks while striking out {k}."
+        line2 = f"He worked {ip_text}, allowing {h} {plural('hit', h)} and {bb} {plural('walk', bb)}"
+        k_part = strikeout_phrase(k)
+        if k_part:
+            line2 += f" {k_part}."
         else:
-            line2 = f"He worked {ip_text}, allowing {h} hits and {bb} walks."
+            line2 += "."
+
     else:
-        if k >= 2:
-            line2 = f"He allowed {er} runs over {ip_text} on {h} hits and {bb} walks, striking out {k}."
+        line2 = f"He allowed {er} {plural('run', er)} over {ip_text} on {h} {plural('hit', h)} and {bb} {plural('walk', bb)}"
+        k_part = strikeout_phrase(k)
+        if k_part:
+            line2 += f" {k_part}."
         else:
-            line2 = f"He allowed {er} runs over {ip_text} on {h} hits and {bb} walks."
+            line2 += "."
+
+    streak_sentence = get_streak_sentence(streak_count)
+    if streak_sentence:
+        return f"{line1} {line2} {streak_sentence}"
 
     return f"{line1} {line2}"
-
-
-# ---------------- TRACKED PITCHER MAP ----------------
-
-def refresh_tracked_pitchers():
-    try:
-        teams = fetch_closer_depth_chart()
-        if not teams:
-            log("Closer Monkey refresh returned no teams, using saved depth chart")
-    except Exception as e:
-        log(f"Closer Monkey refresh failed: {e}")
-
-    tracked = build_tracked_relief_map()
-    log(f"Loaded {len(tracked)} tracked relievers from Closer Monkey")
-    return tracked
-
-
-def find_tracked_pitcher_info(raw_name: str, team_abbr: str, tracked: dict):
-    norm = normalize_name(raw_name)
-    if not norm:
-        return None
-
-    exact = tracked.get(norm)
-    if exact and exact.get("team") == team_abbr:
-        return exact
-
-    last = norm.split()[-1] if norm else ""
-    if not last:
-        return None
-
-    matches = []
-    for tracked_norm, info in tracked.items():
-        tracked_last = tracked_norm.split()[-1] if tracked_norm else ""
-        if tracked_last == last and info.get("team") == team_abbr:
-            matches.append(info)
-
-    if len(matches) == 1:
-        return matches[0]
-
-    return None
 
 
 # ---------------- CORE ----------------
@@ -536,7 +709,7 @@ def get_feed(game_id):
     return r.json()
 
 
-def get_pitchers(feed):
+def get_pitchers(feed: dict):
     result = []
     box = feed.get("liveData", {}).get("boxscore", {}).get("teams", {})
     game_teams = feed.get("gameData", {}).get("teams", {})
@@ -575,7 +748,7 @@ def get_pitchers(feed):
 
 # ---------------- POST ----------------
 
-async def post_card(channel, p, matchup, score, tracked_info, context):
+async def post_card(channel, p: dict, matchup: str, score: str, context: dict, streak_count: int):
     s = {
         "ip": str(p["stats"].get("inningsPitched", "0.0")),
         "h": safe_int(p["stats"].get("hits", 0), 0),
@@ -609,12 +782,12 @@ async def post_card(channel, p, matchup, score, tracked_info, context):
 
     embed.add_field(name="", value=f"**{impact_tag(label, s)}**", inline=False)
     embed.add_field(name="⚾ Matchup", value=matchup, inline=False)
-    embed.add_field(name="Game Line", value=format_line(s), inline=False)
+    embed.add_field(name="Game Line", value=format_game_line(s), inline=False)
     embed.add_field(name="Pitch Count", value=format_pitch_count(p["stats"]), inline=False)
     embed.add_field(name="Season", value=format_season_line(p.get("season_stats", {})), inline=False)
     embed.add_field(
         name="Summary",
-        value=build_summary(p["name"], p["team"], s, label, context),
+        value=build_summary(p["name"], p["team"], s, label, context, streak_count),
         inline=False,
     )
     embed.add_field(name="Final", value=score, inline=False)
@@ -657,6 +830,7 @@ async def loop():
 
                 feed = get_feed(game_id)
                 pitchers = get_pitchers(feed)
+                game_date_et = parse_game_date_et(g)
 
                 game_teams = feed.get("gameData", {}).get("teams", {})
                 away_abbr = game_teams.get("away", {}).get("abbreviation")
@@ -690,8 +864,10 @@ async def loop():
                         continue
 
                     context = get_pitcher_entry_context(feed, pitcher_id, p["side"])
+                    streak_count = get_streak_count(pitcher_id, game_date_et)
+
                     log(f"Posting {p['name']} | {p['team']} | {matchup}")
-                    await post_card(channel, p, matchup, score, tracked_info, context)
+                    await post_card(channel, p, matchup, score, context, streak_count)
                     posted.add(key)
 
             state["posted"] = list(posted)
