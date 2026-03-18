@@ -1566,12 +1566,21 @@ async def loop():
 
 intents = discord.Intents.default()
 client = discord.Client(intents=intents)
+background_task = None
 
 
 @client.event
 async def on_ready():
+    global background_task
     log(f"Logged in as {client.user}")
-    asyncio.create_task(loop())
+
+    if background_task is None or background_task.done():
+        background_task = asyncio.create_task(loop())
+        log("Closer background task created")
 
 
-client.run(TOKEN)
+async def start_closer_bot():
+    if not TOKEN:
+        raise RuntimeError("CLOSER_BOT_TOKEN is not set")
+
+    await client.start(TOKEN, reconnect=True)
