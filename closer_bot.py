@@ -774,37 +774,161 @@ def get_recent_usage_bucket(recent_appearances):
     return "FRESH"
 
 
+def is_spring_training_window() -> bool:
+    now_et = datetime.now(ET)
+    # Keep spring usage language soft until the regular season is underway.
+    return now_et.month < 4
+
+
 def build_usage_sentence(streak_count: int, recent_appearances):
     usage_bucket = get_recent_usage_bucket(recent_appearances)
+    spring_mode = is_spring_training_window()
+
+    if spring_mode:
+        if streak_count == 3:
+            return random.choice([
+                "It was his third straight spring appearance.",
+                "This was his third outing in a row this spring.",
+                "He has been getting frequent spring work lately.",
+                "Another spring outing as the club keeps him on a regular schedule.",
+                "He has stayed active in camp with another spring appearance.",
+                "This kept a steady spring pattern going for him.",
+                "The club has kept him moving with regular spring appearances.",
+                "He has continued to get consistent spring work.",
+            ])
+
+        if streak_count == 2:
+            return random.choice([
+                "It was his second straight spring appearance.",
+                "This was another spring outing on back-to-back days.",
+                "He has been getting regular spring work lately.",
+                "Another spring tune-up as he builds toward the season.",
+                "He has stayed on a steady spring schedule.",
+                "This was part of a regular spring workload for him.",
+                "The club has kept him active with another spring outing.",
+                "He continues to log steady spring appearances.",
+            ])
+
+        if usage_bucket == "HEAVY":
+            return random.choice([
+                "He has been getting plenty of spring work.",
+                "This was another spring outing in an active stretch for him.",
+                "The club has been keeping him involved often this spring.",
+                "He has been on a busy spring schedule lately.",
+                "This was part of a fairly active spring run for him.",
+                "He has logged steady spring appearances over the last few days.",
+                "The recent spring workload has been active, though that is normal this time of year.",
+                "He has been one of the more active spring arms lately.",
+            ])
+
+        if usage_bucket == "ACTIVE":
+            return random.choice([
+                "He has been getting steady spring work.",
+                "Another regular spring appearance for him.",
+                "The club continues to give him consistent spring innings.",
+                "He has stayed in a steady spring rhythm.",
+                "This was another spring tune-up outing.",
+                "He keeps getting regular spring reps.",
+                "The recent spring usage has been nicely paced.",
+                "He has continued to build innings this spring.",
+            ])
+
+        if usage_bucket == "MODERATE":
+            return random.choice([
+                "This was another spring appearance as his work ramps up.",
+                "He has been getting a normal spring cadence of work.",
+                "The club has kept him in a measured spring rhythm.",
+                "This fit a normal spring workload for a late-inning arm.",
+                "He has been mixing in regular spring outings.",
+                "Another spring rep as he builds toward Opening Day.",
+                "He has kept a steady spring pace so far.",
+                "This was part of a normal spring build-up.",
+            ])
+
+        if usage_bucket in {"LIGHT", "FRESH"}:
+            return random.choice([
+                "This looked like a lighter spring usage spot for him.",
+                "He came into this outing with a fairly light spring workload.",
+                "This was one of his lighter spring turns lately.",
+                "He still looks to be in a measured spring build-up.",
+                "The recent spring workload has stayed light.",
+                "This was a lighter tune-up appearance for him.",
+                "He has not been overloaded this spring.",
+                "This fit a lighter spring schedule for him.",
+            ])
+
+        return ""
 
     if streak_count == 3:
         return random.choice([
-            "It was his third straight day of work, so the recent usage is worth watching.",
-            "This was his third straight appearance, which puts him in a heavier recent usage pocket.",
+            "It was his third straight day of work.",
+            "This was his third straight appearance.",
+            "He has now worked three days in a row.",
+            "That made it three straight outings for him.",
+            "He has been used on three straight days.",
+            "This was his third straight turn out of the bullpen.",
+            "He has stacked three straight appearances here.",
+            "The recent usage now includes three straight days of work.",
         ])
 
     if streak_count == 2:
         return random.choice([
-            "It was his second straight day of work, so he has logged back-to-back appearances.",
-            "This was his second straight appearance, giving him back-to-back usage.",
+            "It was his second straight day of work.",
+            "This was his second straight appearance.",
+            "He has now worked on back-to-back days.",
+            "That made it back-to-back outings for him.",
+            "He has been used on consecutive days.",
+            "This was another turn for him on back-to-back days.",
+            "He has logged two straight appearances.",
+            "The recent usage now includes back-to-back work.",
         ])
 
     if usage_bucket == "HEAVY":
         return random.choice([
-            "He has been used heavily lately, which is worth keeping in mind for the next save chance.",
-            "The recent workload has been fairly heavy, so his availability is at least worth watching.",
+            "He has been used heavily lately.",
+            "The recent workload has been fairly heavy.",
+            "He has been getting a lot of recent work.",
+            "This was another outing in a busy recent stretch.",
+            "The usage has been on the heavy side lately.",
+            "He has been one of the more active recent arms in this bullpen.",
+            "This continued a pretty busy recent run for him.",
+            "He has logged a heavy recent workload.",
         ])
 
     if usage_bucket == "ACTIVE":
         return random.choice([
             "He has been getting steady recent work in this bullpen.",
-            "The recent usage has been active, which says something about the trust level.",
+            "The recent usage has been active.",
+            "He has stayed busy lately.",
+            "This was another outing in a steady run of work.",
+            "He has been working regularly in recent days.",
+            "The recent usage pattern has been steady.",
+            "He has logged a healthy amount of recent work.",
+            "This fits an active recent stretch for him.",
         ])
 
-    if usage_bucket == "FRESH":
+    if usage_bucket == "MODERATE":
+        return random.choice([
+            "His recent usage has been fairly normal.",
+            "This fits a standard recent workload for him.",
+            "He has been on a measured recent schedule.",
+            "The recent work has been balanced.",
+            "This was part of a normal recent cadence for him.",
+            "He has been getting his usual recent work.",
+            "The workload has been steady without being excessive.",
+            "This kept a normal recent pattern going.",
+        ])
+
+    if usage_bucket in {"LIGHT", "FRESH"}:
         return random.choice([
             "He came into this outing with a relatively fresh recent workload.",
             "This was a lighter recent usage spot for him.",
+            "His recent workload had been on the lighter side.",
+            "He looked fairly fresh coming into this one.",
+            "This was not an overloaded recent usage spot.",
+            "The recent workload had been manageable.",
+            "He came in with some breathing room on the usage front.",
+            "This fit a lighter recent pattern for him.",
         ])
 
     return ""
@@ -824,8 +948,10 @@ def build_implication_sentence(role: str, label: str, outing_grade: str, trend: 
             ])
         if label == "BLOWN" or outing_grade in {"SHAKY", "ROUGH"}:
             return random.choice([
-                "It probably does not change the hierarchy by itself, but it does create a little short-term pressure.",
-                "One outing does not reset the bullpen, but this does bring a little more scrutiny.",
+                "He is still the clear closer here, even if this outing was messy.",
+                "The line was shaky, but it does not change his place at the top of this bullpen.",
+                "He remains the clear ninth-inning arm despite the rougher outing.",
+                "This was not a sharp outing, but he still sits at the top of the bullpen hierarchy.",
             ])
         if early_closer_usage:
             return random.choice([
@@ -929,6 +1055,38 @@ def build_analysis(p: dict, s: dict, label: str, context: dict, tracked_info: di
         ])
         return join_sentences(base, implication_sentence, usage_sentence)
 
+    if role == "closer" and outing_grade in {"SHAKY", "ROUGH"}:
+        if label == "SAVE":
+            base = random.choice([
+                "He got the save, but the outing itself was shakier than you would want from a clear closer.",
+                "The save is there, even if the line was messier than expected from the ninth-inning arm.",
+                "He converted the chance, but this was not a crisp outing from the bullpen anchor.",
+            ])
+            return join_sentences(base, implication_sentence, usage_sentence)
+
+        if label == "HOLD":
+            base = random.choice([
+                "He is still the clear closer here, even if this hold came with a messy line.",
+                "The outing was shaky, but he still sits at the top of this bullpen hierarchy.",
+                "This was not a clean hold, though it does not change his standing as the top late-inning arm.",
+            ])
+            return join_sentences(base, implication_sentence, usage_sentence)
+
+        if label == "BLOWN":
+            base = random.choice([
+                "He is still the clear closer here, though this blown save will draw attention.",
+                "This was a rough result, but it does not change who sits at the top of the ninth-inning picture.",
+                "The blown save is a bad look, even if he remains the top closer option in this bullpen.",
+            ])
+            return join_sentences(base, implication_sentence, usage_sentence)
+
+        base = random.choice([
+            "He is still the clear closer here, even if this was a rougher outing.",
+            "The line was messy, but it does not change his place at the top of this bullpen.",
+            "This was not a sharp appearance, though he still remains the clear ninth-inning arm.",
+        ])
+        return join_sentences(base, implication_sentence, usage_sentence)
+
     if outing_grade in {"SHAKY", "ROUGH"}:
         if label == "SAVE":
             base = random.choice([
@@ -942,7 +1100,7 @@ def build_analysis(p: dict, s: dict, label: str, context: dict, tracked_info: di
             base = random.choice([
                 "He got the hold, but this was not a clean outing.",
                 "The hold is there, though the appearance itself was shaky.",
-                "He came away with the hold, but the line was messier than it needed to be.",
+                "He picked up the hold, but the line was messier than you would like.",
             ])
             return join_sentences(base, implication_sentence, usage_sentence)
 
@@ -950,7 +1108,7 @@ def build_analysis(p: dict, s: dict, label: str, context: dict, tracked_info: di
             base = random.choice([
                 "This was a rough result in a leverage spot.",
                 "He could not keep the inning under control when the game tightened up.",
-                "It was a costly late-game outing.",
+                "It was a tough look in a high-leverage chance.",
             ])
             return join_sentences(base, implication_sentence, usage_sentence)
 
@@ -1004,8 +1162,10 @@ def build_analysis(p: dict, s: dict, label: str, context: dict, tracked_info: di
             return join_sentences(base, implication_sentence, usage_sentence)
 
         base = random.choice([
-            "He remains one of the central late-game arms in this bullpen.",
-            "He still looks like a key leverage piece for this staff.",
+            "He still looks like the clear closer in this bullpen.",
+            "He remains the top ninth-inning arm here.",
+            "He still sits at the top of the save picture for this club.",
+            "He remains the bullpen anchor for the biggest late-game spots.",
         ])
         return join_sentences(base, implication_sentence, usage_sentence)
 
