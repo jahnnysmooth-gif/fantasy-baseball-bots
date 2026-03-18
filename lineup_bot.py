@@ -1,4 +1,3 @@
-print("=== NEW LINEUP_BOT.PY IS LOADED ===", flush=True)
 import os
 import re
 import json
@@ -120,7 +119,7 @@ def load_state():
 
                 normalized_posted[key] = {
                     "fingerprint": fingerprint,
-                    "message_id": message_id
+                    "message_id": message_id,
                 }
 
             return {"posted": normalized_posted}
@@ -209,10 +208,7 @@ def extract_lineup_from_block(block, start_idx):
                 and not player.startswith("The ")
                 and not player.startswith("Watch Now")
             ):
-                lineup.append({
-                    "name": player,
-                    "pos": token
-                })
+                lineup.append({"name": player, "pos": token})
                 i += 2
                 continue
 
@@ -289,7 +285,7 @@ def parse_game_block(game_time, block):
             "rain": None,
             "pitcher": pitcher,
             "lineup": lineup,
-            "lineup_type": lineup_type
+            "lineup_type": lineup_type,
         })
 
     return results
@@ -369,7 +365,7 @@ def build_embed(item, is_update=False):
         title=title,
         description="\n".join(lines),
         color=TEAM_COLORS.get(team, 0x5865F2),
-        timestamp=datetime.now(ET)
+        timestamp=datetime.now(ET),
     )
 
     if logo:
@@ -409,17 +405,19 @@ async def run_once():
 
     log(f"Parsed {len(items)} lineups")
 
+    today_key = datetime.now(ET).strftime("%Y-%m-%d")
+
     # First-run safeguard:
     # If no saved lineup state exists yet, seed all current lineups without posting.
     if not posted and items:
         log("First run detected. Seeding current lineups without posting.")
 
         for item in items:
-            key = f"{item['matchup']}|{item['team']}"
+            key = f"{today_key}|{item['matchup']}|{item['team']}"
             fp = fingerprint(item)
             posted[key] = {
                 "fingerprint": fp,
-                "message_id": None
+                "message_id": None,
             }
 
         save_state(state)
@@ -427,7 +425,7 @@ async def run_once():
         return
 
     for item in items:
-        key = f"{item['matchup']}|{item['team']}"
+        key = f"{today_key}|{item['matchup']}|{item['team']}"
         fp = fingerprint(item)
         existing = posted.get(key)
 
@@ -435,7 +433,10 @@ async def run_once():
             log(f"Skipping unchanged {key}")
             continue
 
-        embed = build_embed(item, is_update=existing is not None and existing.get("message_id") is not None)
+        embed = build_embed(
+            item,
+            is_update=existing is not None and existing.get("message_id") is not None,
+        )
 
         try:
             if existing and existing.get("message_id"):
@@ -447,7 +448,7 @@ async def run_once():
                 msg_id = await post_new_embed(channel, embed)
                 posted[key] = {
                     "fingerprint": fp,
-                    "message_id": msg_id
+                    "message_id": msg_id,
                 }
 
             save_state(state)
@@ -455,6 +456,39 @@ async def run_once():
 
         except Exception as e:
             log(f"Failed on {key}: {e}")
+
+
+def prune_old_state(state, keep_days=3):
+    posted = state.get("posted", {})
+    if not isinstance(posted, dict) or not posted:
+        return False
+
+    today = datetime.now(ET).date()
+    keys_to_delete = []
+
+    for key in posted.keys():
+        parts = key.split("|", 1)
+        if len(parts) != 2:
+            continue
+
+        date_part = parts[0]
+        try:
+            entry_date = datetime.strptime(date_part, "%Y-%m-%d").date()
+        except ValueError:
+            continue
+
+        age = (today - entry_date).days
+        if age > keep_days:
+            keys_to_delete.append(key)
+
+    for key in keys_to_delete:
+        posted.pop(key, None)
+
+    if keys_to_delete:
+        log(f"Pruned {len(keys_to_delete)} old lineup state entries")
+        return True
+
+    return False
 
 
 async def background_loop():
@@ -465,6 +499,10 @@ async def background_loop():
         try:
             now_str = datetime.now(ET).strftime("%Y-%m-%d %I:%M:%S %p %Z")
             log(f"Run started at {now_str}")
+
+            state = load_state()
+            if prune_old_state(state):
+                save_state(state)
 
             if not within_run_window():
                 log("Outside run window (10AM–11PM ET). Sleeping 10 minutes.")
