@@ -1,7 +1,6 @@
 import os
 import re
 import json
-import time
 import asyncio
 import hashlib
 from datetime import datetime
@@ -16,8 +15,9 @@ DISCORD_TOKEN = os.getenv("LINEUP_BOT_TOKEN")
 CHANNEL_ID = int(os.getenv("LINEUP_CHANNEL_ID", "0"))
 POLL_INTERVAL = int(os.getenv("LINEUP_POLL_INTERVAL", "300"))
 
-# Use Render persistent disk so duplicate protection survives redeploys/restarts
-STATE_DIR = Path("state/lineup")
+# Prefer Render persistent disk if mounted
+DATA_DIR = Path("/data") if Path("/data").exists() and os.access("/data", os.W_OK) else Path(".")
+STATE_DIR = DATA_DIR / "state" / "lineup"
 STATE_FILE = STATE_DIR / "posted_lineups.json"
 STATE_FILE_TMP = STATE_DIR / "posted_lineups.json.tmp"
 
@@ -380,7 +380,7 @@ def build_embed(item, is_update=False):
 
 intents = discord.Intents.default()
 client = discord.Client(intents=intents)
-background_task_started = False
+background_task = None
 
 
 async def post_new_embed(channel, embed):
@@ -461,31 +461,56 @@ async def background_loop():
     log("Lineup bot started")
 
     while not client.is_closed():
-        now_str = datetime.now(ET).strftime("%Y-%m-%d %I:%M:%S %p %Z")
-        log(f"Run started at {now_str}")
+        try:
+            now_str = datetime.now(ET).strftime("%Y-%m-%d %I:%M:%S %p %Z")
+            log(f"Run started at {now_str}")
 
-        if not within_run_window():
-            log("Outside run window (10AM–11PM ET). Sleeping 10 minutes.")
-            await asyncio.sleep(600)
-            continue
+            if not within_run_window():
+                log("Outside run window (10AM–11PM ET). Sleeping 10 minutes.")
+                await asyncio.sleep(600)
+                continue
+
+            await run_once()
+
+        except Exception as e:
+            log(f"Background loop crashed: {e}")
 
         try:
-            await run_once()
+            log(f"Sleeping {POLL_INTERVAL} seconds")
+            await asyncio.sleep(POLL_INTERVAL)
         except Exception as e:
-            log(f"Error: {e}")
-
-        log(f"Sleeping {POLL_INTERVAL} seconds")
-        await asyncio.sleep(POLL_INTERVAL)
+            log(f"Sleep interrupted: {e}")
+            await asyncio.sleep(30)
 
 
 @client.event
 async def on_ready():
-    global background_task_started
+    global background_task
     log(f"Logged in as {client.user}")
 
-    if not background_task_started:
-        background_task_started = True
-        asyncio.create_task(background_loop())
+    if background_task is None or background_task.done():
+        background_task = asyncio.create_task(background_loop())
+        log("Background task created")
+
+
+@client.event
+async def on_disconnect():
+    log("Discord connection lost")
+
+
+@client.event
+async def on_resumed():
+    log("Discord session resumed")
+
+    global background_task
+    if background_task is None or background_task.done():
+        background_task = asyncio.create_task(background_loop())
+        log("Background task recreated after resume")
+
+
+@client.event
+async def on_error(event, *args, **kwargs):
+    log(f"Unhandled Discord event error in: {event}")
 
 
 async def start_lineup_bot():
@@ -494,4 +519,5 @@ async def start_lineup_bot():
     if not CHANNEL_ID:
         raise RuntimeError("LINEUP_CHANNEL_ID is not set")
 
-    await client.start(DISCORD_TOKEN)
+    log(f"Using state file: {STATE_FILE}")
+    await client.start(DISCORD_TOKEN, reconnect=True)
