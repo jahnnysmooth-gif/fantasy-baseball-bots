@@ -96,7 +96,7 @@ def save_state(state):
         json.dump(state, f, indent=2)
 
 
-# ---------------- FORMATTING / HELPERS ----------------
+# ---------------- HELPERS ----------------
 
 def ordinal(n: int) -> str:
     if 10 <= n % 100 <= 20:
@@ -419,7 +419,7 @@ def build_summary(name, team, role, s, label, context):
         context_bits.append(entry_state_text)
 
     if context_bits:
-        opening_context = " ".join([context_bits[0], *[f", {bit}" for bit in context_bits[1:]]]).replace(" ,", ",")
+        opening_context = " ".join([context_bits[0], *[f', {bit}' for bit in context_bits[1:]]]).replace(" ,", ",")
     else:
         opening_context = "in relief"
 
@@ -466,23 +466,47 @@ def build_summary(name, team, role, s, label, context):
     return f"{line1} {line2}"
 
 
-# ---------------- CORE ----------------
+# ---------------- TRACKED PITCHER MAP ----------------
 
 def refresh_tracked_pitchers():
     try:
         teams = fetch_closer_depth_chart()
-        if teams:
-            tracked = build_tracked_relief_map()
-            log(f"Loaded {len(tracked)} tracked relievers from Closer Monkey")
-            return tracked
-        log("Closer Monkey refresh returned no teams; using saved depth chart if available")
+        if not teams:
+            log("Closer Monkey refresh returned no teams, using saved depth chart")
     except Exception as e:
         log(f"Closer Monkey refresh failed: {e}")
 
     tracked = build_tracked_relief_map()
-    log(f"Loaded {len(tracked)} tracked relievers from saved depth chart")
+    log(f"Loaded {len(tracked)} tracked relievers from Closer Monkey")
     return tracked
 
+
+def find_tracked_pitcher_info(raw_name: str, tracked: dict):
+    norm = normalize_name(raw_name)
+    if not norm:
+        return None
+
+    exact = tracked.get(norm)
+    if exact:
+        return exact
+
+    last = norm.split()[-1] if norm else ""
+    if not last:
+        return None
+
+    matches = []
+    for tracked_norm, info in tracked.items():
+        tracked_last = tracked_norm.split()[-1] if tracked_norm else ""
+        if tracked_last == last:
+            matches.append(info)
+
+    if len(matches) == 1:
+        return matches[0]
+
+    return None
+
+
+# ---------------- CORE ----------------
 
 def get_games():
     today = datetime.now(ET).date()
@@ -492,7 +516,7 @@ def get_games():
 
     for d in [today, yesterday]:
         try:
-            r = requests.get(f"{SCHEDULE_URL}&date={d}", timeout=30)
+            r = requests.get(f"{SCHEDULE_URL}&date={d.isoformat()}", timeout=30)
             r.raise_for_status()
             data = r.json()
             for date_block in data.get("dates", []):
@@ -512,11 +536,12 @@ def get_feed(game_id):
 def get_pitchers(feed):
     result = []
     box = feed.get("liveData", {}).get("boxscore", {}).get("teams", {})
+    game_teams = feed.get("gameData", {}).get("teams", {})
 
     for side in ["home", "away"]:
-        team = box.get(side, {}).get("team", {}).get("abbreviation")
+        team = game_teams.get(side, {}).get("abbreviation")
         if not team:
-            team = feed.get("gameData", {}).get("teams", {}).get(side, {}).get("abbreviation", "UNK")
+            team = box.get(side, {}).get("team", {}).get("abbreviation", "UNK")
 
         players = box.get(side, {}).get("players", {})
 
@@ -643,11 +668,14 @@ async def loop():
                 feed = get_feed(game_id)
                 pitchers = get_pitchers(feed)
 
-                away = g.get("teams", {}).get("away", {}).get("team", {})
-                home = g.get("teams", {}).get("home", {}).get("team", {})
+                game_teams = feed.get("gameData", {}).get("teams", {})
+                away_abbr = game_teams.get("away", {}).get("abbreviation")
+                home_abbr = game_teams.get("home", {}).get("abbreviation")
 
-                away_abbr = away.get("abbreviation") or away.get("name", "AWAY")[:3].upper()
-                home_abbr = home.get("abbreviation") or home.get("name", "HOME")[:3].upper()
+                if not away_abbr:
+                    away_abbr = g.get("teams", {}).get("away", {}).get("team", {}).get("abbreviation") or "AWAY"
+                if not home_abbr:
+                    home_abbr = g.get("teams", {}).get("home", {}).get("team", {}).get("abbreviation") or "HOME"
 
                 away_score = safe_int(g.get("teams", {}).get("away", {}).get("score", 0), 0)
                 home_score = safe_int(g.get("teams", {}).get("home", {}).get("score", 0), 0)
@@ -664,8 +692,7 @@ async def loop():
                     if key in posted:
                         continue
 
-                    norm = normalize_name(p["name"])
-                    tracked_info = tracked.get(norm)
+                    tracked_info = find_tracked_pitcher_info(p["name"], tracked)
                     is_save = safe_int(p["stats"].get("saves", 0), 0) > 0
                     is_tracked = tracked_info is not None
 
