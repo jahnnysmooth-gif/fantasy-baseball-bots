@@ -5,25 +5,37 @@ import unicodedata
 
 STATE_FILE = "state/closers/closer_depth_chart.json"
 
+ROLE_CONFIG = [
+    ("closer", "Closer", 5),
+    ("co_closer", "Co-closer", 4),
+    ("committee", "Committee", 3),
+    ("setup", "Setup", 2),
+    ("leverage_arm", "Leverage arm", 1),
+]
+
+TEAM_ALIASES = {
+    "WSN": "WSH",
+    "WAS": "WSH",
+    "CHW": "CWS",
+    "TBR": "TB",
+}
+
 
 def normalize_name(name: str) -> str:
     if not name:
         return ""
 
-    # Strip accents: Muñoz -> Munoz
     name = unicodedata.normalize("NFKD", name)
     name = "".join(c for c in name if not unicodedata.combining(c))
-
-    # Lowercase
     name = name.lower()
-
-    # Remove punctuation but keep spaces/alphanumerics
     name = re.sub(r"[^a-z0-9\s]", "", name)
-
-    # Collapse repeated whitespace
     name = " ".join(name.strip().split())
-
     return name
+
+
+def _normalize_team(team: str) -> str:
+    text = str(team or "").strip().upper()
+    return TEAM_ALIASES.get(text, text)
 
 
 def load_depth_chart():
@@ -40,31 +52,37 @@ def build_tracked_relief_map():
     teams = load_depth_chart()
     tracked = {}
 
-    for team, roles in teams.items():
-        closer = roles.get("closer", "").strip()
-        next_man = roles.get("next", "").strip()
-        second = roles.get("second", "").strip()
+    for raw_team, roles in teams.items():
+        team = _normalize_team(raw_team)
+        role_dict = roles if isinstance(roles, dict) else {}
 
-        if closer:
-            tracked[normalize_name(closer)] = {
-                "team": team,
-                "role": "Closer",
-                "name": closer,
-            }
+        for key, label, priority in ROLE_CONFIG:
+            names = role_dict.get(key, []) or []
+            if not isinstance(names, list):
+                names = [names]
 
-        if next_man:
-            tracked[normalize_name(next_man)] = {
-                "team": team,
-                "role": "Next in line",
-                "name": next_man,
-            }
+            for raw_name in names:
+                name = str(raw_name or "").strip()
+                if not name:
+                    continue
 
-        if second:
-            tracked[normalize_name(second)] = {
-                "team": team,
-                "role": "Second in line",
-                "name": second,
-            }
+                norm = normalize_name(name)
+                if not norm:
+                    continue
+
+                existing = tracked.get(norm)
+                if existing and existing.get("priority", 0) > priority:
+                    continue
+
+                tracked[norm] = {
+                    "team": team,
+                    "role": label,
+                    "name": name,
+                    "priority": priority,
+                }
+
+    for info in tracked.values():
+        info.pop("priority", None)
 
     return tracked
 

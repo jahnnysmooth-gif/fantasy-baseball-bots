@@ -1,149 +1,80 @@
 import json
 import os
-import re
 from datetime import datetime
 
-import requests
-from bs4 import BeautifulSoup
-
 STATE_FILE = "state/closers/closer_depth_chart.json"
-URL = "https://closermonkey.com/2015/05/04/updated-closer-depth-chart/"
+DEFAULT_OVERRIDE_FILENAME = "depth_chart_override.json"
 
-TEAM_ABBRS = {
-    "ARI", "ATL", "BAL", "BOS", "CHC", "CWS", "CHW", "CIN", "CLE", "COL", "DET",
-    "HOU", "KC", "LAA", "LAD", "MIA", "MIL", "MIN", "NYM", "NYY", "ATH",
-    "PHI", "PIT", "SD", "SF", "SEA", "STL", "TB", "TEX", "TOR", "WSH", "WAS"
+TEAM_ALIASES = {
+    "WSN": "WSH",
+    "WAS": "WSH",
+    "WSH": "WSH",
+    "CHW": "CWS",
+    "CWS": "CWS",
+    "TBR": "TB",
+    "TB": "TB",
 }
 
-EXPECTED_TEAMS = {
-    "ARI", "ATH", "ATL", "BAL", "BOS", "CHC", "CWS", "CIN", "CLE", "COL",
-    "DET", "HOU", "KC", "LAA", "LAD", "MIA", "MIL", "MIN", "NYM", "NYY",
-    "PHI", "PIT", "SD", "SF", "SEA", "STL", "TB", "TEX", "TOR", "WSH"
-}
+VALID_ROLE_KEYS = {"closer", "co_closer", "committee", "setup", "leverage_arm"}
 
 
 def _normalize_team(team: str) -> str:
-    team = team.strip().upper()
-    if team == "WAS":
-        return "WSH"
-    if team == "CHW":
-        return "CWS"
-    return team
+    text = str(team or "").strip().upper()
+    return TEAM_ALIASES.get(text, text)
 
 
 def _clean_name(name: str) -> str:
-    name = name.replace("*", "")
-    name = re.sub(r"\s+", " ", name)
-    return name.strip()
+    return " ".join(str(name or "").replace("*", "").split())
 
 
-def fetch_closer_depth_chart():
-    print("[CLOSER WATCH] Fetching Closer Monkey depth chart", flush=True)
+def _normalize_roles(raw_roles: dict) -> dict:
+    roles = {key: [] for key in VALID_ROLE_KEYS}
+    if not isinstance(raw_roles, dict):
+        return roles
 
-    try:
-        r = requests.get(URL, timeout=20)
-        r.raise_for_status()
-    except requests.RequestException as e:
-        print(f"[CLOSER WATCH] Failed to load site: {e}", flush=True)
-        return {}
+    for key, values in raw_roles.items():
+        role_key = str(key or "").strip().lower()
+        if role_key not in VALID_ROLE_KEYS:
+            continue
 
-    soup = BeautifulSoup(r.text, "html.parser")
-    strings = [s.strip() for s in soup.stripped_strings if s.strip()]
+        if isinstance(values, list):
+            cleaned = [_clean_name(v) for v in values if _clean_name(v)]
+        elif values in (None, ""):
+            cleaned = []
+        else:
+            single = _clean_name(values)
+            cleaned = [single] if single else []
 
+        roles[role_key] = cleaned
+
+    return roles
+
+
+def normalize_override_payload(payload: dict) -> dict:
     teams = {}
+    if not isinstance(payload, dict):
+        return teams
 
-    start_idx = None
-    end_idx = None
-
-    for i, s in enumerate(strings):
-        if "MLB Bullpen Depth Charts" in s or "Updated MLB Closer Depth Chart" in s:
-            start_idx = i
-            break
-
-    if start_idx is None:
-        print("[CLOSER WATCH] Could not find chart header", flush=True)
-        return {}
-
-    for i in range(start_idx, len(strings)):
-        if strings[i].startswith("* = closer-by-committee"):
-            end_idx = i
-            break
-
-    if end_idx is None:
-        print("[CLOSER WATCH] Could not find chart footer", flush=True)
-        return {}
-
-    chart_strings = strings[start_idx:end_idx]
-
-    first_team_idx = None
-    for i, s in enumerate(chart_strings):
-        token = s.upper()
-        if token in TEAM_ABBRS:
-            first_team_idx = i
-            break
-
-    if first_team_idx is None:
-        print("[CLOSER WATCH] Could not find first team token", flush=True)
-        return {}
-
-    chart_strings = chart_strings[first_team_idx:]
-
-    i = 0
-    while i < len(chart_strings):
-        token = chart_strings[i].upper()
-
-        if token not in TEAM_ABBRS:
-            i += 1
+    for raw_team, raw_roles in payload.items():
+        team = _normalize_team(raw_team)
+        if not team:
             continue
+        teams[team] = _normalize_roles(raw_roles)
 
-        team = _normalize_team(token)
+    return teams
 
-        if i + 4 >= len(chart_strings):
-            break
 
-        closer = _clean_name(chart_strings[i + 1])
-        next_man = _clean_name(chart_strings[i + 2])
-        second = _clean_name(chart_strings[i + 3])
-        updated = chart_strings[i + 4]
-
-        if not re.fullmatch(r"\d{1,2}/\d{1,2}/\d{2}", updated):
-            print(
-                f"[CLOSER WATCH] Bad date slot for {team}: "
-                f"{closer} | {next_man} | {second} | {updated}",
-                flush=True,
-            )
-            i += 1
-            continue
-
-        teams[team] = {
-            "closer": closer,
-            "next": next_man,
-            "second": second,
-        }
-
-        i += 5
-
-    if len(teams) != 30:
-        missing = sorted(EXPECTED_TEAMS - set(teams.keys()))
-        print(
-            f"[CLOSER WATCH] Parsed {len(teams)} teams instead of 30. Missing: {missing}. Refusing to save.",
-            flush=True,
-        )
-        return {}
-
+def save_depth_chart(teams: dict, source: str, message_id: int | None = None, attachment_name: str | None = None):
     os.makedirs(os.path.dirname(STATE_FILE), exist_ok=True)
-
     payload = {
         "last_update_utc": datetime.utcnow().isoformat(),
-        "source": URL,
+        "source": source,
+        "message_id": message_id,
+        "attachment_name": attachment_name,
         "teams": teams,
     }
-
     with open(STATE_FILE, "w", encoding="utf-8") as f:
         json.dump(payload, f, indent=2, ensure_ascii=False)
-
-    print(f"[CLOSER WATCH] Stored {len(teams)} bullpens in {STATE_FILE}", flush=True)
-    return teams
 
 
 def load_depth_chart():
@@ -159,12 +90,47 @@ def load_depth_chart():
         return {}
 
 
-if __name__ == "__main__":
-    teams = fetch_closer_depth_chart()
+async def fetch_closer_depth_chart(client, channel_id: int, preferred_filename: str = DEFAULT_OVERRIDE_FILENAME, history_limit: int = 50):
+    print(f"[CLOSER WATCH] Checking Discord override channel {channel_id}", flush=True)
 
-    if teams:
-        print("[CLOSER WATCH] Sample entries:", flush=True)
-        for i, (team, roles) in enumerate(sorted(teams.items())):
-            print(f"{team}: {roles}", flush=True)
-            if i >= 4:
-                break
+    try:
+        channel = await client.fetch_channel(channel_id)
+    except Exception as e:
+        print(f"[CLOSER WATCH] Failed to fetch override channel: {e}", flush=True)
+        return load_depth_chart()
+
+    try:
+        async for message in channel.history(limit=history_limit):
+            for attachment in message.attachments:
+                filename = str(getattr(attachment, "filename", "") or "")
+                lower_name = filename.lower()
+                if preferred_filename and lower_name != preferred_filename.lower() and not lower_name.endswith(".json"):
+                    continue
+
+                try:
+                    raw_bytes = await attachment.read()
+                    payload = json.loads(raw_bytes.decode("utf-8"))
+                    teams = normalize_override_payload(payload)
+                    if not teams:
+                        continue
+
+                    save_depth_chart(
+                        teams,
+                        source=f"discord:{channel_id}",
+                        message_id=getattr(message, "id", None),
+                        attachment_name=filename,
+                    )
+                    print(f"[CLOSER WATCH] Loaded {len(teams)} bullpens from Discord override", flush=True)
+                    return teams
+                except Exception as e:
+                    print(f"[CLOSER WATCH] Failed to parse attachment {filename}: {e}", flush=True)
+                    continue
+    except Exception as e:
+        print(f"[CLOSER WATCH] Failed reading override history: {e}", flush=True)
+
+    cached = load_depth_chart()
+    if cached:
+        print("[CLOSER WATCH] Using cached saved depth chart", flush=True)
+    else:
+        print("[CLOSER WATCH] No Discord override found and no cached depth chart available", flush=True)
+    return cached
