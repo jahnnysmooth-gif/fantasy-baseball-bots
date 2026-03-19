@@ -26,7 +26,6 @@ LIVE_URL = "https://statsapi.mlb.com/api/v1.1/game/{}/feed/live"
 
 POLL_MINUTES = 10
 RESET_CLOSER_STATE = os.getenv("RESET_CLOSER_STATE", "").lower() in {"1", "true", "yes"}
-DEPTH_CHART_CHANNEL_ID = int(os.getenv("DEPTH_CHART_CHANNEL_ID", "1484232761597366412"))
 
 # ---------------- TEAM STYLE ----------------
 
@@ -384,18 +383,18 @@ def impact_tag(label: str, s: dict) -> str:
     return "⚾ Relief outing"
 
 
-# ---------------- CLOSER MONKEY TRACKING ----------------
+# ---------------- DEPTH CHART TRACKING ----------------
 
-def refresh_tracked_pitchers():
+async def refresh_tracked_pitchers():
     try:
         teams = await fetch_closer_depth_chart(client, 1484232761597366412)
         if not teams:
-            log("Closer Monkey refresh returned no teams, using saved depth chart")
+            log("Depth chart override returned no teams, using saved depth chart")
     except Exception as e:
-        log(f"Closer Monkey refresh failed: {e}")
+        log(f"Depth chart override refresh failed: {e}")
 
     tracked = build_tracked_relief_map()
-    log(f"Loaded {len(tracked)} tracked relievers from Closer Monkey")
+    log(f"Loaded {len(tracked)} tracked relievers from depth chart")
     return tracked
 
 
@@ -692,6 +691,102 @@ def get_recent_trend(recent_appearances):
     return "STABLE"
 
 
+def get_recent_form_profile(recent_appearances):
+    if not recent_appearances:
+        return {
+            "tag": "NONE",
+            "scoreless": 0,
+            "runs_allowed": 0,
+            "dominant": 0,
+            "sample": 0,
+        }
+
+    recent = recent_appearances[:5]
+    sample = len(recent)
+    scoreless = sum(1 for app in recent if app["er"] == 0)
+    runs_allowed = sum(1 for app in recent if app["er"] > 0)
+    dominant = sum(1 for app in recent if app["er"] == 0 and (app["h"] + app["bb"]) == 0 and app["k"] >= 2)
+
+    first_three = recent[:3]
+    first_two = recent[:2]
+
+    tag = "MIXED"
+    if sample >= 3 and len(first_three) == 3 and all(app["er"] == 0 for app in first_three):
+        tag = "HOT"
+    elif sample >= 4 and scoreless >= 4:
+        tag = "HOT"
+    elif len(first_two) == 2 and first_two[0]["er"] == 0 and first_two[1]["er"] >= 2:
+        tag = "BOUNCE_BACK"
+    elif len(first_two) == 2 and all(app["er"] > 0 for app in first_two):
+        tag = "SHAKY"
+    elif sample >= 3 and runs_allowed >= 2:
+        tag = "SHAKY"
+    elif sample >= 3 and scoreless >= 2:
+        tag = "SOLID"
+
+    return {
+        "tag": tag,
+        "scoreless": scoreless,
+        "runs_allowed": runs_allowed,
+        "dominant": dominant,
+        "sample": sample,
+    }
+
+
+def build_recent_form_sentence(form_profile, outing_grade: str):
+    tag = form_profile.get("tag", "NONE")
+    sample = form_profile.get("sample", 0)
+    scoreless = form_profile.get("scoreless", 0)
+    dominant = form_profile.get("dominant", 0)
+
+    if sample == 0 or tag == "NONE":
+        return ""
+
+    if tag == "HOT":
+        if dominant >= 2:
+            return random.choice([
+                "He has been on a real run lately, and the recent outings have come with swing-and-miss stuff.",
+                "The recent form has been excellent, with multiple sharp outings in this stretch.",
+            ])
+        return random.choice([
+            f"He has been throwing the ball well lately, with {scoreless} scoreless outings in his last {sample} appearances.",
+            "This keeps a strong recent run going for him.",
+        ])
+
+    if tag == "SOLID":
+        return random.choice([
+            "The recent form has been mostly solid, and this outing fits that pattern.",
+            "He has been settling into a decent recent stretch, and this one helped.",
+        ])
+
+    if tag == "BOUNCE_BACK":
+        if outing_grade in {"DOMINANT", "CLEAN", "TRAFFIC", "NEUTRAL"}:
+            return random.choice([
+                "This looked like a bounce-back outing after a rougher appearance last time out.",
+                "He responded well after the previous outing got away from him.",
+            ])
+        return random.choice([
+            "He was trying to bounce back from a rougher recent outing, but the line stayed uneven.",
+            "This did not fully turn the page after the previous shaky appearance.",
+        ])
+
+    if tag == "SHAKY":
+        if outing_grade in {"SHAKY", "ROUGH"}:
+            return random.choice([
+                "The recent form has been uneven, and this outing added to that concern.",
+                "He has hit a rough patch lately, and this line did not calm things down.",
+            ])
+        return random.choice([
+            "The recent form had been shaky, so this was a useful step in the right direction.",
+            "He needed a steadier outing after a rougher recent stretch, and this helped a bit.",
+        ])
+
+    return random.choice([
+        "The recent form has been mixed, so this outing helps shape the bigger picture.",
+        "He has had a mixed run lately, and this was another data point in that stretch.",
+    ])
+
+
 # ---------------- STREAK TRACKING ----------------
 
 def get_pitcher_ids_for_date(target_date):
@@ -757,11 +852,12 @@ def strikeout_phrase(k: int) -> str:
 
 # ---------------- ANALYSIS ----------------
 
-def build_analysis(p: dict, s: dict, label: str, context: dict, tracked_info: dict, recent_appearances, streak_count: int = 0):
+def build_analysis(p: dict, s: dict, label: str, context: dict, tracked_info: dict, recent_appearances):
     role = infer_role_from_tracked_info(tracked_info)
     outing_grade = grade_outing(s)
     trend = get_recent_trend(recent_appearances)
 
+    outs = baseball_ip_to_outs(s["ip"])
     inning = context.get("entry_inning")
     state_kind = context.get("entry_state_kind", "")
     finished_game = context.get("finished_game", False)
@@ -773,231 +869,241 @@ def build_analysis(p: dict, s: dict, label: str, context: dict, tracked_info: di
         and state_kind in {"lead", "tie"}
     )
 
-    usage_sentence = build_usage_sentence(streak_count, recent_appearances)
-    implication_sentence = build_implication_sentence(role, label, outing_grade, trend, early_closer_usage)
-
-    if outing_grade == "ONE_BATTER":
+    # Micro outings should stay short and neutral.
+    if outing_grade == "MICRO":
         if role == "closer" and early_closer_usage:
-            base = random.choice([
-                "He was used before the ninth because this was one of the biggest leverage pockets in the game, and he got the only hitter he faced.",
-                "The early call shows the leverage of the moment, and he retired the lone batter he faced.",
-            ])
-            return join_sentences(base, implication_sentence, usage_sentence)
+            options = [
+                "He was called on early for a high-leverage spot and got the out.",
+                "He handled an early leverage pocket and recorded the out.",
+                "He was used before the ninth in an important spot and did his job.",
+                "He got the lone hitter he faced in a leverage spot.",
+            ]
+            return random.choice(options)
+
         if label == "HOLD":
-            base = random.choice([
-                "He got the one out he was asked to get in a hold situation.",
-                "He handled a one-batter bridge assignment and recorded the out.",
-            ])
-            return join_sentences(base, implication_sentence, usage_sentence)
-        base = random.choice([
-            "He handled a one-batter assignment cleanly.",
-            "He retired the only batter he faced.",
+            options = [
+                "He got the one hitter he faced to help secure the hold.",
+                "He retired the lone batter he faced and helped finish the bridge inning.",
+                "He handled his one matchup cleanly in a hold situation.",
+            ]
+            return random.choice(options)
+
+        options = [
+            "He got the one hitter he faced.",
+            "He retired the lone batter he faced.",
+            "He handled his brief assignment cleanly.",
             "He recorded the out he was asked to get.",
-        ])
-        return join_sentences(base, implication_sentence, usage_sentence)
+        ]
+        return random.choice(options)
 
+    # Bad lines override label positivity.
     if outing_grade in {"SHAKY", "ROUGH"}:
-        if role == "closer":
-            base = random.choice([
-                "He is still the clear closer here, even if this outing was not sharp.",
-                "The outing was messy, but he still sits at the top of this bullpen.",
-                "This was not clean, but it does not change who leads this bullpen.",
-            ])
-            return join_sentences(base, implication_sentence, usage_sentence)
-        if role == "co_closer":
-            base = random.choice([
-                "He is still part of the shared closer picture, even if this outing was not sharp.",
-                "This was a shaky line, but he remains in the late-game split here.",
-            ])
-            return join_sentences(base, implication_sentence, usage_sentence)
-        if role == "setup":
-            base = random.choice([
-                "This was not a sharp setup outing.",
-                "He ran into trouble in a meaningful bridge spot.",
-            ])
-            return join_sentences(base, implication_sentence, usage_sentence)
-        if role == "leverage_arm":
-            base = random.choice([
-                "He ran into trouble in this middle-relief outing.",
-                "This was not a sharp middle-relief appearance.",
-                "He could not keep this middle-relief outing under control.",
-            ])
-            return join_sentences(base, implication_sentence, usage_sentence)
         if label == "SAVE":
-            base = random.choice([
-                "He got the save, but this was not a clean outing.",
-                "The save counts, but the line itself was shakier than you want from a closer.",
-                "He converted the chance, though the outing itself came with some real stress.",
-            ])
-            return join_sentences(base, implication_sentence, usage_sentence)
-        if label == "HOLD":
-            base = random.choice([
-                "He got the hold, but this was not a clean outing.",
-                "The hold is there, though the appearance itself was shaky.",
-                "He came away with the hold, but the line was messier than it needed to be.",
-            ])
-            return join_sentences(base, implication_sentence, usage_sentence)
-        if label == "BLOWN":
-            base = random.choice([
-                "This was a rough result in a leverage spot.",
-                "He could not keep the inning under control when the game tightened up.",
-                "It was a costly late-game outing.",
-            ])
-            return join_sentences(base, implication_sentence, usage_sentence)
-        base = random.choice([
-            "This was more damage control than a sharp relief appearance.",
-            "He allowed too much trouble for this to count as a clean outing.",
-            "The line was more uneven than effective here.",
-        ])
-        return join_sentences(base, implication_sentence, usage_sentence)
+            options = [
+                "He got the save, but this wasn’t a clean outing.",
+                "He finished it off, though the line was shakier than you’d want from a closer.",
+                "The save counts, but this one came with some blemishes.",
+                "He converted the chance, but the outing itself was far from crisp.",
+            ]
+            return random.choice(options)
 
+        if label == "HOLD":
+            options = [
+                "He got the hold, but this wasn’t a clean outing.",
+                "The hold is there, though the line itself was shaky.",
+                "He picked up the hold, but the appearance brought more damage than you’d like.",
+                "He escaped with the hold, even if the outing itself was messy.",
+            ]
+            return random.choice(options)
+
+        if label == "BLOWN":
+            options = [
+                "This was a rough result in a leverage spot.",
+                "He couldn’t keep the inning under control when the game tightened up.",
+                "It was a tough look in a high-leverage chance.",
+                "The line reflects a costly outing late in the game.",
+            ]
+            return random.choice(options)
+
+        if trend == "DOWN":
+            options = [
+                "This was another shaky outing, and the recent form isn’t helping his case.",
+                "He’s in a rough patch right now, and this one added to it.",
+                "The recent trend has been uneven, and this outing didn’t change that.",
+            ]
+            return random.choice(options)
+
+        options = [
+            "This wasn’t a clean line, even if he got through the inning.",
+            "He allowed too much traffic for this to qualify as a sharp outing.",
+            "The line was more uneven than effective here.",
+            "This was more survival than dominance.",
+        ]
+        return random.choice(options)
+
+    # Closer-specific clean outcomes, only if role is verified.
     if role == "closer":
         if early_closer_usage and label in {"SAVE", "HOLD"}:
-            if finished_game:
-                base = random.choice([
-                    "He was used before the ninth because this was one of the biggest leverage spots in the game, and he finished the job.",
-                    "The early deployment shows this was the key pocket of the game, and he closed it out from there.",
-                ])
-            else:
-                base = random.choice([
-                    "He was used before the ninth because this looked like the biggest leverage pocket in the game.",
-                    "The early call shows the staff treated this as the key spot, even before the ninth arrived.",
-                ])
-            return join_sentences(base, implication_sentence, usage_sentence)
+            early_options = [
+                "He was called on before the ninth in a high-leverage spot and handled it like the bullpen anchor.",
+                "The early usage shows this was one of the biggest spots in the game, and he answered it.",
+                "Being used before the ninth speaks to the leverage of the moment, and he came through.",
+                "He got the biggest pocket before the ninth and handled it cleanly.",
+            ]
+            if outing_grade in {"DOMINANT", "CLEAN", "TRAFFIC"}:
+                return random.choice(early_options)
+
         if label == "SAVE":
             if outing_grade == "DOMINANT":
-                base = random.choice([
-                    "This was the kind of clean save line you want from a closer.",
-                    "He looked every bit like the bullpen anchor in this save chance.",
-                ])
-                return join_sentences(base, implication_sentence, usage_sentence)
-            base = random.choice([
-                "He remains the clear closer here.",
-                "He still looks like the bullpen anchor for this staff.",
-                "He is still the top late-game arm in this bullpen.",
-            ])
-            return join_sentences(base, implication_sentence, usage_sentence)
+                base = [
+                    "He remains firmly in control of the ninth inning.",
+                    "He still looks like the clear closer here.",
+                    "He keeps a strong hold on save chances in this bullpen.",
+                    "He continues to look like the go-to arm in the ninth.",
+                ]
+                trend_up = [
+                    "He remains firmly in control of the ninth and has backed it up over his recent outings.",
+                    "He still looks like the clear closer here, and the recent form supports it.",
+                    "He keeps a strong hold on the ninth with another good outing in a solid recent stretch.",
+                ]
+                if trend == "UP":
+                    return random.choice(trend_up)
+                return random.choice(base)
+
+            if outing_grade in {"CLEAN", "TRAFFIC", "NEUTRAL"}:
+                options = [
+                    "He still looks like the clear ninth-inning option here.",
+                    "He remains the top save arm in this bullpen.",
+                    "He continues to hold the closer role here.",
+                    "He still looks like the primary answer for saves.",
+                ]
+                return random.choice(options)
+
         if label == "BLOWN":
-            base = random.choice([
-                "One outing does not rewrite the hierarchy, but this will draw attention.",
-                "He is still the closer here, though this result adds some short-term pressure.",
-            ])
-            return join_sentences(base, implication_sentence, usage_sentence)
-        base = random.choice([
-            "He remains the clear closer here.",
-            "He still looks like the bullpen anchor for this staff.",
-            "He is still the top late-game arm in this bullpen.",
-        ])
-        return join_sentences(base, implication_sentence, usage_sentence)
+            options = [
+                "One outing doesn’t rewrite the hierarchy, but this does add a little short-term pressure.",
+                "He’s still the closer here, though this result will draw more attention than usual.",
+                "The role may still be his, but this is the kind of outing that gets noticed.",
+                "This doesn’t erase the role, but it does create some short-term doubt.",
+            ]
+            return random.choice(options)
 
-    if role == "co_closer":
-        if label == "SAVE":
-            base = random.choice([
-                "He remains part of the shared closer picture and converted this chance cleanly.",
-                "This was another useful finish from one of the shared late-game arms here.",
-            ])
-            return join_sentences(base, implication_sentence, usage_sentence)
-        base = random.choice([
-            "He still looks like one of the primary late-game options in this bullpen.",
-            "This keeps him firmly in the shared closer mix.",
-        ])
-        return join_sentences(base, implication_sentence, usage_sentence)
+        # verified closer, but not in a save event
+        options = [
+            "He remains one of the key late-game arms in this bullpen.",
+            "He still looks like a central leverage piece for this staff.",
+            "He continues to handle important late-game work.",
+        ]
+        return random.choice(options)
 
+    # Committee / save-mix language
     if role == "committee":
         if label == "SAVE":
-            base = random.choice([
-                "This keeps him squarely in the save mix.",
-                "In a bullpen without a locked hierarchy, this helps his case for future chances.",
-            ])
-            return join_sentences(base, implication_sentence, usage_sentence)
-        base = random.choice([
-            "He remains in the late-inning conversation for this bullpen.",
-            "This keeps him relevant in a bullpen that still has some fluidity.",
-        ])
-        return join_sentences(base, implication_sentence, usage_sentence)
+            options = [
+                "This keeps him firmly in the save mix.",
+                "He helped his case for future save chances.",
+                "In a fluid bullpen, this outing keeps him squarely in the conversation.",
+                "This should keep him in the late-inning mix for chances.",
+            ]
+            return random.choice(options)
 
+        if label in {"HOLD", "DOM", "CLEAN"}:
+            options = [
+                "He remains in the late-inning mix for this bullpen.",
+                "This keeps him relevant in a bullpen without a fully settled pecking order.",
+                "He continues to strengthen his case for meaningful leverage work.",
+                "In a fluid bullpen, outings like this help his standing.",
+            ]
+            return random.choice(options)
+
+    # Setup / high-leverage but not closer
     if role == "setup":
         if label == "HOLD":
             if outing_grade == "DOMINANT" and trend == "UP":
-                base = random.choice([
-                    "He remains a trusted setup option and the recent form has been strong.",
-                    "He keeps handling meaningful bridge work well, and the recent trend supports it.",
-                ])
-                return join_sentences(base, implication_sentence, usage_sentence)
-            base = random.choice([
-                "He remains one of the more trusted bridge arms here.",
-                "He continues to work meaningful late-inning spots for this bullpen.",
-            ])
-            return join_sentences(base, implication_sentence, usage_sentence)
+                options = [
+                    "He remains a trusted setup option and has been trending the right way lately.",
+                    "He continues to handle leverage work well, and the recent run supports that.",
+                    "He’s one of the steadier bridge arms here, and the recent form has been strong.",
+                ]
+                return random.choice(options)
+
+            if outing_grade == "DOMINANT":
+                options = [
+                    "He continues to handle important late-inning work.",
+                    "He remains a trusted setup option here.",
+                    "He keeps himself firmly in the leverage mix.",
+                    "He continues to hold a meaningful late-inning role.",
+                ]
+                return random.choice(options)
+
+            if outing_grade in {"CLEAN", "TRAFFIC", "NEUTRAL"}:
+                options = [
+                    "He remains one of the more trusted bridge arms here.",
+                    "He continues to work meaningful late-inning spots.",
+                    "He stays in the leverage mix with another useful outing.",
+                    "He continues to be a factor in setup situations.",
+                ]
+                return random.choice(options)
+
         if outing_grade == "DOMINANT":
             if trend == "UP":
-                base = random.choice([
-                    "He is putting together a strong recent run and looks like a rising leverage arm.",
+                options = [
+                    "He’s putting together a strong run and looks like a rising leverage arm.",
                     "The recent form has been good, and outings like this keep him moving up the leverage ladder.",
-                ])
-                return join_sentences(base, implication_sentence, usage_sentence)
-            base = random.choice([
+                    "He’s been building momentum lately, and this was another strong step.",
+                ]
+                return random.choice(options)
+
+            options = [
                 "This was a strong outing from a pitcher already working in meaningful spots.",
                 "He looked sharp in another important inning for this bullpen.",
-            ])
-            return join_sentences(base, implication_sentence, usage_sentence)
-        base = random.choice([
-            "He still projects as a trusted bridge arm here.",
-            "He remains part of the regular setup mix.",
-        ])
-        return join_sentences(base, implication_sentence, usage_sentence)
+                "He continues to make his case as a trusted late-inning arm.",
+            ]
+            return random.choice(options)
 
-    if role == "leverage_arm":
-        if outing_grade == "DOMINANT":
-            base = random.choice([
-                "He looked like a leverage arm in this outing.",
-                "This was the kind of line you want from a high-strikeout middle reliever.",
-                "He pitched like a middle relief weapon here.",
-            ])
-            return join_sentences(base, implication_sentence, usage_sentence)
-        if outing_grade in {"CLEAN", "TRAFFIC"}:
-            base = random.choice([
-                "He gave them a useful middle-innings line here.",
-                "This was a solid middle-relief appearance.",
-                "He turned in a helpful inning from the middle-relief group.",
-            ])
-            return join_sentences(base, implication_sentence, usage_sentence)
-        base = random.choice([
-            "He gave them a serviceable middle-relief inning here.",
-            "This was a usable middle-relief appearance overall.",
-        ])
-        return join_sentences(base, implication_sentence, usage_sentence)
-
+    # Generic relief language
     if outing_grade == "DOMINANT":
-        base = random.choice([
+        if trend == "UP":
+            options = [
+                "He’s putting together a solid recent run of work.",
+                "The recent form has been good, and this outing fit that trend.",
+                "He’s been stringing together cleaner appearances lately.",
+            ]
+            return random.choice(options)
+
+        options = [
             "This was a strong outing.",
             "He turned in one of his sharper appearances here.",
+            "He handled the inning cleanly and effectively.",
             "It was a crisp line from start to finish.",
-        ])
-        return join_sentences(base, implication_sentence, usage_sentence)
+        ]
+        return random.choice(options)
 
     if outing_grade == "CLEAN":
-        base = random.choice([
+        options = [
             "He handled the inning cleanly.",
             "This was a steady, effective appearance.",
             "He did his job without much trouble.",
-        ])
-        return join_sentences(base, implication_sentence, usage_sentence)
+            "He gave them a solid inning here.",
+        ]
+        return random.choice(options)
 
     if outing_grade == "TRAFFIC":
-        base = random.choice([
+        options = [
             "He worked through traffic and still got the job done.",
-            "It was not spotless, but he kept the inning from turning.",
-            "He navigated some traffic and came out of it scoreless.",
-        ])
-        return join_sentences(base, implication_sentence, usage_sentence)
+            "It wasn’t spotless, but he managed the inning well enough.",
+            "He navigated some traffic and kept the game from turning.",
+            "He bent a bit but kept the inning intact.",
+        ]
+        return random.choice(options)
 
-    base = random.choice([
+    options = [
         "He turned in a usable inning for this bullpen.",
         "This was a neutral relief appearance overall.",
+        "He got through the inning without changing much about his standing.",
         "He gave them a serviceable inning here.",
-    ])
-    return join_sentences(base, implication_sentence, usage_sentence)
+    ]
+    return random.choice(options)
 
 
 # ---------------- SUMMARY ----------------
@@ -1334,3 +1440,4 @@ async def start_closer_bot():
         raise RuntimeError("CLOSER_BOT_TOKEN is not set")
 
     await client.start(TOKEN, reconnect=True)
+
