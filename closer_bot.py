@@ -26,6 +26,12 @@ LIVE_URL = "https://statsapi.mlb.com/api/v1.1/game/{}/feed/live"
 
 POLL_MINUTES = 10
 RESET_CLOSER_STATE = os.getenv("RESET_CLOSER_STATE", "").lower() in {"1", "true", "yes"}
+DEPTH_CHART_OVERRIDE_CHANNEL_ID = int(os.getenv("DEPTH_CHART_OVERRIDE_CHANNEL_ID", "1484232761597366412"))
+TREND_STATE_FILE = "state/closer/trend_state.json"
+TREND_OVERNIGHT_START_HOUR = 2
+TREND_MAX_PER_HOUR = 3
+TREND_MIN_SPACING_MINUTES = 20
+TREND_MAX_OVERNIGHT_TOTAL = 25
 
 # ---------------- TEAM STYLE ----------------
 
@@ -64,6 +70,7 @@ TEAM_COLORS = {
 
 appearance_cache = {}
 pitching_stats_cache = {}
+player_meta_cache = {}
 
 
 def log(msg: str):
@@ -82,22 +89,49 @@ def get_logo(team: str) -> str:
 # ---------------- STATE ----------------
 
 def load_state():
+    base = {"posted": [], "trend_posted": {}, "trend_history": {}, "trend_last_post_at": None, "trend_post_count_by_hour": {}, "trend_total_by_date": {}}
+
     if RESET_CLOSER_STATE:
-        return {"posted": []}
+        return base
 
     if not os.path.exists(STATE_FILE):
-        return {"posted": []}
+        return base
 
     try:
         with open(STATE_FILE, "r", encoding="utf-8") as f:
-            return json.load(f)
+            data = json.load(f)
+            if isinstance(data, dict):
+                base.update(data)
     except Exception:
-        return {"posted": []}
+        pass
+
+    if os.path.exists(TREND_STATE_FILE):
+        try:
+            with open(TREND_STATE_FILE, "r", encoding="utf-8") as f:
+                tdata = json.load(f)
+            if isinstance(tdata, dict):
+                for key in ["trend_posted", "trend_history", "trend_last_post_at", "trend_post_count_by_hour", "trend_total_by_date"]:
+                    if key in tdata:
+                        base[key] = tdata[key]
+        except Exception:
+            pass
+
+    return base
 
 
 def save_state(state):
     with open(STATE_FILE, "w", encoding="utf-8") as f:
-        json.dump(state, f, indent=2)
+        json.dump({"posted": state.get("posted", [])}, f, indent=2)
+
+    trend_payload = {
+        "trend_posted": state.get("trend_posted", {}),
+        "trend_history": state.get("trend_history", {}),
+        "trend_last_post_at": state.get("trend_last_post_at"),
+        "trend_post_count_by_hour": state.get("trend_post_count_by_hour", {}),
+        "trend_total_by_date": state.get("trend_total_by_date", {}),
+    }
+    with open(TREND_STATE_FILE, "w", encoding="utf-8") as f:
+        json.dump(trend_payload, f, indent=2)
 
 
 # ---------------- BASIC HELPERS ----------------
@@ -387,7 +421,7 @@ def impact_tag(label: str, s: dict) -> str:
 
 async def refresh_tracked_pitchers():
     try:
-        teams = await fetch_closer_depth_chart(client, 1484232761597366412)
+        teams = await fetch_closer_depth_chart(client, DEPTH_CHART_OVERRIDE_CHANNEL_ID)
         if not teams:
             log("Depth chart override returned no teams, using saved depth chart")
     except Exception as e:
@@ -428,43 +462,35 @@ def find_tracked_pitcher_info(raw_name: str, team_abbr: str, tracked: dict):
 
 
 def infer_role_from_tracked_info(tracked_info: dict) -> str:
-    """
-    Conservative role inference:
-    - only call someone a closer if the depth chart clearly says so
-    - otherwise fall back to committee/setup/relief language
-    """
     if not tracked_info:
         return "relief"
 
-    fields_to_check = [
-        "role",
-        "tier",
-        "slot",
-        "label",
-        "bucket",
-        "depth_role",
-        "status",
-        "type",
-        "group",
-        "rank_label",
-    ]
+    explicit_role = str(tracked_info.get("role", "")).strip().lower()
+    mapping = {
+        "closer": "closer",
+        "co-closer": "co_closer",
+        "co closer": "co_closer",
+        "committee": "committee",
+        "setup": "setup",
+        "leverage arm": "leverage_arm",
+        "next in line": "committee",
+        "second in line": "setup",
+    }
+    if explicit_role in mapping:
+        return mapping[explicit_role]
 
-    texts = []
-    for field in fields_to_check:
-        value = tracked_info.get(field)
-        if value is not None:
-            texts.append(str(value).strip().lower())
-
-    combined = " | ".join(texts)
-
-    if any(term in combined for term in ["committee", "co-closer", "co closer", "save mix", "shared", "timeshare"]):
+    combined = " | ".join(str(v).strip().lower() for v in tracked_info.values() if v is not None)
+    if "co-closer" in combined or "co closer" in combined:
+        return "co_closer"
+    if "committee" in combined:
         return "committee"
-
-    if any(term in combined for term in ["closer", "primary closer", "clear closer"]):
+    if "leverage" in combined:
+        return "leverage_arm"
+    if "closer" in combined:
         return "closer"
-
-    if any(term in combined for term in ["setup", "set-up", "high leverage", "high-leverage", "8th inning", "8th", "fireman"]):
+    if "setup" in combined:
         return "setup"
+    return "relief"
 
     # Conservative fallback:
     # tracked, but role not explicit -> setup mix language is safer than closer language.
@@ -689,102 +715,6 @@ def get_recent_trend(recent_appearances):
         return "DOWN"
 
     return "STABLE"
-
-
-def get_recent_form_profile(recent_appearances):
-    if not recent_appearances:
-        return {
-            "tag": "NONE",
-            "scoreless": 0,
-            "runs_allowed": 0,
-            "dominant": 0,
-            "sample": 0,
-        }
-
-    recent = recent_appearances[:5]
-    sample = len(recent)
-    scoreless = sum(1 for app in recent if app["er"] == 0)
-    runs_allowed = sum(1 for app in recent if app["er"] > 0)
-    dominant = sum(1 for app in recent if app["er"] == 0 and (app["h"] + app["bb"]) == 0 and app["k"] >= 2)
-
-    first_three = recent[:3]
-    first_two = recent[:2]
-
-    tag = "MIXED"
-    if sample >= 3 and len(first_three) == 3 and all(app["er"] == 0 for app in first_three):
-        tag = "HOT"
-    elif sample >= 4 and scoreless >= 4:
-        tag = "HOT"
-    elif len(first_two) == 2 and first_two[0]["er"] == 0 and first_two[1]["er"] >= 2:
-        tag = "BOUNCE_BACK"
-    elif len(first_two) == 2 and all(app["er"] > 0 for app in first_two):
-        tag = "SHAKY"
-    elif sample >= 3 and runs_allowed >= 2:
-        tag = "SHAKY"
-    elif sample >= 3 and scoreless >= 2:
-        tag = "SOLID"
-
-    return {
-        "tag": tag,
-        "scoreless": scoreless,
-        "runs_allowed": runs_allowed,
-        "dominant": dominant,
-        "sample": sample,
-    }
-
-
-def build_recent_form_sentence(form_profile, outing_grade: str):
-    tag = form_profile.get("tag", "NONE")
-    sample = form_profile.get("sample", 0)
-    scoreless = form_profile.get("scoreless", 0)
-    dominant = form_profile.get("dominant", 0)
-
-    if sample == 0 or tag == "NONE":
-        return ""
-
-    if tag == "HOT":
-        if dominant >= 2:
-            return random.choice([
-                "He has been on a real run lately, and the recent outings have come with swing-and-miss stuff.",
-                "The recent form has been excellent, with multiple sharp outings in this stretch.",
-            ])
-        return random.choice([
-            f"He has been throwing the ball well lately, with {scoreless} scoreless outings in his last {sample} appearances.",
-            "This keeps a strong recent run going for him.",
-        ])
-
-    if tag == "SOLID":
-        return random.choice([
-            "The recent form has been mostly solid, and this outing fits that pattern.",
-            "He has been settling into a decent recent stretch, and this one helped.",
-        ])
-
-    if tag == "BOUNCE_BACK":
-        if outing_grade in {"DOMINANT", "CLEAN", "TRAFFIC", "NEUTRAL"}:
-            return random.choice([
-                "This looked like a bounce-back outing after a rougher appearance last time out.",
-                "He responded well after the previous outing got away from him.",
-            ])
-        return random.choice([
-            "He was trying to bounce back from a rougher recent outing, but the line stayed uneven.",
-            "This did not fully turn the page after the previous shaky appearance.",
-        ])
-
-    if tag == "SHAKY":
-        if outing_grade in {"SHAKY", "ROUGH"}:
-            return random.choice([
-                "The recent form has been uneven, and this outing added to that concern.",
-                "He has hit a rough patch lately, and this line did not calm things down.",
-            ])
-        return random.choice([
-            "The recent form had been shaky, so this was a useful step in the right direction.",
-            "He needed a steadier outing after a rougher recent stretch, and this helped a bit.",
-        ])
-
-    return random.choice([
-        "The recent form has been mixed, so this outing helps shape the bigger picture.",
-        "He has had a mixed run lately, and this was another data point in that stretch.",
-    ])
 
 
 # ---------------- STREAK TRACKING ----------------
@@ -1202,6 +1132,300 @@ def build_summary(name: str, team: str, s: dict, label: str, context: dict, stre
     return f"{line1} {line2} {analysis}"
 
 
+
+# ---------------- TREND ALERT ENGINE ----------------
+
+def get_all_tracked_names(tracked: dict):
+    return {k for k in tracked.keys()}
+
+
+def recent_window_summary(recent_appearances):
+    apps = recent_appearances[:5]
+    if not apps:
+        return {}
+    last3 = apps[:3]
+    last5 = apps[:5]
+    return {
+        "last3": last3,
+        "last5": last5,
+        "scoreless3": len(last3) == 3 and all(a.get("er", 0) == 0 for a in last3),
+        "scoreless5": len(last5) == 5 and all(a.get("er", 0) == 0 for a in last5),
+        "scoreless4of5": len(last5) == 5 and sum(1 for a in last5 if a.get("er", 0) == 0) >= 4,
+        "runs2of3": len(last3) == 3 and sum(1 for a in last3 if a.get("er", 0) > 0) >= 2,
+        "runs3of5": len(last5) == 5 and sum(1 for a in last5 if a.get("er", 0) > 0) >= 3,
+        "ks_last3": sum(safe_int(a.get("k", 0), 0) for a in last3),
+        "ks_last5": sum(safe_int(a.get("k", 0), 0) for a in last5),
+        "k_streak3": len(last3) == 3 and all(safe_int(a.get("k", 0), 0) >= 1 for a in last3),
+        "dominant_last3": sum(1 for a in last3 if grade_outing(a) == "DOMINANT") >= 2,
+        "dominant_k_combo": len(last3) == 3 and sum(1 for a in last3 if a.get("er",0)==0 and safe_int(a.get("k",0),0)>=2) >= 2,
+        "no_walk3": len(last3) == 3 and all(safe_int(a.get("bb", 0), 0) == 0 for a in last3),
+        "k_3_of_4": len(apps[:4]) == 4 and sum(1 for a in apps[:4] if safe_int(a.get("k", 0), 0) >= 1) >= 3,
+        "saves2": len(last3) >= 2 and sum(1 for a in last3[:2] if safe_int(a.get("saves", 0), 0) > 0) == 2,
+        "holds3": len(last3) == 3 and all(safe_int(a.get("holds", 0), 0) > 0 for a in last3),
+        "multi_inning3": len(last3) == 3 and all(baseball_ip_to_outs(a.get("ip", "0.0")) >= 4 and a.get("er", 0) == 0 for a in last3),
+        "inherit_zero3": False,
+    }
+
+
+def build_trend_candidates(current_app: dict, recent_appearances, tracked_info, context: dict):
+    if tracked_info:
+        return []
+    if not recent_appearances:
+        return []
+    info = recent_window_summary(recent_appearances)
+    if not info:
+        return []
+    candidates = []
+    current_grade = grade_outing(current_app)
+    current_save = safe_int(current_app.get("saves", 0), 0) > 0
+    current_hold = safe_int(current_app.get("holds", 0), 0) > 0
+    prev = recent_appearances[1] if len(recent_appearances) > 1 else None
+    prev2 = recent_appearances[2] if len(recent_appearances) > 2 else None
+
+    def add(code, subject, emoji, priority, family, detail=None):
+        candidates.append({"code": code, "subject": subject, "emoji": emoji, "priority": priority, "family": family, "detail": detail or {}})
+
+    if info.get("scoreless5"):
+        add("scoreless5", "Scoreless Streak: 5 Straight", "🔥", 100, "scoreless")
+    elif info.get("scoreless3"):
+        add("scoreless3", "Scoreless Streak: 3 Straight", "🔥", 80, "scoreless")
+    elif info.get("scoreless4of5"):
+        add("scoreless4of5", "Strong Recent Run", "🔥", 72, "scoreless")
+
+    if info.get("ks_last5", 0) >= 10:
+        add("ks10last5", "Bat-Missing Run", "⚡", 96, "strikeout", {"ks": info.get("ks_last5", 0), "window": 5})
+    elif info.get("ks_last3", 0) >= 7:
+        add("ks7last3", "Strikeout Surge", "⚡", 86, "strikeout", {"ks": info.get("ks_last3", 0), "window": 3})
+
+    if info.get("k_streak3"):
+        add("k_streak3", "Strikeout in 3 Straight", "⚡", 70, "strikeout")
+    if info.get("dominant_last3"):
+        add("dominant_last3", "Dominant Stretch", "⚡", 78, "dominance")
+    if info.get("dominant_k_combo"):
+        add("dominant_k_combo", "Power Outings Stacking Up", "⚡", 82, "dominance")
+    if info.get("no_walk3"):
+        add("no_walk3", "No-Walk Run", "🧠", 68, "command")
+    if info.get("k_3_of_4"):
+        add("k_3_of_4", "Steady Swing-and-Miss", "⚡", 62, "strikeout")
+
+    if current_save and info.get("saves2"):
+        add("saves2", "Back-to-Back Saves", "📈", 90, "role")
+    if current_hold and info.get("holds3"):
+        add("holds3", "Three Straight Holds", "📈", 84, "role")
+    if info.get("multi_inning3"):
+        add("multi_inning3", "Multi-Inning Success", "📈", 66, "usage")
+
+    if prev and safe_int(prev.get("blownSaves", 0), 0) > 0 and current_app.get("er", 0) == 0:
+        add("bounce_blown", "Bounce-Back Outing", "🔁", 74, "bounce")
+    if prev and prev.get("er", 0) > 0 and current_app.get("er", 0) == 0:
+        add("bounce_rough", "Rebound Performance", "🔁", 60, "bounce")
+    if prev and prev2 and prev.get("er", 0) > 0 and prev2.get("er", 0) > 0 and current_app.get("er", 0) == 0:
+        add("clean_rebound_2bad", "Steadier After Trouble", "🔁", 76, "bounce")
+
+    if info.get("runs2of3"):
+        add("runs2of3", "Recent Form Trending Down", "⚠️", 64, "rough")
+    if info.get("runs3of5"):
+        add("runs3of5", "Rough Stretch", "⚠️", 69, "rough")
+    if prev and info.get("scoreless3") is False and prev.get("er",0) == 0 and prev2 and prev2.get("er",0)==0 and current_app.get("er",0) > 0:
+        add("scoreless_snapped", "Scoreless Run Snapped", "⚠️", 58, "rough")
+    if prev and prev.get("er",0)==0 and prev2 and prev2.get("er",0)==0 and current_app.get("er",0) > 0:
+        add("first_rough_after_hot", "First Rough Turn After Hot Stretch", "⚠️", 61, "rough")
+
+    if context.get("entry_inning") is not None and safe_int(context.get("entry_inning"), 0) >= 7 and current_app.get("er",0) == 0:
+        add("late_inning_clean", "Late-Inning Look", "📈", 63, "usage")
+    if context.get("entry_inning") is not None and safe_int(context.get("entry_inning"), 0) >= 8 and current_app.get("er",0) == 0:
+        add("higher_leverage_usage", "More Meaningful Work", "📈", 67, "usage")
+
+    if context.get("finished_game") and current_save:
+        add("save_conversion", "Emerging Late-Inning Option", "📈", 73, "role")
+
+    # choose strongest family per family will happen later; return all candidates
+    return candidates
+
+
+def choose_best_trend(candidates):
+    if not candidates:
+        return None
+    candidates = sorted(candidates, key=lambda x: x.get("priority", 0), reverse=True)
+    return candidates[0]
+
+
+def build_trend_analysis(name: str, team: str, trend: dict, recent_appearances, season_stats: dict):
+    code = trend.get("code")
+    info = recent_window_summary(recent_appearances)
+    templates = {
+        "scoreless3": [
+            f"{name} has now strung together three straight scoreless outings. The recent form has been sharp, and he is forcing his way onto the radar in this bullpen.",
+            f"{name} has put together three straight scoreless appearances and keeps stacking clean work. This is the kind of run that can push a reliever into more meaningful opportunities.",
+        ],
+        "scoreless5": [
+            f"{name} has now turned in five straight scoreless outings, one of the better recent runs in this bullpen. The consistency has stood out, and his name is becoming harder to ignore.",
+            f"Five straight scoreless appearances have put {name} firmly on the overnight watch list. He keeps getting results, and stretches like this can change a reliever's place quickly.",
+        ],
+        "scoreless4of5": [
+            f"{name} has been scoreless in four of his last five outings and is building real momentum. The recent body of work is strong enough to make him worth tracking more closely.",
+        ],
+        "ks10last5": [
+            f"{name} has racked up {info.get('ks_last5', 0)} strikeouts over his last five appearances and the bat-missing has become impossible to miss. This is the kind of swing-and-miss stretch that can open bigger doors.",
+        ],
+        "ks7last3": [
+            f"{name} has piled up {info.get('ks_last3', 0)} strikeouts across his last three outings and is missing bats at a high rate. The recent stuff has jumped off the page.",
+            f"Strikeouts are starting to pile up for {name}, who has {info.get('ks_last3', 0)} over his last three appearances. That kind of bat-missing can move a reliever up the ladder in a hurry.",
+        ],
+        "k_streak3": [
+            f"{name} has recorded a strikeout in three straight outings and keeps bringing swing-and-miss to the mound. The recent run gives him some real momentum.",
+        ],
+        "dominant_last3": [
+            f"{name} has delivered multiple dominant appearances over his last three turns and is clearly in a strong stretch. The recent form has looked a level above ordinary middle relief work.",
+        ],
+        "dominant_k_combo": [
+            f"{name} has stacked power outings lately, with multiple recent appearances featuring scoreless work and at least two strikeouts. That kind of combination gets attention fast.",
+        ],
+        "no_walk3": [
+            f"{name} has gone three straight outings without issuing a walk, and the recent command has been a real positive. Clean strike-throwing runs like this tend to matter.",
+        ],
+        "saves2": [
+            f"{name} has converted saves in back-to-back appearances and is starting to show up in more meaningful spots. That usage is worth keeping an eye on.",
+        ],
+        "holds3": [
+            f"{name} has now collected holds in three straight appearances and continues to show up in useful spots. The trust level looks to be moving in the right direction.",
+        ],
+        "multi_inning3": [
+            f"{name} has put together a string of successful multi-inning outings, giving this bullpen useful length without sacrificing results. That kind of work can earn a bigger role over time.",
+        ],
+        "bounce_blown": [
+            f"After a blown save last time out, {name} answered with a clean bounce-back appearance. That helps settle the recent form and keeps him from drifting the wrong way.",
+        ],
+        "bounce_rough": [
+            f"{name} bounced back with a cleaner outing after running into trouble previously. It was a needed response and a step back in the right direction.",
+        ],
+        "clean_rebound_2bad": [
+            f"After two rougher appearances, {name} steadied things with a clean rebound outing. He needed a better line, and this was at least a start.",
+        ],
+        "runs2of3": [
+            f"{name} has now allowed runs in two of his last three appearances, and the recent form is starting to turn shaky. He will need a cleaner outing soon to stop the slide.",
+        ],
+        "runs3of5": [
+            f"{name} has been tagged in three of his last five outings, and the recent trend has gone in the wrong direction. The results have been too uneven to ignore.",
+        ],
+        "scoreless_snapped": [
+            f"A scoreless run came to an end for {name}, who had been putting together cleaner work lately. The recent momentum took a hit with this one.",
+        ],
+        "first_rough_after_hot": [
+            f"{name} hit his first real bump after a stronger recent stretch. One outing does not erase the progress, but it does cool the momentum a bit.",
+        ],
+        "late_inning_clean": [
+            f"{name} handled another clean late-inning look and continues to see work that matters more than ordinary middle relief. That is the kind of deployment shift worth noticing.",
+        ],
+        "higher_leverage_usage": [
+            f"The recent usage for {name} has started to creep into more meaningful territory, and he answered with another clean line. This looks like a reliever getting a stronger look.",
+        ],
+        "save_conversion": [
+            f"{name} closed the door in his latest chance and is beginning to show up in spots that matter. Save chances like this can change a bullpen conversation quickly.",
+        ],
+    }
+    options = templates.get(code, [f"{name} has put together a notable recent run and is worth monitoring more closely. The recent trend has started to stand out."])
+    body = random.choice(options)
+    second = random.choice([
+        f"He remains a name to watch if this keeps going.",
+        f"This is the sort of stretch that can earn more meaningful work.",
+        f"It is a trend worth monitoring moving forward.",
+    ])
+    if body.count('.') >= 2:
+        return body
+    return f"{body} {second}"
+
+
+def can_post_trend_now(state, now_et: datetime):
+    hour_key = now_et.strftime("%Y-%m-%d-%H")
+    day_key = now_et.strftime("%Y-%m-%d")
+    count_this_hour = safe_int(state.get("trend_post_count_by_hour", {}).get(hour_key, 0), 0)
+    total_today = safe_int(state.get("trend_total_by_date", {}).get(day_key, 0), 0)
+    if now_et.hour >= TREND_OVERNIGHT_START_HOUR and total_today >= TREND_MAX_OVERNIGHT_TOTAL:
+        return False
+    if count_this_hour >= TREND_MAX_PER_HOUR:
+        return False
+    last_post = state.get("trend_last_post_at")
+    if last_post:
+        try:
+            last_dt = datetime.fromisoformat(last_post)
+            if last_dt.tzinfo is None:
+                last_dt = last_dt.replace(tzinfo=ET)
+            else:
+                last_dt = last_dt.astimezone(ET)
+            if (now_et - last_dt).total_seconds() < TREND_MIN_SPACING_MINUTES * 60:
+                return False
+        except Exception:
+            pass
+    return True
+
+
+def mark_trend_posted(state, pitcher_id, trend_code, appearance_sig, now_et: datetime):
+    day_key = now_et.strftime("%Y-%m-%d")
+    hour_key = now_et.strftime("%Y-%m-%d-%H")
+    state.setdefault("trend_posted", {})[str(pitcher_id)] = {"code": trend_code, "sig": appearance_sig, "date": day_key}
+    state.setdefault("trend_history", {})[f"{pitcher_id}:{trend_code}"] = appearance_sig
+    state["trend_last_post_at"] = now_et.isoformat()
+    state.setdefault("trend_post_count_by_hour", {})[hour_key] = safe_int(state.setdefault("trend_post_count_by_hour", {}).get(hour_key, 0), 0) + 1
+    state.setdefault("trend_total_by_date", {})[day_key] = safe_int(state.setdefault("trend_total_by_date", {}).get(day_key, 0), 0) + 1
+
+
+def appearance_signature(recent_appearances):
+    if not recent_appearances:
+        return "none"
+    parts = []
+    for app in recent_appearances[:5]:
+        parts.append(f"{app.get('ip','0.0')}-{app.get('h',0)}-{app.get('er',0)}-{app.get('bb',0)}-{app.get('k',0)}-{app.get('saves',0)}-{app.get('holds',0)}")
+    return "|".join(parts)
+
+
+async def post_trend_card(channel, meta: dict, trend: dict, recent_appearances):
+    team = meta.get("team", "UNK")
+    name = meta.get("name", "Unknown Pitcher")
+    subject = f"{trend.get('emoji', '🧠')} {trend.get('subject', 'Bullpen Trend')}"
+    embed = discord.Embed(
+        title=f"{name} | {team}",
+        color=TEAM_COLORS.get(team, 0x2ECC71),
+        timestamp=datetime.now(timezone.utc),
+    )
+    try:
+        embed.set_thumbnail(url=get_logo(team))
+    except Exception:
+        pass
+    embed.add_field(name="", value=f"**{subject}**", inline=False)
+    embed.add_field(name="Season", value=format_season_line(meta.get("season_stats", {})), inline=False)
+    embed.add_field(name="Summary", value=build_trend_analysis(name, team, trend, recent_appearances, meta.get("season_stats", {})), inline=False)
+    await channel.send(embed=embed)
+
+
+def gather_trend_candidates_from_recent_games(tracked: dict, processed_pitchers_by_game):
+    tracked_names = get_all_tracked_names(tracked)
+    candidates = []
+    for item in processed_pitchers_by_game:
+        p = item["pitcher"]
+        pid = p.get("id")
+        if pid is None:
+            continue
+        norm = normalize_name(p.get("name", ""))
+        if norm in tracked_names:
+            continue
+        recent = item.get("recent_appearances") or []
+        if not recent:
+            continue
+        trend_options = build_trend_candidates(item["current_app"], recent, None, item.get("context", {}))
+        best = choose_best_trend(trend_options)
+        if not best:
+            continue
+        candidates.append({
+            "pitcher_id": pid,
+            "meta": player_meta_cache.get(pid, {"name": p.get("name"), "team": p.get("team"), "season_stats": p.get("season_stats", {})}),
+            "trend": best,
+            "recent_appearances": recent,
+        })
+    candidates.sort(key=lambda x: x["trend"].get("priority", 0), reverse=True)
+    return candidates
+
+
 # ---------------- CORE ----------------
 
 def get_games():
@@ -1254,14 +1478,21 @@ def get_pitchers(feed: dict):
             else:
                 season_stats = {}
 
-            result.append({
+            player_obj = {
                 "id": p.get("person", {}).get("id"),
                 "name": p.get("person", {}).get("fullName", "Unknown Pitcher"),
                 "team": team,
                 "side": side,
                 "stats": stats,
                 "season_stats": season_stats,
-            })
+            }
+            result.append(player_obj)
+            if player_obj["id"] is not None:
+                player_meta_cache[player_obj["id"]] = {
+                    "name": player_obj["name"],
+                    "team": team,
+                    "season_stats": season_stats,
+                }
 
     return result
 
@@ -1341,13 +1572,15 @@ async def loop():
 
     while True:
         try:
-            current_date = datetime.now(ET).date()
+            now_et = datetime.now(ET)
+            current_date = now_et.date()
             if current_date != last_refresh_date:
                 tracked = await refresh_tracked_pitchers()
                 last_refresh_date = current_date
 
             games = get_games()
             log(f"Checking {len(games)} games")
+            processed_pitchers_by_game = []
 
             for g in games:
                 if g.get("status", {}).get("detailedState") != "Final":
@@ -1362,17 +1595,10 @@ async def loop():
                 game_date_et = parse_game_date_et(g)
 
                 game_teams = feed.get("gameData", {}).get("teams", {})
-                away_abbr = game_teams.get("away", {}).get("abbreviation")
-                home_abbr = game_teams.get("home", {}).get("abbreviation")
-
-                if not away_abbr:
-                    away_abbr = g.get("teams", {}).get("away", {}).get("team", {}).get("abbreviation") or "AWAY"
-                if not home_abbr:
-                    home_abbr = g.get("teams", {}).get("home", {}).get("team", {}).get("abbreviation") or "HOME"
-
+                away_abbr = game_teams.get("away", {}).get("abbreviation") or g.get("teams", {}).get("away", {}).get("team", {}).get("abbreviation") or "AWAY"
+                home_abbr = game_teams.get("home", {}).get("abbreviation") or g.get("teams", {}).get("home", {}).get("team", {}).get("abbreviation") or "HOME"
                 away_score = safe_int(g.get("teams", {}).get("away", {}).get("score", 0), 0)
                 home_score = safe_int(g.get("teams", {}).get("home", {}).get("score", 0), 0)
-
                 matchup = f"{away_abbr} @ {home_abbr}"
                 score = build_score_line(away_abbr, away_score, home_abbr, home_score)
 
@@ -1381,6 +1607,26 @@ async def loop():
                     if pitcher_id is None:
                         continue
 
+                    context = get_pitcher_entry_context(feed, pitcher_id, p["side"])
+                    recent_appearances = get_recent_appearances(pitcher_id, game_date_et, limit=5, max_days=21)
+                    current_app = {
+                        "ip": str(p["stats"].get("inningsPitched", "0.0")),
+                        "h": safe_int(p["stats"].get("hits", 0), 0),
+                        "er": safe_int(p["stats"].get("earnedRuns", 0), 0),
+                        "bb": safe_int(p["stats"].get("baseOnBalls", 0), 0),
+                        "k": safe_int(p["stats"].get("strikeOuts", 0), 0),
+                        "saves": safe_int(p["stats"].get("saves", 0), 0),
+                        "holds": safe_int(p["stats"].get("holds", 0), 0),
+                        "blownSaves": safe_int(p["stats"].get("blownSaves", 0), 0),
+                    }
+                    recent_for_trend = [current_app] + recent_appearances
+                    processed_pitchers_by_game.append({
+                        "pitcher": p,
+                        "current_app": current_app,
+                        "recent_appearances": recent_for_trend,
+                        "context": context,
+                    })
+
                     key = f"{game_id}_{pitcher_id}"
                     if key in posted:
                         continue
@@ -1388,26 +1634,33 @@ async def loop():
                     tracked_info = find_tracked_pitcher_info(p["name"], p["team"], tracked)
                     is_save = safe_int(p["stats"].get("saves", 0), 0) > 0
                     is_tracked = tracked_info is not None
-
                     if not (is_save or is_tracked):
                         continue
 
-                    context = get_pitcher_entry_context(feed, pitcher_id, p["side"])
                     streak_count = get_streak_count(pitcher_id, game_date_et)
-                    recent_appearances = get_recent_appearances(pitcher_id, game_date_et, limit=5, max_days=21)
-
                     log(f"Posting {p['name']} | {p['team']} | {matchup}")
-                    await post_card(
-                        channel,
-                        p,
-                        matchup,
-                        score,
-                        context,
-                        streak_count,
-                        tracked_info,
-                        recent_appearances,
-                    )
+                    await post_card(channel, p, matchup, score, context, streak_count, tracked_info, recent_appearances)
                     posted.add(key)
+
+            # trend blurbs use the same channel, but only for non-depth-chart relievers
+            if now_et.hour >= TREND_OVERNIGHT_START_HOUR or now_et.hour < 12:
+                trend_candidates = gather_trend_candidates_from_recent_games(tracked, processed_pitchers_by_game)
+                for candidate in trend_candidates:
+                    if not can_post_trend_now(state, now_et):
+                        break
+                    pid = candidate["pitcher_id"]
+                    sig = appearance_signature(candidate["recent_appearances"])
+                    existing = state.get("trend_posted", {}).get(str(pid), {})
+                    if existing.get("sig") == sig and existing.get("code") == candidate["trend"].get("code"):
+                        continue
+                    last_date = existing.get("date")
+                    today_key = now_et.strftime("%Y-%m-%d")
+                    if last_date == today_key:
+                        continue
+                    log(f"Trend blurb {candidate['meta'].get('name')} | {candidate['meta'].get('team')} | {candidate['trend'].get('subject')}")
+                    await post_trend_card(channel, candidate["meta"], candidate["trend"], candidate["recent_appearances"])
+                    mark_trend_posted(state, pid, candidate["trend"].get("code"), sig, now_et)
+                    break
 
             state["posted"] = list(posted)
             save_state(state)
@@ -1440,4 +1693,3 @@ async def start_closer_bot():
         raise RuntimeError("CLOSER_BOT_TOKEN is not set")
 
     await client.start(TOKEN, reconnect=True)
-
