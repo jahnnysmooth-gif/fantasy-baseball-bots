@@ -388,7 +388,7 @@ def impact_tag(label: str, s: dict) -> str:
 
 def refresh_tracked_pitchers():
     try:
-        teams = fetch_closer_depth_chart()
+        teams = await fetch_closer_depth_chart(client, 1484232761597366412)
         if not teams:
             log("Closer Monkey refresh returned no teams, using saved depth chart")
     except Exception as e:
