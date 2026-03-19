@@ -1,13 +1,28 @@
+import sys
+print("=== MAIN.PY STARTING ===", flush=True)
+
+try:
+    from player_profiles_bot import start_player_profiles_bot
+    print("Loaded player_profiles_bot", flush=True)
+
+    from closer_bot import start_closer_bot
+    print("Loaded closer_bot", flush=True)
+
+    from injury_bot import start_injury_bot
+    print("Loaded injury_bot", flush=True)
+
+    from lineup_bot import start_lineup_bot
+    print("Loaded lineup_bot", flush=True)
+
+except Exception as e:
+    print("IMPORT CRASH:", repr(e), flush=True)
+    import traceback
+    traceback.print_exc()
+    sys.exit(1)
+
 import asyncio
 import os
-import sys
 import traceback
-
-from player_profiles_bot import start_player_profiles_bot
-from closer_bot import start_closer_bot
-from injury_bot import start_injury_bot
-from lineup_bot import start_lineup_bot
-
 
 RESTART_DELAY_SECONDS = 10
 
