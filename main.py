@@ -46,18 +46,15 @@ async def run_forever(name: str, coro_func):
         try:
             log(f"Starting {name}")
             await coro_func()
-            log(
-                f"{name} exited without raising an exception. "
-                f"Restarting in {RESTART_DELAY_SECONDS} seconds."
-            )
+            log(f"{name} exited cleanly. Restarting in {RESTART_DELAY_SECONDS}s")
         except asyncio.CancelledError:
-            log(f"{name} was cancelled")
+            log(f"{name} cancelled")
             raise
         except Exception as e:
             log(f"{name} crashed: {e!r}")
             traceback.print_exc()
 
-        log(f"Sleeping {RESTART_DELAY_SECONDS} seconds before restarting {name}")
+        log(f"Restarting {name} in {RESTART_DELAY_SECONDS}s")
         await asyncio.sleep(RESTART_DELAY_SECONDS)
 
 
@@ -69,18 +66,21 @@ async def main() -> None:
     loop = asyncio.get_running_loop()
     loop.set_exception_handler(handle_asyncio_exception)
 
-    tasks = [
-        asyncio.create_task(run_forever("player_profiles_bot", start_player_profiles_bot)),
-        asyncio.create_task(run_forever("closer_bot", start_closer_bot)),
-        asyncio.create_task(run_forever("injury_bot", start_injury_bot)),
-        asyncio.create_task(run_forever("lineup_bot", start_lineup_bot)),
-    ]
+    tasks = []
 
-    results = await asyncio.gather(*tasks, return_exceptions=True)
+    # STAGGERED STARTUP (prevents Discord 503 crashes)
+    tasks.append(asyncio.create_task(run_forever("player_profiles_bot", start_player_profiles_bot)))
+    await asyncio.sleep(3)
 
-    for index, result in enumerate(results):
-        if isinstance(result, Exception):
-            log(f"Task {index} ended with exception: {result!r}")
+    tasks.append(asyncio.create_task(run_forever("closer_bot", start_closer_bot)))
+    await asyncio.sleep(3)
+
+    tasks.append(asyncio.create_task(run_forever("injury_bot", start_injury_bot)))
+    await asyncio.sleep(3)
+
+    tasks.append(asyncio.create_task(run_forever("lineup_bot", start_lineup_bot)))
+
+    await asyncio.gather(*tasks, return_exceptions=True)
 
 
 if __name__ == "__main__":
@@ -89,6 +89,6 @@ if __name__ == "__main__":
     except KeyboardInterrupt:
         log("Service stopped by user")
     except Exception as e:
-        log(f"Fatal top-level crash: {e!r}")
+        log(f"Fatal crash: {e!r}")
         traceback.print_exc()
         raise
