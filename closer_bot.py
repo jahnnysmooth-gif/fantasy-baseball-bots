@@ -32,6 +32,10 @@ TREND_OVERNIGHT_START_HOUR = 2
 TREND_MAX_PER_HOUR = 3
 TREND_MIN_SPACING_MINUTES = 20
 TREND_MAX_OVERNIGHT_TOTAL = 25
+VELOCITY_DELTA_THRESHOLD = 1.0
+VELOCITY_MIN_PITCHES = 10
+VELOCITY_MIN_FASTBALLS = 3
+FASTBALL_PITCH_CODES = {"FF", "FT", "SI", "FC", "FA", "FS"}
 
 # ---------------- TEAM STYLE ----------------
 
@@ -89,7 +93,7 @@ def get_logo(team: str) -> str:
 # ---------------- STATE ----------------
 
 def load_state():
-    base = {"posted": [], "trend_posted": {}, "trend_history": {}, "trend_last_post_at": None, "trend_post_count_by_hour": {}, "trend_total_by_date": {}}
+    base = {"posted": [], "trend_posted": {}, "trend_history": {}, "trend_last_post_at": None, "trend_post_count_by_hour": {}, "trend_total_by_date": {}, "velocity_posted": {}}
 
     if RESET_CLOSER_STATE:
         return base
@@ -110,7 +114,7 @@ def load_state():
             with open(TREND_STATE_FILE, "r", encoding="utf-8") as f:
                 tdata = json.load(f)
             if isinstance(tdata, dict):
-                for key in ["trend_posted", "trend_history", "trend_last_post_at", "trend_post_count_by_hour", "trend_total_by_date"]:
+                for key in ["trend_posted", "trend_history", "trend_last_post_at", "trend_post_count_by_hour", "trend_total_by_date", "velocity_posted"]:
                     if key in tdata:
                         base[key] = tdata[key]
         except Exception:
@@ -129,6 +133,7 @@ def save_state(state):
         "trend_last_post_at": state.get("trend_last_post_at"),
         "trend_post_count_by_hour": state.get("trend_post_count_by_hour", {}),
         "trend_total_by_date": state.get("trend_total_by_date", {}),
+        "velocity_posted": state.get("velocity_posted", {}),
     }
     with open(TREND_STATE_FILE, "w", encoding="utf-8") as f:
         json.dump(trend_payload, f, indent=2)
@@ -266,6 +271,55 @@ def parse_game_date_et(game: dict):
         return dt.astimezone(ET).date()
     except Exception:
         return None
+
+
+def parse_pitch_type_code(event: dict) -> str:
+    details = event.get("details", {}) if isinstance(event, dict) else {}
+    pitch_type = details.get("type") if isinstance(details, dict) else None
+    if isinstance(pitch_type, dict):
+        return str(pitch_type.get("code") or pitch_type.get("description") or "").strip().upper()
+    return ""
+
+
+def get_fastball_velocity_summary(feed: dict, pitcher_id: int):
+    if not feed or pitcher_id is None:
+        return None
+
+    plays = feed.get("liveData", {}).get("plays", {}).get("allPlays", [])
+    fastball_velos = []
+    total_pitches = 0
+
+    for play in plays:
+        matchup = play.get("matchup", {})
+        pitcher = matchup.get("pitcher", {})
+        if pitcher.get("id") != pitcher_id:
+            continue
+
+        for event in play.get("playEvents", []):
+            if not isinstance(event, dict):
+                continue
+            if not event.get("isPitch"):
+                continue
+
+            pitch_data = event.get("pitchData", {})
+            start_speed = safe_float(pitch_data.get("startSpeed"), 0.0)
+            if start_speed <= 0:
+                continue
+
+            total_pitches += 1
+            pitch_code = parse_pitch_type_code(event)
+            if pitch_code in FASTBALL_PITCH_CODES:
+                fastball_velos.append(start_speed)
+
+    if total_pitches < VELOCITY_MIN_PITCHES or len(fastball_velos) < VELOCITY_MIN_FASTBALLS:
+        return None
+
+    avg_fb = round(sum(fastball_velos) / len(fastball_velos), 1)
+    return {
+        "avg_fastball_velocity": avg_fb,
+        "fastball_count": len(fastball_velos),
+        "total_pitches": total_pitches,
+    }
 
 
 # ---------------- SEASON STATS ----------------
@@ -657,6 +711,7 @@ def get_pitching_stats_for_date(target_date):
                     if pid is None:
                         continue
 
+                    velo = get_fastball_velocity_summary(feed, pid)
                     stats_by_pitcher[pid] = {
                         "ip": str(stats.get("inningsPitched", "0.0")),
                         "h": safe_int(stats.get("hits", 0), 0),
@@ -666,6 +721,9 @@ def get_pitching_stats_for_date(target_date):
                         "saves": safe_int(stats.get("saves", 0), 0),
                         "holds": safe_int(stats.get("holds", 0), 0),
                         "blownSaves": safe_int(stats.get("blownSaves", 0), 0),
+                        "avg_fastball_velocity": velo.get("avg_fastball_velocity") if velo else None,
+                        "fastball_count": velo.get("fastball_count", 0) if velo else 0,
+                        "pitch_count": velo.get("total_pitches", safe_int(stats.get("numberOfPitches", 0), 0)) if velo else safe_int(stats.get("numberOfPitches", 0), 0),
                     }
 
     except Exception as e:
@@ -1260,7 +1318,7 @@ def build_trend_analysis(name: str, team: str, trend: dict, recent_appearances, 
         ],
         "scoreless5": [
             f"{name} has now turned in five straight scoreless outings, one of the better recent runs in this bullpen. The consistency has stood out, and his name is becoming harder to ignore.",
-            f"Five straight scoreless appearances have put {name} firmly on the overnight watch list. He keeps getting results, and stretches like this can change a reliever's place quickly.",
+            f"Five straight scoreless appearances have put {name} firmly on the radar in this bullpen. He keeps getting results, and stretches like this can change a reliever's place quickly.",
         ],
         "scoreless4of5": [
             f"{name} has been scoreless in four of his last five outings and is building real momentum. The recent body of work is strong enough to make him worth tracking more closely.",
@@ -1398,6 +1456,159 @@ async def post_trend_card(channel, meta: dict, trend: dict, recent_appearances):
     await channel.send(embed=embed)
 
 
+def build_velocity_alert(current_app: dict, recent_appearances):
+    current_v = current_app.get("avg_fastball_velocity")
+    current_pitches = safe_int(current_app.get("pitch_count", 0), 0)
+    current_fastballs = safe_int(current_app.get("fastball_count", 0), 0)
+
+    if current_v is None or current_pitches < VELOCITY_MIN_PITCHES or current_fastballs < VELOCITY_MIN_FASTBALLS:
+        return None
+
+    previous_with_velo = None
+    prior_velos = []
+    for app in recent_appearances[1:]:
+        app_v = app.get("avg_fastball_velocity")
+        if app_v is None:
+            continue
+        if previous_with_velo is None:
+            previous_with_velo = app
+        prior_velos.append(app_v)
+        if len(prior_velos) >= 5:
+            break
+
+    if not previous_with_velo and not prior_velos:
+        return None
+
+    candidates = []
+    if previous_with_velo and previous_with_velo.get("avg_fastball_velocity") is not None:
+        prev_v = safe_float(previous_with_velo.get("avg_fastball_velocity"), 0.0)
+        delta = round(current_v - prev_v, 1)
+        if abs(delta) >= VELOCITY_DELTA_THRESHOLD:
+            candidates.append({
+                "baseline_type": "last outing",
+                "baseline_velocity": prev_v,
+                "delta": delta,
+                "priority": abs(delta),
+            })
+
+    if prior_velos:
+        recent_avg = round(sum(prior_velos) / len(prior_velos), 1)
+        delta_avg = round(current_v - recent_avg, 1)
+        if abs(delta_avg) >= VELOCITY_DELTA_THRESHOLD:
+            candidates.append({
+                "baseline_type": "recent average",
+                "baseline_velocity": recent_avg,
+                "delta": delta_avg,
+                "priority": abs(delta_avg) + 0.05,
+            })
+
+    if not candidates:
+        return None
+
+    best = sorted(candidates, key=lambda x: x.get("priority", 0), reverse=True)[0]
+    direction = "up" if best["delta"] > 0 else "down"
+    emoji = "⚡" if direction == "up" else "⚠️"
+    subject = "Velocity Spike" if direction == "up" else "Velocity Drop"
+    return {
+        "code": f"velo_{direction}",
+        "subject": subject,
+        "emoji": emoji,
+        "current_velocity": round(current_v, 1),
+        "baseline_velocity": round(best["baseline_velocity"], 1),
+        "baseline_type": best["baseline_type"],
+        "delta": round(best["delta"], 1),
+    }
+
+
+def build_velocity_analysis(name: str, velocity_alert: dict):
+    current_v = velocity_alert.get("current_velocity")
+    baseline_v = velocity_alert.get("baseline_velocity")
+    delta = velocity_alert.get("delta")
+    baseline_type = velocity_alert.get("baseline_type", "recent average")
+
+    if delta is None:
+        return f"{name} showed a notable fastball velocity change in this outing. It is worth monitoring moving forward."
+
+    change_text = f"{abs(delta):.1f} MPH"
+    if delta > 0:
+        starters = [
+            f"{name} averaged **{current_v:.1f} MPH** on his fastball in this outing, up from **{baseline_v:.1f} MPH** in his {baseline_type}.",
+            f"{name}'s fastball averaged **{current_v:.1f} MPH** here after sitting at **{baseline_v:.1f} MPH** in his {baseline_type}.",
+        ]
+        closers = [
+            f"The **+{change_text}** jump stands out and suggests his stuff had extra life in this appearance.",
+            f"That **+{change_text}** bump is noticeable and could be a sign that his stuff is trending in the right direction.",
+        ]
+        thirds = [
+            "It is the kind of change worth keeping an eye on if it holds into his next outing.",
+            "If that carries forward, it adds another reason to pay attention to his recent run.",
+        ]
+    else:
+        starters = [
+            f"{name} averaged **{current_v:.1f} MPH** on his fastball in this outing, down from **{baseline_v:.1f} MPH** in his {baseline_type}.",
+            f"{name}'s fastball averaged **{current_v:.1f} MPH** here after sitting at **{baseline_v:.1f} MPH** in his {baseline_type}.",
+        ]
+        closers = [
+            f"The dip of **{change_text}** is noticeable and worth monitoring moving forward.",
+            f"That **-{change_text}** shift is enough to stand out and is something to keep an eye on in his next appearance.",
+        ]
+        thirds = [
+            "Changes like this can simply reflect a single-night blip, but it is still meaningful enough to flag.",
+            "One outing does not make a trend, but velocity changes like this are worth noting when they show up.",
+        ]
+
+    sentence1 = random.choice(starters)
+    sentence2 = random.choice(closers)
+    if random.random() < 0.55:
+        return f"{sentence1} {sentence2} {random.choice(thirds)}"
+    return f"{sentence1} {sentence2}"
+
+
+async def post_velocity_card(channel, meta: dict, velocity_alert: dict):
+    team = meta.get("team", "UNK")
+    name = meta.get("name", "Unknown Pitcher")
+    subject = f"{velocity_alert.get('emoji', '⚠️')} {velocity_alert.get('subject', 'Velocity Alert')}"
+    embed = discord.Embed(
+        title=f"{name} | {team}",
+        color=TEAM_COLORS.get(team, 0x2ECC71),
+        timestamp=datetime.now(timezone.utc),
+    )
+    try:
+        embed.set_thumbnail(url=get_logo(team))
+    except Exception:
+        pass
+    embed.add_field(name="", value=f"**{subject}**", inline=False)
+    embed.add_field(name="Season", value=format_season_line(meta.get("season_stats", {})), inline=False)
+    embed.add_field(name="Summary", value=build_velocity_analysis(name, velocity_alert), inline=False)
+    await channel.send(embed=embed)
+
+
+def should_post_velocity_alert(state, pitcher_id: int, game_id: int, velocity_alert: dict, now_et: datetime):
+    if pitcher_id is None or game_id is None or not velocity_alert:
+        return False
+
+    posted_map = state.setdefault("velocity_posted", {})
+    entry = posted_map.get(str(pitcher_id), {})
+    today_key = now_et.strftime("%Y-%m-%d")
+    signature = f"{game_id}:{velocity_alert.get('code')}:{velocity_alert.get('current_velocity')}:{velocity_alert.get('baseline_velocity')}"
+
+    if entry.get("date") == today_key and entry.get("signature") == signature:
+        return False
+
+    return True
+
+
+def mark_velocity_posted(state, pitcher_id: int, game_id: int, velocity_alert: dict, now_et: datetime):
+    posted_map = state.setdefault("velocity_posted", {})
+    posted_map[str(pitcher_id)] = {
+        "date": now_et.strftime("%Y-%m-%d"),
+        "game_id": game_id,
+        "signature": f"{game_id}:{velocity_alert.get('code')}:{velocity_alert.get('current_velocity')}:{velocity_alert.get('baseline_velocity')}",
+    }
+
+
+
+
 def gather_trend_candidates_from_recent_games(tracked: dict, processed_pitchers_by_game):
     tracked_names = get_all_tracked_names(tracked)
     candidates = []
@@ -1478,6 +1689,7 @@ def get_pitchers(feed: dict):
             else:
                 season_stats = {}
 
+            velo = get_fastball_velocity_summary(feed, p.get("person", {}).get("id"))
             player_obj = {
                 "id": p.get("person", {}).get("id"),
                 "name": p.get("person", {}).get("fullName", "Unknown Pitcher"),
@@ -1485,6 +1697,9 @@ def get_pitchers(feed: dict):
                 "side": side,
                 "stats": stats,
                 "season_stats": season_stats,
+                "avg_fastball_velocity": velo.get("avg_fastball_velocity") if velo else None,
+                "fastball_count": velo.get("fastball_count", 0) if velo else 0,
+                "pitch_count": velo.get("total_pitches", safe_int(stats.get("numberOfPitches", 0), 0)) if velo else safe_int(stats.get("numberOfPitches", 0), 0),
             }
             result.append(player_obj)
             if player_obj["id"] is not None:
