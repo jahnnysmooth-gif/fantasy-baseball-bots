@@ -166,6 +166,37 @@ def plural(word: str, count: int) -> str:
     return word if count == 1 else f"{word}s"
 
 
+NUMBER_WORDS = {
+    0: "zero",
+    1: "one",
+    2: "two",
+    3: "three",
+    4: "four",
+    5: "five",
+    6: "six",
+    7: "seven",
+    8: "eight",
+    9: "nine",
+    10: "ten",
+    11: "eleven",
+    12: "twelve",
+}
+
+
+def number_word(n: int) -> str:
+    return NUMBER_WORDS.get(n, str(n))
+
+
+def stat_phrase(count: int, singular: str, plural_form: str | None = None, zero_text: str | None = None) -> str:
+    if plural_form is None:
+        plural_form = f"{singular}s"
+    if count == 0:
+        return zero_text or f"no {plural_form}"
+    if count == 1:
+        return f"one {singular}"
+    return f"{number_word(count)} {plural_form}"
+
+
 def ordinal(n: int) -> str:
     if 10 <= n % 100 <= 20:
         suffix = "th"
@@ -812,6 +843,19 @@ def get_streak_count(pitcher_id: int, game_date_et):
     return 0
 
 
+def count_recent_appearances_in_window(pitcher_id: int, game_date_et, days: int = 15) -> int:
+    if pitcher_id is None or game_date_et is None:
+        return 0
+
+    count = 1
+    check_date = game_date_et - timedelta(days=1)
+    for _ in range(max(days - 1, 0)):
+        if pitcher_id in get_pitcher_ids_for_date(check_date):
+            count += 1
+        check_date -= timedelta(days=1)
+    return count
+
+
 def get_streak_sentence(streak_count: int) -> str:
     if streak_count == 2:
         return random.choice([
@@ -832,10 +876,11 @@ def strikeout_phrase(k: int) -> str:
     if k <= 0:
         return ""
 
+    batter_text = stat_phrase(k, "batter")
     if k >= 3:
-        return f"while punching out {k} {plural('batter', k)}"
+        return f"while punching out {batter_text}"
 
-    return f"while striking out {k} {plural('batter', k)}"
+    return f"while striking out {batter_text}"
 
 
 # ---------------- ANALYSIS ----------------
@@ -1145,28 +1190,32 @@ def build_summary(name: str, team: str, s: dict, label: str, context: dict, stre
     else:
         line1 = f"{name} entered {ctx} in relief."
 
+    hit_text = stat_phrase(h, "hit")
+    walk_text = stat_phrase(bb, "walk")
+    run_text = stat_phrase(er, "run")
+
     # One-batter / one-out handling
     if outs_recorded == 1:
         if er == 0 and h == 0 and bb == 0:
             line2 = "He retired the lone batter he faced."
         elif er == 0:
-            line2 = f"He got the out he was asked to get, allowing {h} {plural('hit', h)} and {bb} {plural('walk', bb)}."
+            line2 = f"He got the out he was asked to get, allowing {hit_text} and {walk_text}."
         else:
-            line2 = f"He recorded one out while allowing {er} {plural('run', er)} on {h} {plural('hit', h)} and {bb} {plural('walk', bb)}."
+            line2 = f"He recorded one out while allowing {run_text} on {hit_text} and {walk_text}."
     elif er == 0 and h == 0 and bb == 0:
         if k > 0:
             line2 = f"He retired all hitters he faced over {ip_text} {strikeout_phrase(k).replace('while ', '')}."
         else:
             line2 = f"He retired all hitters he faced over {ip_text}."
     elif er == 0:
-        line2 = f"He worked {ip_text}, allowing {h} {plural('hit', h)} and {bb} {plural('walk', bb)}"
+        line2 = f"He worked {ip_text}, allowing {hit_text} and {walk_text}"
         k_part = strikeout_phrase(k)
         if k_part:
             line2 += f" {k_part}."
         else:
             line2 += "."
     else:
-        line2 = f"He allowed {er} {plural('run', er)} over {ip_text} on {h} {plural('hit', h)} and {bb} {plural('walk', bb)}"
+        line2 = f"He allowed {run_text} over {ip_text} on {hit_text} and {walk_text}"
         k_part = strikeout_phrase(k)
         if k_part:
             line2 += f" {k_part}."
@@ -1318,7 +1367,7 @@ def build_trend_analysis(name: str, team: str, trend: dict, recent_appearances, 
         ],
         "scoreless5": [
             f"{name} has now turned in five straight scoreless outings, one of the better recent runs in this bullpen. The consistency has stood out, and his name is becoming harder to ignore.",
-            f"Five straight scoreless appearances have put {name} firmly on the radar in this bullpen. He keeps getting results, and stretches like this can change a reliever's place quickly.",
+            f"Five straight scoreless appearances have put {name} firmly on the overnight watch list. He keeps getting results, and stretches like this can change a reliever's place quickly.",
         ],
         "scoreless4of5": [
             f"{name} has been scoreless in four of his last five outings and is building real momentum. The recent body of work is strong enough to make him worth tracking more closely.",
@@ -1620,6 +1669,12 @@ def gather_trend_candidates_from_recent_games(tracked: dict, processed_pitchers_
         norm = normalize_name(p.get("name", ""))
         if norm in tracked_names:
             continue
+
+        game_date_et = item.get("game_date_et")
+        appearance_count_15 = count_recent_appearances_in_window(pid, game_date_et, days=15)
+        if appearance_count_15 < 4:
+            continue
+
         recent = item.get("recent_appearances") or []
         if not recent:
             continue
@@ -1840,6 +1895,7 @@ async def loop():
                         "current_app": current_app,
                         "recent_appearances": recent_for_trend,
                         "context": context,
+                        "game_date_et": game_date_et,
                     })
 
                     key = f"{game_id}_{pitcher_id}"
