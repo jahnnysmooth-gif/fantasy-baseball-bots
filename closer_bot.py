@@ -418,6 +418,7 @@ def format_season_line(season: dict) -> str:
 
 def classify(s: dict) -> str:
     outs = baseball_ip_to_outs(s["ip"])
+    baserunners = s["h"] + s["bb"]
 
     if s.get("saves"):
         return "SAVE"
@@ -428,17 +429,16 @@ def classify(s: dict) -> str:
     if s.get("holds"):
         return "HOLD"
 
-    if outs >= 3 and s["er"] == 0 and s["h"] == 0 and s["bb"] == 0:
-        return "DOM"
-
     if s["er"] >= 3:
         return "ROUGH"
 
-    if s["er"] == 0 and (s["h"] + s["bb"]) >= 2:
-        return "TRAFFIC"
-
-    if s["er"] == 0 and outs >= 3:
+    if s["er"] == 0 and outs >= 3 and baserunners == 0:
+        if safe_int(s.get("k", 0), 0) >= 2:
+            return "DOM"
         return "CLEAN"
+
+    if s["er"] == 0 and baserunners >= 1:
+        return "TRAFFIC"
 
     if s["er"] == 0:
         return "RELIEF"
@@ -459,13 +459,12 @@ def grade_outing(s: dict) -> str:
     if s["er"] in {1, 2}:
         return "SHAKY"
 
-    if s["er"] == 0 and s["h"] == 0 and s["bb"] == 0 and outs >= 3:
-        return "DOMINANT"
-
-    if s["er"] == 0 and baserunners <= 1 and outs >= 3:
+    if s["er"] == 0 and baserunners == 0 and outs >= 3:
+        if safe_int(s.get("k", 0), 0) >= 2:
+            return "DOMINANT"
         return "CLEAN"
 
-    if s["er"] == 0 and baserunners >= 2:
+    if s["er"] == 0 and baserunners >= 1:
         return "TRAFFIC"
 
     return "NEUTRAL"
@@ -1770,6 +1769,30 @@ def build_velocity_analysis(name: str, velocity_alert: dict):
     return f"{sentence1} {sentence2}"
 
 
+def build_velocity_summary_sentence(velocity_alert: dict) -> str:
+    if not velocity_alert:
+        return ""
+
+    current_v = velocity_alert.get("current_velocity")
+    baseline_v = velocity_alert.get("baseline_velocity")
+    delta = velocity_alert.get("delta")
+    baseline_type = velocity_alert.get("baseline_type", "recent average")
+    if current_v is None or baseline_v is None or delta is None:
+        return ""
+
+    if delta > 0:
+        options = [
+            f"His fastball averaged **{current_v:.1f} MPH** here, up from **{baseline_v:.1f} MPH** in his {baseline_type}.",
+            f"He averaged **{current_v:.1f} MPH** on his fastball, a **+{abs(delta):.1f} MPH** jump from his {baseline_type}.",
+        ]
+    else:
+        options = [
+            f"His fastball averaged **{current_v:.1f} MPH** here, down from **{baseline_v:.1f} MPH** in his {baseline_type}.",
+            f"He averaged **{current_v:.1f} MPH** on his fastball, a **-{abs(delta):.1f} MPH** dip from his {baseline_type}.",
+        ]
+    return random.choice(options)
+
+
 async def post_velocity_card(channel, meta: dict, velocity_alert: dict):
     team = meta.get("team", "UNK")
     name = meta.get("name", "Unknown Pitcher")
@@ -1926,7 +1949,7 @@ def get_pitchers(feed: dict):
 
 # ---------------- POST ----------------
 
-async def post_card(channel, p: dict, matchup: str, score: str, context: dict, streak_count: int, tracked_info: dict, recent_appearances):
+async def post_card(channel, p: dict, matchup: str, score: str, context: dict, streak_count: int, tracked_info: dict, recent_appearances, velocity_alert=None):
     s = {
         "ip": str(p["stats"].get("inningsPitched", "0.0")),
         "h": safe_int(p["stats"].get("hits", 0), 0),
@@ -1963,18 +1986,24 @@ async def post_card(channel, p: dict, matchup: str, score: str, context: dict, s
     embed.add_field(name="Game Line", value=format_game_line(s), inline=False)
     embed.add_field(name="Pitch Count", value=format_pitch_count(p["stats"]), inline=False)
     embed.add_field(name="Season", value=format_season_line(p.get("season_stats", {})), inline=False)
+    summary_text = build_summary(
+        p["name"],
+        p["team"],
+        s,
+        label,
+        context,
+        streak_count,
+        tracked_info,
+        recent_appearances,
+    )
+    if tracked_info:
+        velocity_sentence = build_velocity_summary_sentence(velocity_alert)
+        if velocity_sentence:
+            summary_text = f"{summary_text} {velocity_sentence}"
+
     embed.add_field(
         name="Summary",
-        value=build_summary(
-            p["name"],
-            p["team"],
-            s,
-            label,
-            context,
-            streak_count,
-            tracked_info,
-            recent_appearances,
-        ),
+        value=summary_text,
         inline=False,
     )
     embed.add_field(name="Final", value=score, inline=False)
@@ -2069,11 +2098,11 @@ async def loop():
                         continue
 
                     streak_count = get_streak_count(pitcher_id, game_date_et)
-                    log(f"Posting {p['name']} | {p['team']} | {matchup}")
-                    await post_card(channel, p, matchup, score, context, streak_count, tracked_info, recent_appearances)
-
                     velocity_alert = build_velocity_alert(current_app, recent_for_trend)
-                    if should_post_velocity_alert(state, pitcher_id, game_id, velocity_alert, now_et):
+                    log(f"Posting {p['name']} | {p['team']} | {matchup}")
+                    await post_card(channel, p, matchup, score, context, streak_count, tracked_info, recent_appearances, velocity_alert=velocity_alert)
+
+                    if (not is_tracked) and should_post_velocity_alert(state, pitcher_id, game_id, velocity_alert, now_et):
                         log(f"Velocity alert {p['name']} | {p['team']} | {velocity_alert.get('subject')}")
                         await post_velocity_card(
                             channel,
