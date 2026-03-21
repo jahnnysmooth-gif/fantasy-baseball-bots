@@ -1378,90 +1378,221 @@ def choose_best_trend(candidates):
     return random.choices(top_pool, weights=weights, k=1)[0]
 
 
+def trend_window_for_code(code: str) -> int:
+    if code in {"scoreless5", "scoreless4of5", "ks10last5", "runs3of5"}:
+        return 5
+    if code in {"k_3_of_4"}:
+        return 4
+    if code in {"saves2"}:
+        return 2
+    return 3
+
+
+def outs_to_baseball_ip(outs: int) -> str:
+    whole = outs // 3
+    rem = outs % 3
+    return f"{whole}.{rem}"
+
+
+def summarize_trend_span(recent_appearances, code: str):
+    window = trend_window_for_code(code)
+    span = list(recent_appearances[:window])
+    if not span:
+        return {"window": window, "span": [], "outs": 0, "ip": "0.0", "k": 0, "bb": 0, "h": 0, "er": 0, "avg_fastball_velocity": None}
+
+    outs = sum(baseball_ip_to_outs(app.get("ip", "0.0")) for app in span)
+    prior_with_velo = [safe_float(app.get("avg_fastball_velocity"), 0.0) for app in span if app.get("avg_fastball_velocity") is not None]
+    avg_velo = round(sum(prior_with_velo) / len(prior_with_velo), 1) if prior_with_velo else None
+    return {
+        "window": window,
+        "span": span,
+        "outs": outs,
+        "ip": outs_to_baseball_ip(outs),
+        "k": sum(safe_int(app.get("k", 0), 0) for app in span),
+        "bb": sum(safe_int(app.get("bb", 0), 0) for app in span),
+        "h": sum(safe_int(app.get("h", 0), 0) for app in span),
+        "er": sum(safe_int(app.get("er", 0), 0) for app in span),
+        "avg_fastball_velocity": avg_velo,
+    }
+
+
+def extract_prior_season_velocity(season_stats: dict):
+    if not isinstance(season_stats, dict):
+        return None
+    keys = [
+        "avgFastballVelocity",
+        "averageFastballVelocity",
+        "fastballVelocity",
+        "fourSeamFastballVelocity",
+        "fbVelocity",
+        "avg_fastball_velocity",
+    ]
+    for key in keys:
+        value = season_stats.get(key)
+        if value not in (None, "", "-"):
+            val = safe_float(value, 0.0)
+            if val > 0:
+                return round(val, 1)
+    return None
+
+
+def build_trend_stat_sentence(name: str, code: str, span_stats: dict):
+    k_text = stat_phrase(span_stats.get("k", 0), "strikeout")
+    bb_text = stat_phrase(span_stats.get("bb", 0), "walk")
+    ip_text = f"{span_stats.get('ip', '0.0')} innings"
+    window = span_stats.get("window", 3)
+
+    scoreless_templates = [
+        f"During that {window}-appearance stretch, he has {k_text} against {bb_text}.",
+        f"He has covered {ip_text} during that run, with {k_text} and {bb_text}.",
+        f"The stretch has come with {k_text} over {ip_text}, and only {bb_text}.",
+    ]
+    strikeout_templates = [
+        f"That run has also come with {bb_text} over {ip_text}.",
+        f"He has paired the swing-and-miss with {bb_text} over {ip_text} in that span.",
+        f"Over that stretch, he has worked {ip_text} while keeping it to {bb_text}.",
+    ]
+    rough_templates = [
+        f"Across that stretch, he has still managed {k_text}, but the run prevention has slipped.",
+        f"The recent stretch covers {ip_text}, with {k_text} and {bb_text}, but too many runs have crossed.",
+    ]
+    role_templates = [
+        f"Over that stretch, he has logged {ip_text} with {k_text} against {bb_text}.",
+        f"That span has come with {k_text} and only {bb_text} over {ip_text}.",
+    ]
+
+    if code in {"scoreless3", "scoreless5", "scoreless4of5"}:
+        return random.choice(scoreless_templates)
+    if code in {"ks10last5", "ks7last3", "k_streak3", "dominant_last3", "dominant_k_combo", "no_walk3", "k_3_of_4"}:
+        return random.choice(strikeout_templates)
+    if code in {"runs2of3", "runs3of5", "scoreless_snapped", "first_rough_after_hot"}:
+        return random.choice(rough_templates)
+    return random.choice(role_templates)
+
+
+def build_trend_velocity_sentence(name: str, span_stats: dict, season_stats: dict):
+    span_v = span_stats.get("avg_fastball_velocity")
+    season_v = extract_prior_season_velocity(season_stats)
+    if span_v is None or season_v is None:
+        return ""
+
+    delta = round(span_v - season_v, 1)
+    if abs(delta) < 0.7:
+        return ""
+
+    change_text = f"{abs(delta):.1f} MPH"
+    if delta > 0:
+        options = [
+            f"His fastball has also averaged **{span_v:.1f} MPH** during that stretch, up **{change_text}** from last season.",
+            f"There has been a little more life on the fastball too, with that run coming at **{span_v:.1f} MPH**, or **{change_text}** above last season.",
+        ]
+    else:
+        options = [
+            f"The one thing to watch is the fastball, which has averaged **{span_v:.1f} MPH** during that stretch, down **{change_text}** from last season.",
+            f"That run has come with a fastball average of **{span_v:.1f} MPH**, which sits **{change_text}** below last season.",
+        ]
+    return random.choice(options)
+
+
 def build_trend_analysis(name: str, team: str, trend: dict, recent_appearances, season_stats: dict):
     code = trend.get("code")
     info = recent_window_summary(recent_appearances)
+    span_stats = summarize_trend_span(recent_appearances, code)
     templates = {
         "scoreless3": [
-            f"{name} has now strung together three straight scoreless outings. The recent form has been sharp, and he is forcing his way onto the radar in this bullpen.",
-            f"{name} has put together three straight scoreless appearances and keeps stacking clean work. This is the kind of run that can push a reliever into more meaningful opportunities.",
+            f"{name} has now strung together three straight scoreless outings, and the recent form has been sharp.",
+            f"{name} has put together three straight scoreless appearances and keeps stacking clean work.",
+            f"Three straight scoreless outings have started to put {name} on the radar in this bullpen.",
         ],
         "scoreless5": [
-            f"{name} has now turned in five straight scoreless outings, one of the better recent runs in this bullpen. The consistency has stood out, and his name is becoming harder to ignore.",
-            f"Five straight scoreless appearances have put {name} firmly on the radar in this bullpen. He keeps getting results, and stretches like this can change a reliever's place quickly.",
+            f"{name} has now turned in five straight scoreless outings, one of the better recent runs in this bullpen.",
+            f"{name} has now logged five straight scoreless outings, giving him one of the stronger recent runs in this bullpen.",
+            f"Five straight scoreless appearances have put {name} firmly on the radar in this bullpen.",
         ],
         "scoreless4of5": [
-            f"{name} has been scoreless in four of his last five outings and is building real momentum. The recent body of work is strong enough to make him worth tracking more closely.",
+            f"{name} has been scoreless in four of his last five outings and is building real momentum.",
+            f"{name} has put together scoreless work in four of his last five appearances and the recent body of work is starting to stand out.",
         ],
         "ks10last5": [
-            f"{name} has racked up {info.get('ks_last5', 0)} strikeouts over his last five appearances and the bat-missing has become impossible to miss. This is the kind of swing-and-miss stretch that can open bigger doors.",
+            f"{name} has racked up {number_word(info.get('ks_last5', 0))} strikeouts over his last five appearances and the bat-missing has become impossible to miss.",
+            f"Over his last five outings, {name} has piled up {number_word(info.get('ks_last5', 0))} strikeouts and the swing-and-miss has jumped off the page.",
         ],
         "ks7last3": [
-            f"{name} has piled up {info.get('ks_last3', 0)} strikeouts across his last three outings and is missing bats at a high rate. The recent stuff has jumped off the page.",
-            f"Strikeouts are starting to pile up for {name}, who has {info.get('ks_last3', 0)} over his last three appearances. That kind of bat-missing can move a reliever up the ladder in a hurry.",
+            f"{name} has piled up {number_word(info.get('ks_last3', 0))} strikeouts across his last three outings and is missing bats at a high rate.",
+            f"Strikeouts are starting to pile up for {name}, who has {number_word(info.get('ks_last3', 0))} over his last three appearances.",
         ],
         "k_streak3": [
-            f"{name} has recorded a strikeout in three straight outings and keeps bringing swing-and-miss to the mound. The recent run gives him some real momentum.",
+            f"{name} has recorded a strikeout in three straight outings and keeps bringing swing-and-miss to the mound.",
         ],
         "dominant_last3": [
-            f"{name} has delivered multiple dominant appearances over his last three turns and is clearly in a strong stretch. The recent form has looked a level above ordinary middle relief work.",
+            f"{name} has delivered multiple dominant appearances over his last three turns and is clearly in a strong stretch.",
         ],
         "dominant_k_combo": [
-            f"{name} has stacked power outings lately, with multiple recent appearances featuring scoreless work and at least two strikeouts. That kind of combination gets attention fast.",
+            f"{name} has stacked power outings lately, with multiple recent appearances featuring scoreless work and at least two strikeouts.",
         ],
         "no_walk3": [
-            f"{name} has gone three straight outings without issuing a walk, and the recent command has been a real positive. Clean strike-throwing runs like this tend to matter.",
+            f"{name} has gone three straight outings without issuing a walk, and the recent command has been a real positive.",
         ],
         "saves2": [
-            f"{name} has converted saves in back-to-back appearances and is starting to show up in more meaningful spots. That usage is worth keeping an eye on.",
+            f"{name} has converted saves in back-to-back appearances and is starting to show up in more meaningful spots.",
         ],
         "holds3": [
-            f"{name} has now collected holds in three straight appearances and continues to show up in useful spots. The trust level looks to be moving in the right direction.",
+            f"{name} has now collected holds in three straight appearances and continues to show up in useful spots.",
         ],
         "multi_inning3": [
-            f"{name} has put together a string of successful multi-inning outings, giving this bullpen useful length without sacrificing results. That kind of work can earn a bigger role over time.",
+            f"{name} has put together a string of successful multi-inning outings, giving this bullpen useful length without sacrificing results.",
         ],
         "bounce_blown": [
-            f"After a blown save last time out, {name} answered with a clean bounce-back appearance. That helps settle the recent form and keeps him from drifting the wrong way.",
+            f"After a blown save last time out, {name} answered with a clean bounce-back appearance.",
         ],
         "bounce_rough": [
-            f"{name} bounced back with a cleaner outing after running into trouble previously. It was a needed response and a step back in the right direction.",
+            f"{name} bounced back with a cleaner outing after running into trouble previously.",
         ],
         "clean_rebound_2bad": [
-            f"After two rougher appearances, {name} steadied things with a clean rebound outing. He needed a better line, and this was at least a start.",
+            f"After two rougher appearances, {name} steadied things with a clean rebound outing.",
         ],
         "runs2of3": [
-            f"{name} has now allowed runs in two of his last three appearances, and the recent form is starting to turn shaky. He will need a cleaner outing soon to stop the slide.",
+            f"{name} has now allowed runs in two of his last three appearances, and the recent form is starting to turn shaky.",
         ],
         "runs3of5": [
-            f"{name} has been tagged in three of his last five outings, and the recent trend has gone in the wrong direction. The results have been too uneven to ignore.",
+            f"{name} has been tagged in three of his last five outings, and the recent trend has gone in the wrong direction.",
         ],
         "scoreless_snapped": [
-            f"A scoreless run came to an end for {name}, who had been putting together cleaner work lately. The recent momentum took a hit with this one.",
+            f"A scoreless run came to an end for {name}, who had been putting together cleaner work lately.",
         ],
         "first_rough_after_hot": [
-            f"{name} hit his first real bump after a stronger recent stretch. One outing does not erase the progress, but it does cool the momentum a bit.",
+            f"{name} hit his first real bump after a stronger recent stretch.",
         ],
         "late_inning_clean": [
-            f"{name} handled another clean late-inning look and continues to see work that matters more than ordinary middle relief. That is the kind of deployment shift worth noticing.",
+            f"{name} handled another clean late-inning look and continues to see work that matters more than ordinary middle relief.",
         ],
         "higher_leverage_usage": [
-            f"The recent usage for {name} has started to creep into more meaningful territory, and he answered with another clean line. This looks like a reliever getting a stronger look.",
+            f"The recent usage for {name} has started to creep into more meaningful territory, and he answered with another clean line.",
         ],
         "save_conversion": [
-            f"{name} closed the door in his latest chance and is beginning to show up in spots that matter. Save chances like this can change a bullpen conversation quickly.",
+            f"{name} closed the door in his latest chance and is beginning to show up in spots that matter.",
         ],
     }
-    options = templates.get(code, [f"{name} has put together a notable recent run and is worth monitoring more closely. The recent trend has started to stand out."])
-    body = random.choice(options)
-    second = random.choice([
-        f"He remains a name to watch if this keeps going.",
-        f"This is the sort of stretch that can earn more meaningful work.",
-        f"It is a trend worth monitoring moving forward.",
+    opener = random.choice(templates.get(code, [f"{name} has put together a notable recent run and is worth monitoring more closely."]))
+    stat_sentence = build_trend_stat_sentence(name, code, span_stats)
+    velocity_sentence = build_trend_velocity_sentence(name, span_stats, season_stats)
+    closer_sentence = random.choice([
+        "That is the sort of stretch that can earn more meaningful work.",
+        "Runs like this tend to get a reliever noticed a little more.",
+        "This is a trend worth monitoring moving forward.",
     ])
-    if body.count('.') >= 2:
-        return body
-    return f"{body} {second}"
+
+    sentences = [opener]
+    if stat_sentence:
+        sentences.append(stat_sentence)
+    if velocity_sentence and random.random() < 0.8:
+        sentences.append(velocity_sentence)
+    else:
+        sentences.append(closer_sentence)
+
+    if len(sentences) > 3:
+        sentences = sentences[:3]
+    return " ".join(sentences)
 
 
 def can_post_trend_now(state, now_et: datetime):
