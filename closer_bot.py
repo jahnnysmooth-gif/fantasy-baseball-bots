@@ -418,7 +418,6 @@ def format_season_line(season: dict) -> str:
 
 def classify(s: dict) -> str:
     outs = baseball_ip_to_outs(s["ip"])
-    baserunners = s["h"] + s["bb"]
 
     if s.get("saves"):
         return "SAVE"
@@ -429,16 +428,17 @@ def classify(s: dict) -> str:
     if s.get("holds"):
         return "HOLD"
 
+    if outs >= 3 and s["er"] == 0 and s["h"] == 0 and s["bb"] == 0:
+        return "DOM"
+
     if s["er"] >= 3:
         return "ROUGH"
 
-    if s["er"] == 0 and outs >= 3 and baserunners == 0:
-        if safe_int(s.get("k", 0), 0) >= 2:
-            return "DOM"
-        return "CLEAN"
-
-    if s["er"] == 0 and baserunners >= 1:
+    if s["er"] == 0 and (s["h"] + s["bb"]) >= 2:
         return "TRAFFIC"
+
+    if s["er"] == 0 and outs >= 3:
+        return "CLEAN"
 
     if s["er"] == 0:
         return "RELIEF"
@@ -459,12 +459,13 @@ def grade_outing(s: dict) -> str:
     if s["er"] in {1, 2}:
         return "SHAKY"
 
-    if s["er"] == 0 and baserunners == 0 and outs >= 3:
-        if safe_int(s.get("k", 0), 0) >= 2:
-            return "DOMINANT"
+    if s["er"] == 0 and s["h"] == 0 and s["bb"] == 0 and outs >= 3:
+        return "DOMINANT"
+
+    if s["er"] == 0 and baserunners <= 1 and outs >= 3:
         return "CLEAN"
 
-    if s["er"] == 0 and baserunners >= 1:
+    if s["er"] == 0 and baserunners >= 2:
         return "TRAFFIC"
 
     return "NEUTRAL"
@@ -591,6 +592,7 @@ def get_pitcher_entry_context(feed: dict, pitcher_id: int, pitcher_side: str):
             "entry_outs_text": "",
             "entry_state_text": "",
             "entry_state_kind": "",
+            "entry_margin": 0,
             "entry_inning": None,
             "finished_game": False,
         }
@@ -607,6 +609,7 @@ def get_pitcher_entry_context(feed: dict, pitcher_id: int, pitcher_side: str):
             "entry_outs_text": "",
             "entry_state_text": "",
             "entry_state_kind": "",
+            "entry_margin": 0,
             "entry_inning": None,
             "finished_game": False,
         }
@@ -647,6 +650,7 @@ def get_pitcher_entry_context(feed: dict, pitcher_id: int, pitcher_side: str):
         opp_score = prev_home
 
     diff = team_score - opp_score
+    abs_diff = abs(diff)
 
     if diff > 0:
         state_kind = "lead"
@@ -660,13 +664,12 @@ def get_pitcher_entry_context(feed: dict, pitcher_id: int, pitcher_side: str):
             state_text = f"holding a {diff}-run lead"
     elif diff < 0:
         state_kind = "trailing"
-        deficit = abs(diff)
-        if deficit == 1:
+        if abs_diff == 1:
             state_text = "trailing by one"
-        elif deficit == 2:
+        elif abs_diff == 2:
             state_text = "trailing by two"
         else:
-            state_text = f"trailing by {deficit}"
+            state_text = f"trailing by {abs_diff}"
     else:
         state_kind = "tie"
         state_text = "in a tie game"
@@ -676,9 +679,11 @@ def get_pitcher_entry_context(feed: dict, pitcher_id: int, pitcher_side: str):
         "entry_outs_text": entry_outs_text,
         "entry_state_text": state_text,
         "entry_state_kind": state_kind,
+        "entry_margin": abs_diff,
         "entry_inning": inning,
         "finished_game": (last_idx == len(plays) - 1),
     }
+
 
 
 def build_context_phrase(context: dict) -> str:
@@ -869,6 +874,233 @@ def get_streak_sentence(streak_count: int) -> str:
     return ""
 
 
+def ordinal_word(n: int) -> str:
+    mapping = {1: "first", 2: "second", 3: "third", 4: "fourth", 5: "fifth"}
+    return mapping.get(n, f"{number_word(n)}th")
+
+
+def get_recent_usage_snapshot(pitcher_id: int, game_date_et):
+    if pitcher_id is None or game_date_et is None:
+        return {"pitched_yesterday": False, "pitched_two_days_ago": False, "apps_last4": 1, "apps_last6": 1}
+
+    yesterday = game_date_et - timedelta(days=1)
+    two_days_ago = game_date_et - timedelta(days=2)
+
+    pitched_yesterday = pitcher_id in get_pitcher_ids_for_date(yesterday)
+    pitched_two_days_ago = pitcher_id in get_pitcher_ids_for_date(two_days_ago)
+
+    apps_last4 = 1
+    check_date = yesterday
+    for _ in range(3):
+        if pitcher_id in get_pitcher_ids_for_date(check_date):
+            apps_last4 += 1
+        check_date -= timedelta(days=1)
+
+    apps_last6 = 1
+    check_date = yesterday
+    for _ in range(5):
+        if pitcher_id in get_pitcher_ids_for_date(check_date):
+            apps_last6 += 1
+        check_date -= timedelta(days=1)
+
+    return {
+        "pitched_yesterday": pitched_yesterday,
+        "pitched_two_days_ago": pitched_two_days_ago,
+        "apps_last4": apps_last4,
+        "apps_last6": apps_last6,
+    }
+
+
+def build_usage_sentence(usage: dict) -> str:
+    if not usage:
+        return ""
+
+    apps_last4 = safe_int(usage.get("apps_last4", 0), 0)
+    apps_last6 = safe_int(usage.get("apps_last6", 0), 0)
+
+    if apps_last4 >= 3:
+        return random.choice([
+            f"It was already his {ordinal_word(apps_last4)} appearance in four days, so the recent workload is worth keeping in mind.",
+            f"He has now worked {number_word(apps_last4)} times in four days, which matters for short-term availability.",
+            f"The recent usage has been fairly active, with {number_word(apps_last4)} appearances in four days.",
+        ])
+
+    if usage.get("pitched_yesterday"):
+        return random.choice([
+            "It was his second straight day of work.",
+            "He was back out there after pitching yesterday.",
+            "This came on back-to-back days for him.",
+        ])
+
+    if apps_last6 >= 4:
+        return random.choice([
+            f"He has been in the mix often lately, with {number_word(apps_last6)} appearances in six days.",
+            f"This was already his {ordinal_word(apps_last6)} outing in six days, so the recent usage is starting to stack up.",
+        ])
+
+    return ""
+
+
+def leverage_bucket(context: dict) -> str:
+    if not context:
+        return "neutral"
+
+    inning = safe_int(context.get("entry_inning"), 0)
+    state = context.get("entry_state_kind", "")
+    margin = safe_int(context.get("entry_margin", 0), 0)
+
+    if state == "tie" and inning >= 7:
+        return "high"
+    if state == "lead" and inning >= 8 and margin <= 2:
+        return "high"
+    if state == "lead" and inning >= 7 and margin <= 3:
+        return "medium"
+    if state == "trailing" and inning >= 7 and margin <= 2:
+        return "medium"
+    if margin >= 5:
+        return "low"
+    return "neutral"
+
+
+def build_velocity_inline_sentence(velocity_alert: dict) -> str:
+    if not velocity_alert:
+        return ""
+
+    current_v = velocity_alert.get("current_velocity")
+    baseline_v = velocity_alert.get("baseline_velocity")
+    delta = velocity_alert.get("delta")
+    baseline_type = velocity_alert.get("baseline_type", "recent average")
+
+    if current_v is None or baseline_v is None or delta is None:
+        return ""
+
+    change = abs(delta)
+    if delta > 0:
+        return random.choice([
+            f"His fastball averaged {current_v:.1f} MPH here, up from {baseline_v:.1f} MPH in his {baseline_type}.",
+            f"He also got a little extra life on the fastball, averaging {current_v:.1f} MPH after sitting at {baseline_v:.1f} MPH in his {baseline_type}.",
+            f"The fastball ticked up to {current_v:.1f} MPH in this outing, a {change:.1f} MPH jump from his {baseline_type}.",
+        ])
+
+    return random.choice([
+        f"His fastball averaged {current_v:.1f} MPH here, down from {baseline_v:.1f} MPH in his {baseline_type}.",
+        f"The fastball backed up a bit to {current_v:.1f} MPH in this outing, a {change:.1f} MPH dip from his {baseline_type}.",
+        f"He averaged {current_v:.1f} MPH on the fastball, which was a little below the {baseline_v:.1f} MPH mark from his {baseline_type}.",
+    ])
+
+
+def trend_window_for_code(code: str) -> int:
+    if code in {"scoreless5", "scoreless4of5", "ks10last5", "runs3of5"}:
+        return 5
+    if code == "k_3_of_4":
+        return 4
+    if code == "saves2":
+        return 2
+    return 3
+
+
+def outs_to_baseball_ip(outs: int) -> str:
+    return f"{outs // 3}.{outs % 3}"
+
+
+def summarize_trend_span(recent_appearances, code: str):
+    window = trend_window_for_code(code)
+    span = list(recent_appearances[:window])
+    if not span:
+        return {"window": window, "span": [], "outs": 0, "ip": "0.0", "k": 0, "bb": 0, "h": 0, "er": 0, "avg_fastball_velocity": None}
+
+    outs = sum(baseball_ip_to_outs(app.get("ip", "0.0")) for app in span)
+    velos = [safe_float(app.get("avg_fastball_velocity"), 0.0) for app in span if app.get("avg_fastball_velocity") is not None]
+    return {
+        "window": window,
+        "span": span,
+        "outs": outs,
+        "ip": outs_to_baseball_ip(outs),
+        "k": sum(safe_int(app.get("k", 0), 0) for app in span),
+        "bb": sum(safe_int(app.get("bb", 0), 0) for app in span),
+        "h": sum(safe_int(app.get("h", 0), 0) for app in span),
+        "er": sum(safe_int(app.get("er", 0), 0) for app in span),
+        "avg_fastball_velocity": round(sum(velos) / len(velos), 1) if velos else None,
+    }
+
+
+def extract_prior_season_velocity(season_stats: dict):
+    if not isinstance(season_stats, dict):
+        return None
+
+    for key in [
+        "avgFastballVelocity",
+        "averageFastballVelocity",
+        "fastballVelocity",
+        "fourSeamFastballVelocity",
+        "fbVelocity",
+        "avg_fastball_velocity",
+    ]:
+        value = season_stats.get(key)
+        if value not in (None, "", "-"):
+            parsed = safe_float(value, 0.0)
+            if parsed > 0:
+                return round(parsed, 1)
+    return None
+
+
+def build_trend_stat_sentence(name: str, code: str, span_stats: dict):
+    k_text = stat_phrase(span_stats.get("k", 0), "strikeout")
+    bb_text = stat_phrase(span_stats.get("bb", 0), "walk")
+    ip_text = f"{span_stats.get('ip', '0.0')} innings"
+    window = span_stats.get("window", 3)
+
+    if code in {"scoreless3", "scoreless5", "scoreless4of5"}:
+        return random.choice([
+            f"During that {window}-appearance stretch, he has {k_text} against {bb_text}.",
+            f"He has covered {ip_text} during that run, with {k_text} and {bb_text}.",
+            f"The stretch has come with {k_text} over {ip_text}, and only {bb_text}.",
+        ])
+
+    if code in {"ks10last5", "ks7last3", "k_streak3", "dominant_last3", "dominant_k_combo", "no_walk3", "k_3_of_4"}:
+        return random.choice([
+            f"That run has also come with {bb_text} over {ip_text}.",
+            f"He has paired the swing-and-miss with {bb_text} over {ip_text} in that span.",
+            f"Over that stretch, he has worked {ip_text} while keeping it to {bb_text}.",
+        ])
+
+    if code in {"runs2of3", "runs3of5", "scoreless_snapped", "first_rough_after_hot"}:
+        return random.choice([
+            f"Across that stretch, he has still managed {k_text}, but the run prevention has slipped.",
+            f"The recent stretch covers {ip_text}, with {k_text} and {bb_text}, but too many runs have crossed.",
+        ])
+
+    return random.choice([
+        f"Over that stretch, he has logged {ip_text} with {k_text} against {bb_text}.",
+        f"That span has come with {k_text} and only {bb_text} over {ip_text}.",
+    ])
+
+
+def build_trend_velocity_sentence(name: str, span_stats: dict, season_stats: dict):
+    span_v = span_stats.get("avg_fastball_velocity")
+    season_v = extract_prior_season_velocity(season_stats)
+    if span_v is None or season_v is None:
+        return ""
+
+    delta = round(span_v - season_v, 1)
+    if abs(delta) < 0.7:
+        return ""
+
+    diff_text = f"{abs(delta):.1f} MPH"
+    if delta > 0:
+        return random.choice([
+            f"His fastball has also averaged {span_v:.1f} MPH during that stretch, up {diff_text} from last season.",
+            f"There has been a little more life on the fastball too, with that run coming at {span_v:.1f} MPH, or {diff_text} above last season.",
+            f"That stretch has come with a fastball average of {span_v:.1f} MPH, which sits {diff_text} above last season.",
+        ])
+
+    return random.choice([
+        f"The one thing to watch is the fastball, which has averaged {span_v:.1f} MPH during that stretch, down {diff_text} from last season.",
+        f"That run has come with a fastball average of {span_v:.1f} MPH, which sits {diff_text} below last season.",
+        f"The fastball has been a little lighter during that stretch, averaging {span_v:.1f} MPH and sitting {diff_text} below last season.",
+    ])
+
+
 # ---------------- LANGUAGE HELPERS ----------------
 
 def strikeout_phrase(k: int) -> str:
@@ -888,12 +1120,10 @@ def build_analysis(p: dict, s: dict, label: str, context: dict, tracked_info: di
     role = infer_role_from_tracked_info(tracked_info)
     outing_grade = grade_outing(s)
     trend = get_recent_trend(recent_appearances)
+    leverage = leverage_bucket(context)
 
-    outs = baseball_ip_to_outs(s["ip"])
     inning = context.get("entry_inning")
     state_kind = context.get("entry_state_kind", "")
-    finished_game = context.get("finished_game", False)
-
     early_closer_usage = (
         role == "closer"
         and inning is not None
@@ -901,246 +1131,199 @@ def build_analysis(p: dict, s: dict, label: str, context: dict, tracked_info: di
         and state_kind in {"lead", "tie"}
     )
 
-    # Micro outings should stay short and neutral.
     if outing_grade == "MICRO":
         if role == "closer" and early_closer_usage:
-            options = [
-                "He was called on early for a high-leverage spot and got the out.",
-                "He handled an early leverage pocket and recorded the out.",
-                "He was used before the ninth in an important spot and did his job.",
-                "He got the lone hitter he faced in a leverage spot.",
-            ]
-            return random.choice(options)
-
-        if label == "HOLD":
-            options = [
-                "He got the one hitter he faced to help secure the hold.",
-                "He retired the lone batter he faced and helped finish the bridge inning.",
-                "He handled his one matchup cleanly in a hold situation.",
-            ]
-            return random.choice(options)
-
-        options = [
+            return random.choice([
+                "He was called on early for a leverage pocket and got the out.",
+                "He handled an early high-leverage matchup and recorded the out.",
+                "The usage itself says a lot here, as he was trusted in an important spot before the ninth.",
+            ])
+        if leverage == "high":
+            return random.choice([
+                "He was asked to get one important out and did it.",
+                "He got the key matchup in a leverage spot and finished the job.",
+                "This was brief work, but it came in a meaningful moment.",
+            ])
+        return random.choice([
             "He got the one hitter he faced.",
             "He retired the lone batter he faced.",
             "He handled his brief assignment cleanly.",
-            "He recorded the out he was asked to get.",
-        ]
-        return random.choice(options)
+        ])
 
-    # Bad lines override label positivity.
     if outing_grade in {"SHAKY", "ROUGH"}:
+        traffic = s["h"] + s["bb"]
         if label == "SAVE":
-            options = [
-                "He got the save, but this wasn’t a clean outing.",
-                "He finished it off, though the line was shakier than you’d want from a closer.",
-                "The save counts, but this one came with some blemishes.",
-                "He converted the chance, but the outing itself was far from crisp.",
-            ]
-            return random.choice(options)
-
+            return random.choice([
+                "He got the save, but this was shakier than you would want from a closer.",
+                "The save counts, though the outing itself left more damage than expected.",
+                "He converted the chance, but the line was not especially crisp.",
+            ])
         if label == "HOLD":
-            options = [
-                "He got the hold, but this wasn’t a clean outing.",
-                "The hold is there, though the line itself was shaky.",
-                "He picked up the hold, but the appearance brought more damage than you’d like.",
-                "He escaped with the hold, even if the outing itself was messy.",
-            ]
-            return random.choice(options)
-
+            if traffic >= 3:
+                return random.choice([
+                    "He still got the hold, but too much traffic built up for this to feel clean.",
+                    "The hold is there, though the inning got away from him more than you would like.",
+                    "He escaped with the hold, but it was a messy bridge inning.",
+                ])
+            return random.choice([
+                "He got the hold, but this was not a clean outing.",
+                "The hold is there, though the appearance itself was shakier than the label suggests.",
+                "He picked up the hold, but the line did not come with much comfort.",
+            ])
         if label == "BLOWN":
-            options = [
-                "This was a rough result in a leverage spot.",
-                "He couldn’t keep the inning under control when the game tightened up.",
-                "It was a tough look in a high-leverage chance.",
-                "The line reflects a costly outing late in the game.",
-            ]
-            return random.choice(options)
-
+            return random.choice([
+                "This was a costly miss in a leverage spot.",
+                "He could not keep the inning under control when the game tightened up.",
+                "It was a rough result in a moment that mattered.",
+            ])
+        if s["bb"] >= 2:
+            return random.choice([
+                "The command backed up on him, and the inning got loose in a hurry.",
+                "Too many free passes put him in a bad spot here.",
+                "The line points more to command trouble than clean execution.",
+            ])
+        if s["h"] >= 2:
+            return random.choice([
+                "He gave up too much contact for the outing to hold together.",
+                "The traffic turned into real damage before he could settle in.",
+                "There was too much contact here for this to qualify as a usable line.",
+            ])
         if trend == "DOWN":
-            options = [
-                "This was another shaky outing, and the recent form isn’t helping his case.",
-                "He’s in a rough patch right now, and this one added to it.",
-                "The recent trend has been uneven, and this outing didn’t change that.",
-            ]
-            return random.choice(options)
+            return random.choice([
+                "This was another uneven outing, and the recent form is starting to matter.",
+                "He has been in a rougher stretch lately, and this one kept that going.",
+                "The recent trend has been shaky, and this did not change it.",
+            ])
+        return random.choice([
+            "This was more survival than execution.",
+            "He got through part of the inning, but the line was far from sharp.",
+            "The outing brought more trouble than help.",
+        ])
 
-        options = [
-            "This wasn’t a clean line, even if he got through the inning.",
-            "He allowed too much traffic for this to qualify as a sharp outing.",
-            "The line was more uneven than effective here.",
-            "This was more survival than dominance.",
-        ]
-        return random.choice(options)
-
-    # Closer-specific clean outcomes, only if role is verified.
     if role == "closer":
-        if early_closer_usage and label in {"SAVE", "HOLD"}:
-            early_options = [
-                "He was called on before the ninth in a high-leverage spot and handled it like the bullpen anchor.",
+        if early_closer_usage and leverage in {"high", "medium"} and label in {"SAVE", "HOLD"}:
+            return random.choice([
                 "The early usage shows this was one of the biggest spots in the game, and he answered it.",
-                "Being used before the ninth speaks to the leverage of the moment, and he came through.",
-                "He got the biggest pocket before the ninth and handled it cleanly.",
-            ]
-            if outing_grade in {"DOMINANT", "CLEAN", "TRAFFIC"}:
-                return random.choice(early_options)
-
+                "Being used before the ninth says plenty about the leverage of the moment, and he handled it.",
+                "He got the toughest spot before the ninth and came through.",
+            ])
         if label == "SAVE":
             if outing_grade == "DOMINANT":
-                base = [
+                return random.choice([
+                    "He still looks like the clear closer here, and outings like this only reinforce it.",
                     "He remains firmly in control of the ninth inning.",
-                    "He still looks like the clear closer here.",
-                    "He keeps a strong hold on save chances in this bullpen.",
-                    "He continues to look like the go-to arm in the ninth.",
-                ]
-                trend_up = [
-                    "He remains firmly in control of the ninth and has backed it up over his recent outings.",
-                    "He still looks like the clear closer here, and the recent form supports it.",
-                    "He keeps a strong hold on the ninth with another good outing in a solid recent stretch.",
-                ]
-                if trend == "UP":
-                    return random.choice(trend_up)
-                return random.choice(base)
-
-            if outing_grade in {"CLEAN", "TRAFFIC", "NEUTRAL"}:
-                options = [
-                    "He still looks like the clear ninth-inning option here.",
-                    "He remains the top save arm in this bullpen.",
-                    "He continues to hold the closer role here.",
-                    "He still looks like the primary answer for saves.",
-                ]
-                return random.choice(options)
-
+                    "He keeps a strong grip on save chances in this bullpen.",
+                ])
+            return random.choice([
+                "He still looks like the primary answer for saves here.",
+                "He remains the top save arm in this bullpen.",
+                "The role still runs through him in the ninth.",
+            ])
         if label == "BLOWN":
-            options = [
-                "One outing doesn’t rewrite the hierarchy, but this does add a little short-term pressure.",
-                "He’s still the closer here, though this result will draw more attention than usual.",
-                "The role may still be his, but this is the kind of outing that gets noticed.",
-                "This doesn’t erase the role, but it does create some short-term doubt.",
-            ]
-            return random.choice(options)
-
-        # verified closer, but not in a save event
-        options = [
+            return random.choice([
+                "One outing does not rewrite the hierarchy, but it does bring a little short-term pressure.",
+                "The role may still be his, though this is the kind of outing that gets noticed.",
+                "This does not erase his place, but it does turn up the attention for the next outing.",
+            ])
+        return random.choice([
             "He remains one of the key late-game arms in this bullpen.",
             "He still looks like a central leverage piece for this staff.",
-            "He continues to handle important late-game work.",
-        ]
-        return random.choice(options)
+            "He continues to work the innings that matter most.",
+        ])
 
-    # Committee / save-mix language
     if role == "committee":
         if label == "SAVE":
-            options = [
+            return random.choice([
                 "This keeps him firmly in the save mix.",
-                "He helped his case for future save chances.",
-                "In a fluid bullpen, this outing keeps him squarely in the conversation.",
-                "This should keep him in the late-inning mix for chances.",
-            ]
-            return random.choice(options)
+                "In a fluid bullpen, this outing helps his case for the next chance.",
+                "He stays squarely in the late-inning conversation here.",
+            ])
+        return random.choice([
+            "He remains in the late-inning mix for this bullpen.",
+            "In a fluid bullpen, outings like this help his standing.",
+            "This keeps him relevant in a bullpen without a locked-in pecking order.",
+        ])
 
-        if label in {"HOLD", "DOM", "CLEAN"}:
-            options = [
-                "He remains in the late-inning mix for this bullpen.",
-                "This keeps him relevant in a bullpen without a fully settled pecking order.",
-                "He continues to strengthen his case for meaningful leverage work.",
-                "In a fluid bullpen, outings like this help his standing.",
-            ]
-            return random.choice(options)
-
-    # Setup / high-leverage but not closer
-    if role == "setup":
-        if label == "HOLD":
-            if outing_grade == "DOMINANT" and trend == "UP":
-                options = [
-                    "He remains a trusted setup option and has been trending the right way lately.",
-                    "He continues to handle leverage work well, and the recent run supports that.",
-                    "He’s one of the steadier bridge arms here, and the recent form has been strong.",
-                ]
-                return random.choice(options)
-
+    if role in {"setup", "leverage_arm"}:
+        if leverage == "high":
             if outing_grade == "DOMINANT":
-                options = [
-                    "He continues to handle important late-inning work.",
-                    "He remains a trusted setup option here.",
-                    "He keeps himself firmly in the leverage mix.",
-                    "He continues to hold a meaningful late-inning role.",
-                ]
-                return random.choice(options)
-
-            if outing_grade in {"CLEAN", "TRAFFIC", "NEUTRAL"}:
-                options = [
-                    "He remains one of the more trusted bridge arms here.",
-                    "He continues to work meaningful late-inning spots.",
-                    "He stays in the leverage mix with another useful outing.",
-                    "He continues to be a factor in setup situations.",
-                ]
-                return random.choice(options)
-
+                return random.choice([
+                    "He handled a leverage spot the way trusted bridge arms are supposed to.",
+                    "This was high-value work, and he looked the part.",
+                    "He answered a meaningful spot and strengthened his standing in the late-inning mix.",
+                ])
+            return random.choice([
+                "He keeps showing up in meaningful innings for this bullpen.",
+                "The usage still points to a trusted late-inning role.",
+                "He remains one of the steadier bridge options here.",
+            ])
         if outing_grade == "DOMINANT":
-            if trend == "UP":
-                options = [
-                    "He’s putting together a strong run and looks like a rising leverage arm.",
-                    "The recent form has been good, and outings like this keep him moving up the leverage ladder.",
-                    "He’s been building momentum lately, and this was another strong step.",
-                ]
-                return random.choice(options)
+            return random.choice([
+                "He looked sharp again and keeps himself in the leverage mix.",
+                "This was another strong step for a reliever already working in useful spots.",
+                "He continues to make the case for more meaningful innings.",
+            ])
 
-            options = [
-                "This was a strong outing from a pitcher already working in meaningful spots.",
-                "He looked sharp in another important inning for this bullpen.",
-                "He continues to make his case as a trusted late-inning arm.",
-            ]
-            return random.choice(options)
+    if leverage == "low":
+        if outing_grade in {"CLEAN", "DOMINANT"}:
+            return random.choice([
+                "The game state was softer, but he still did exactly what he needed to do.",
+                "It was lower-leverage work, though he handled it efficiently.",
+                "He took care of a softer spot without much trouble.",
+            ])
+        return random.choice([
+            "The spot carried lighter leverage, but the line still got messy.",
+            "Even in a softer game state, the inning brought more trouble than expected.",
+        ])
 
-    # Generic relief language
     if outing_grade == "DOMINANT":
         if trend == "UP":
-            options = [
-                "He’s putting together a solid recent run of work.",
+            return random.choice([
+                "He is putting together a strong recent run of work.",
                 "The recent form has been good, and this outing fit that trend.",
-                "He’s been stringing together cleaner appearances lately.",
-            ]
-            return random.choice(options)
-
-        options = [
+                "He has been stringing together sharper appearances lately.",
+            ])
+        return random.choice([
             "This was a strong outing.",
             "He turned in one of his sharper appearances here.",
             "He handled the inning cleanly and effectively.",
-            "It was a crisp line from start to finish.",
-        ]
-        return random.choice(options)
+        ])
 
     if outing_grade == "CLEAN":
-        options = [
+        if leverage == "high":
+            return random.choice([
+                "That is the sort of clean inning that can earn more trust.",
+                "A clean line in a meaningful inning will play well in this bullpen.",
+                "Handling a real leverage spot cleanly is always useful for a reliever's standing.",
+            ])
+        return random.choice([
             "He handled the inning cleanly.",
             "This was a steady, effective appearance.",
             "He did his job without much trouble.",
-            "He gave them a solid inning here.",
-        ]
-        return random.choice(options)
+        ])
 
     if outing_grade == "TRAFFIC":
-        options = [
+        if leverage == "high":
+            return random.choice([
+                "He worked through traffic in a meaningful spot and still kept the inning from turning.",
+                "It was not spotless, but he got through an inning that mattered.",
+                "He bent some in leverage, though he still kept things intact.",
+            ])
+        return random.choice([
             "He worked through traffic and still got the job done.",
-            "It wasn’t spotless, but he managed the inning well enough.",
-            "He navigated some traffic and kept the game from turning.",
-            "He bent a bit but kept the inning intact.",
-        ]
-        return random.choice(options)
+            "It was not spotless, but he managed the inning well enough.",
+            "He navigated some traffic and kept the inning from turning.",
+        ])
 
-    options = [
+    return random.choice([
         "He turned in a usable inning for this bullpen.",
         "This was a neutral relief appearance overall.",
         "He got through the inning without changing much about his standing.",
-        "He gave them a serviceable inning here.",
-    ]
-    return random.choice(options)
+    ])
 
 
-# ---------------- SUMMARY ----------------
 
-def build_summary(name: str, team: str, s: dict, label: str, context: dict, streak_count: int, tracked_info: dict, recent_appearances):
+def build_summary(name: str, team: str, s: dict, label: str, context: dict, streak_count: int, tracked_info: dict, recent_appearances, usage_note: str = "", velocity_alert: dict = None):
     ip_text = format_ip_for_summary(s["ip"])
     outs_recorded = baseball_ip_to_outs(s["ip"])
     er = s["er"]
@@ -1167,25 +1350,18 @@ def build_summary(name: str, team: str, s: dict, label: str, context: dict, stre
             line1 = f"{name} entered {ctx} and shut the door for the save."
         else:
             line1 = f"{name} entered {ctx} and locked down the save."
-
     elif label == "BLOWN":
-        line1 = f"{name} entered {ctx} but couldn’t hold the lead and was charged with a blown save."
-
+        line1 = f"{name} entered {ctx} but could not hold the lead and was charged with a blown save."
     elif label == "HOLD":
         line1 = f"{name} entered {ctx} and held the line to earn the hold."
-
     elif label == "DOM":
         line1 = f"{name} entered {ctx} and dominated."
-
     elif label == "TRAFFIC":
         line1 = f"{name} entered {ctx} and navigated traffic to keep things under control."
-
     elif label == "ROUGH":
         line1 = f"{name} entered {ctx} but was hit hard in a rough outing."
-
     elif label == "CLEAN":
         line1 = f"{name} entered {ctx} and turned in a clean outing."
-
     else:
         line1 = f"{name} entered {ctx} in relief."
 
@@ -1193,7 +1369,6 @@ def build_summary(name: str, team: str, s: dict, label: str, context: dict, stre
     walk_text = stat_phrase(bb, "walk")
     run_text = stat_phrase(er, "run")
 
-    # One-batter / one-out handling
     if outs_recorded == 1:
         if er == 0 and h == 0 and bb == 0:
             line2 = "He retired the lone batter he faced."
@@ -1209,17 +1384,11 @@ def build_summary(name: str, team: str, s: dict, label: str, context: dict, stre
     elif er == 0:
         line2 = f"He worked {ip_text}, allowing {hit_text} and {walk_text}"
         k_part = strikeout_phrase(k)
-        if k_part:
-            line2 += f" {k_part}."
-        else:
-            line2 += "."
+        line2 += f" {k_part}." if k_part else "."
     else:
         line2 = f"He allowed {run_text} over {ip_text} on {hit_text} and {walk_text}"
         k_part = strikeout_phrase(k)
-        if k_part:
-            line2 += f" {k_part}."
-        else:
-            line2 += "."
+        line2 += f" {k_part}." if k_part else "."
 
     analysis = build_analysis(
         p={"name": name, "team": team},
@@ -1230,16 +1399,27 @@ def build_summary(name: str, team: str, s: dict, label: str, context: dict, stre
         recent_appearances=recent_appearances,
     )
 
+    pieces = [line1, line2]
+    velocity_sentence = build_velocity_inline_sentence(velocity_alert) if tracked_info else ""
+
+    if velocity_sentence and random.random() < 0.4:
+        pieces.append(velocity_sentence)
+        pieces.append(analysis)
+    else:
+        pieces.append(analysis)
+        if velocity_sentence:
+            pieces.append(velocity_sentence)
+
+    if usage_note:
+        pieces.append(usage_note)
+
     streak_sentence = get_streak_sentence(streak_count)
+    if streak_sentence and not usage_note:
+        pieces.append(streak_sentence)
 
-    if streak_sentence:
-        return f"{line1} {line2} {analysis} {streak_sentence}"
-
-    return f"{line1} {line2} {analysis}"
-
+    return " ".join(piece for piece in pieces if piece)
 
 
-# ---------------- TREND ALERT ENGINE ----------------
 
 def get_all_tracked_names(tracked: dict):
     return {k for k in tracked.keys()}
@@ -1377,126 +1557,11 @@ def choose_best_trend(candidates):
     return random.choices(top_pool, weights=weights, k=1)[0]
 
 
-def trend_window_for_code(code: str) -> int:
-    if code in {"scoreless5", "scoreless4of5", "ks10last5", "runs3of5"}:
-        return 5
-    if code in {"k_3_of_4"}:
-        return 4
-    if code in {"saves2"}:
-        return 2
-    return 3
-
-
-def outs_to_baseball_ip(outs: int) -> str:
-    whole = outs // 3
-    rem = outs % 3
-    return f"{whole}.{rem}"
-
-
-def summarize_trend_span(recent_appearances, code: str):
-    window = trend_window_for_code(code)
-    span = list(recent_appearances[:window])
-    if not span:
-        return {"window": window, "span": [], "outs": 0, "ip": "0.0", "k": 0, "bb": 0, "h": 0, "er": 0, "avg_fastball_velocity": None}
-
-    outs = sum(baseball_ip_to_outs(app.get("ip", "0.0")) for app in span)
-    prior_with_velo = [safe_float(app.get("avg_fastball_velocity"), 0.0) for app in span if app.get("avg_fastball_velocity") is not None]
-    avg_velo = round(sum(prior_with_velo) / len(prior_with_velo), 1) if prior_with_velo else None
-    return {
-        "window": window,
-        "span": span,
-        "outs": outs,
-        "ip": outs_to_baseball_ip(outs),
-        "k": sum(safe_int(app.get("k", 0), 0) for app in span),
-        "bb": sum(safe_int(app.get("bb", 0), 0) for app in span),
-        "h": sum(safe_int(app.get("h", 0), 0) for app in span),
-        "er": sum(safe_int(app.get("er", 0), 0) for app in span),
-        "avg_fastball_velocity": avg_velo,
-    }
-
-
-def extract_prior_season_velocity(season_stats: dict):
-    if not isinstance(season_stats, dict):
-        return None
-    keys = [
-        "avgFastballVelocity",
-        "averageFastballVelocity",
-        "fastballVelocity",
-        "fourSeamFastballVelocity",
-        "fbVelocity",
-        "avg_fastball_velocity",
-    ]
-    for key in keys:
-        value = season_stats.get(key)
-        if value not in (None, "", "-"):
-            val = safe_float(value, 0.0)
-            if val > 0:
-                return round(val, 1)
-    return None
-
-
-def build_trend_stat_sentence(name: str, code: str, span_stats: dict):
-    k_text = stat_phrase(span_stats.get("k", 0), "strikeout")
-    bb_text = stat_phrase(span_stats.get("bb", 0), "walk")
-    ip_text = f"{span_stats.get('ip', '0.0')} innings"
-    window = span_stats.get("window", 3)
-
-    scoreless_templates = [
-        f"During that {window}-appearance stretch, he has {k_text} against {bb_text}.",
-        f"He has covered {ip_text} during that run, with {k_text} and {bb_text}.",
-        f"The stretch has come with {k_text} over {ip_text}, and only {bb_text}.",
-    ]
-    strikeout_templates = [
-        f"That run has also come with {bb_text} over {ip_text}.",
-        f"He has paired the swing-and-miss with {bb_text} over {ip_text} in that span.",
-        f"Over that stretch, he has worked {ip_text} while keeping it to {bb_text}.",
-    ]
-    rough_templates = [
-        f"Across that stretch, he has still managed {k_text}, but the run prevention has slipped.",
-        f"The recent stretch covers {ip_text}, with {k_text} and {bb_text}, but too many runs have crossed.",
-    ]
-    role_templates = [
-        f"Over that stretch, he has logged {ip_text} with {k_text} against {bb_text}.",
-        f"That span has come with {k_text} and only {bb_text} over {ip_text}.",
-    ]
-
-    if code in {"scoreless3", "scoreless5", "scoreless4of5"}:
-        return random.choice(scoreless_templates)
-    if code in {"ks10last5", "ks7last3", "k_streak3", "dominant_last3", "dominant_k_combo", "no_walk3", "k_3_of_4"}:
-        return random.choice(strikeout_templates)
-    if code in {"runs2of3", "runs3of5", "scoreless_snapped", "first_rough_after_hot"}:
-        return random.choice(rough_templates)
-    return random.choice(role_templates)
-
-
-def build_trend_velocity_sentence(name: str, span_stats: dict, season_stats: dict):
-    span_v = span_stats.get("avg_fastball_velocity")
-    season_v = extract_prior_season_velocity(season_stats)
-    if span_v is None or season_v is None:
-        return ""
-
-    delta = round(span_v - season_v, 1)
-    if abs(delta) < 0.7:
-        return ""
-
-    change_text = f"{abs(delta):.1f} MPH"
-    if delta > 0:
-        options = [
-            f"His fastball has also averaged **{span_v:.1f} MPH** during that stretch, up **{change_text}** from last season.",
-            f"There has been a little more life on the fastball too, with that run coming at **{span_v:.1f} MPH**, or **{change_text}** above last season.",
-        ]
-    else:
-        options = [
-            f"The one thing to watch is the fastball, which has averaged **{span_v:.1f} MPH** during that stretch, down **{change_text}** from last season.",
-            f"That run has come with a fastball average of **{span_v:.1f} MPH**, which sits **{change_text}** below last season.",
-        ]
-    return random.choice(options)
-
-
 def build_trend_analysis(name: str, team: str, trend: dict, recent_appearances, season_stats: dict):
     code = trend.get("code")
     info = recent_window_summary(recent_appearances)
     span_stats = summarize_trend_span(recent_appearances, code)
+
     templates = {
         "scoreless3": [
             f"{name} has now strung together three straight scoreless outings, and the recent form has been sharp.",
@@ -1572,26 +1637,35 @@ def build_trend_analysis(name: str, team: str, trend: dict, recent_appearances, 
             f"{name} closed the door in his latest chance and is beginning to show up in spots that matter.",
         ],
     }
+
     opener = random.choice(templates.get(code, [f"{name} has put together a notable recent run and is worth monitoring more closely."]))
     stat_sentence = build_trend_stat_sentence(name, code, span_stats)
     velocity_sentence = build_trend_velocity_sentence(name, span_stats, season_stats)
-    closer_sentence = random.choice([
+    implication_sentence = random.choice([
         "That is the sort of stretch that can earn more meaningful work.",
         "Runs like this tend to get a reliever noticed a little more.",
         "This is a trend worth monitoring moving forward.",
+        "This kind of run can change where a reliever sits in the pecking order.",
+        "In deeper formats, this is the sort of trend that matters.",
     ])
 
+    placement = random.choice(["middle", "end", "none"])
     sentences = [opener]
-    if stat_sentence:
-        sentences.append(stat_sentence)
-    if velocity_sentence and random.random() < 0.8:
-        sentences.append(velocity_sentence)
-    else:
-        sentences.append(closer_sentence)
 
-    if len(sentences) > 3:
-        sentences = sentences[:3]
-    return " ".join(sentences)
+    if placement == "middle" and velocity_sentence:
+        sentences.append(velocity_sentence)
+        if stat_sentence:
+            sentences.append(stat_sentence)
+    else:
+        if stat_sentence:
+            sentences.append(stat_sentence)
+        if placement == "end" and velocity_sentence:
+            sentences.append(velocity_sentence)
+        else:
+            sentences.append(implication_sentence)
+
+    return " ".join(sentences[:3])
+
 
 
 def can_post_trend_now(state, now_et: datetime):
@@ -1737,12 +1811,12 @@ def build_velocity_analysis(name: str, velocity_alert: dict):
     change_text = f"{abs(delta):.1f} MPH"
     if delta > 0:
         starters = [
-            f"{name} averaged **{current_v:.1f} MPH** on his fastball in this outing, up from **{baseline_v:.1f} MPH** in his {baseline_type}.",
-            f"{name}'s fastball averaged **{current_v:.1f} MPH** here after sitting at **{baseline_v:.1f} MPH** in his {baseline_type}.",
+            f"{name} averaged {current_v:.1f} MPH on his fastball in this outing, up from {baseline_v:.1f} MPH in his {baseline_type}.",
+            f"{name}'s fastball averaged {current_v:.1f} MPH here after sitting at {baseline_v:.1f} MPH in his {baseline_type}.",
         ]
-        closers = [
-            f"The **+{change_text}** jump stands out and suggests his stuff had extra life in this appearance.",
-            f"That **+{change_text}** bump is noticeable and could be a sign that his stuff is trending in the right direction.",
+        middles = [
+            f"The +{change_text} jump stands out and suggests his stuff had extra life in this appearance.",
+            f"That +{change_text} bump is noticeable and could be a sign that his stuff is trending in the right direction.",
         ]
         thirds = [
             "It is the kind of change worth keeping an eye on if it holds into his next outing.",
@@ -1750,47 +1824,22 @@ def build_velocity_analysis(name: str, velocity_alert: dict):
         ]
     else:
         starters = [
-            f"{name} averaged **{current_v:.1f} MPH** on his fastball in this outing, down from **{baseline_v:.1f} MPH** in his {baseline_type}.",
-            f"{name}'s fastball averaged **{current_v:.1f} MPH** here after sitting at **{baseline_v:.1f} MPH** in his {baseline_type}.",
+            f"{name} averaged {current_v:.1f} MPH on his fastball in this outing, down from {baseline_v:.1f} MPH in his {baseline_type}.",
+            f"{name}'s fastball averaged {current_v:.1f} MPH here after sitting at {baseline_v:.1f} MPH in his {baseline_type}.",
         ]
-        closers = [
-            f"The dip of **{change_text}** is noticeable and worth monitoring moving forward.",
-            f"That **-{change_text}** shift is enough to stand out and is something to keep an eye on in his next appearance.",
+        middles = [
+            f"The dip of {change_text} is noticeable and worth monitoring moving forward.",
+            f"That -{change_text} shift is enough to stand out and is something to keep an eye on in his next appearance.",
         ]
         thirds = [
             "Changes like this can simply reflect a single-night blip, but it is still meaningful enough to flag.",
             "One outing does not make a trend, but velocity changes like this are worth noting when they show up.",
         ]
 
-    sentence1 = random.choice(starters)
-    sentence2 = random.choice(closers)
     if random.random() < 0.55:
-        return f"{sentence1} {sentence2} {random.choice(thirds)}"
-    return f"{sentence1} {sentence2}"
+        return f"{random.choice(starters)} {random.choice(middles)} {random.choice(thirds)}"
+    return f"{random.choice(starters)} {random.choice(middles)}"
 
-
-def build_velocity_summary_sentence(velocity_alert: dict) -> str:
-    if not velocity_alert:
-        return ""
-
-    current_v = velocity_alert.get("current_velocity")
-    baseline_v = velocity_alert.get("baseline_velocity")
-    delta = velocity_alert.get("delta")
-    baseline_type = velocity_alert.get("baseline_type", "recent average")
-    if current_v is None or baseline_v is None or delta is None:
-        return ""
-
-    if delta > 0:
-        options = [
-            f"His fastball averaged **{current_v:.1f} MPH** here, up from **{baseline_v:.1f} MPH** in his {baseline_type}.",
-            f"He averaged **{current_v:.1f} MPH** on his fastball, a **+{abs(delta):.1f} MPH** jump from his {baseline_type}.",
-        ]
-    else:
-        options = [
-            f"His fastball averaged **{current_v:.1f} MPH** here, down from **{baseline_v:.1f} MPH** in his {baseline_type}.",
-            f"He averaged **{current_v:.1f} MPH** on his fastball, a **-{abs(delta):.1f} MPH** dip from his {baseline_type}.",
-        ]
-    return random.choice(options)
 
 
 async def post_velocity_card(channel, meta: dict, velocity_alert: dict):
@@ -1949,7 +1998,7 @@ def get_pitchers(feed: dict):
 
 # ---------------- POST ----------------
 
-async def post_card(channel, p: dict, matchup: str, score: str, context: dict, streak_count: int, tracked_info: dict, recent_appearances, velocity_alert=None):
+async def post_card(channel, p: dict, matchup: str, score: str, context: dict, streak_count: int, tracked_info: dict, recent_appearances, usage_note: str = "", velocity_alert: dict = None):
     s = {
         "ip": str(p["stats"].get("inningsPitched", "0.0")),
         "h": safe_int(p["stats"].get("hits", 0), 0),
@@ -1986,24 +2035,20 @@ async def post_card(channel, p: dict, matchup: str, score: str, context: dict, s
     embed.add_field(name="Game Line", value=format_game_line(s), inline=False)
     embed.add_field(name="Pitch Count", value=format_pitch_count(p["stats"]), inline=False)
     embed.add_field(name="Season", value=format_season_line(p.get("season_stats", {})), inline=False)
-    summary_text = build_summary(
-        p["name"],
-        p["team"],
-        s,
-        label,
-        context,
-        streak_count,
-        tracked_info,
-        recent_appearances,
-    )
-    if tracked_info:
-        velocity_sentence = build_velocity_summary_sentence(velocity_alert)
-        if velocity_sentence:
-            summary_text = f"{summary_text} {velocity_sentence}"
-
     embed.add_field(
         name="Summary",
-        value=summary_text,
+        value=build_summary(
+            p["name"],
+            p["team"],
+            s,
+            label,
+            context,
+            streak_count,
+            tracked_info,
+            recent_appearances,
+            usage_note=usage_note,
+            velocity_alert=velocity_alert,
+        ),
         inline=False,
     )
     embed.add_field(name="Final", value=score, inline=False)
@@ -2011,7 +2056,6 @@ async def post_card(channel, p: dict, matchup: str, score: str, context: dict, s
     await channel.send(embed=embed)
 
 
-# ---------------- LOOP ----------------
 
 async def loop():
     await client.wait_until_ready()
@@ -2098,9 +2142,22 @@ async def loop():
                         continue
 
                     streak_count = get_streak_count(pitcher_id, game_date_et)
+                    usage_note = build_usage_sentence(get_recent_usage_snapshot(pitcher_id, game_date_et))
                     velocity_alert = build_velocity_alert(current_app, recent_for_trend)
+
                     log(f"Posting {p['name']} | {p['team']} | {matchup}")
-                    await post_card(channel, p, matchup, score, context, streak_count, tracked_info, recent_appearances, velocity_alert=velocity_alert)
+                    await post_card(
+                        channel,
+                        p,
+                        matchup,
+                        score,
+                        context,
+                        streak_count,
+                        tracked_info,
+                        recent_appearances,
+                        usage_note=usage_note,
+                        velocity_alert=velocity_alert if is_tracked else None,
+                    )
 
                     if (not is_tracked) and should_post_velocity_alert(state, pitcher_id, game_id, velocity_alert, now_et):
                         log(f"Velocity alert {p['name']} | {p['team']} | {velocity_alert.get('subject')}")
