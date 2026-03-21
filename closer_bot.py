@@ -1353,8 +1353,29 @@ def build_trend_candidates(current_app: dict, recent_appearances, tracked_info, 
 def choose_best_trend(candidates):
     if not candidates:
         return None
-    candidates = sorted(candidates, key=lambda x: x.get("priority", 0), reverse=True)
-    return candidates[0]
+
+    best_by_family = {}
+    for candidate in candidates:
+        family = candidate.get("family", "misc")
+        current_best = best_by_family.get(family)
+        if current_best is None or candidate.get("priority", 0) > current_best.get("priority", 0):
+            best_by_family[family] = candidate
+
+    family_winners = sorted(best_by_family.values(), key=lambda x: x.get("priority", 0), reverse=True)
+    if not family_winners:
+        return None
+
+    top_priority = family_winners[0].get("priority", 0)
+    top_pool = [c for c in family_winners if c.get("priority", 0) >= top_priority - 12][:4]
+    if len(top_pool) == 1:
+        return top_pool[0]
+
+    weights = []
+    for candidate in top_pool:
+        priority = max(float(candidate.get("priority", 0)), 1.0)
+        weights.append(priority)
+
+    return random.choices(top_pool, weights=weights, k=1)[0]
 
 
 def build_trend_analysis(name: str, team: str, trend: dict, recent_appearances, season_stats: dict):
@@ -1367,7 +1388,7 @@ def build_trend_analysis(name: str, team: str, trend: dict, recent_appearances, 
         ],
         "scoreless5": [
             f"{name} has now turned in five straight scoreless outings, one of the better recent runs in this bullpen. The consistency has stood out, and his name is becoming harder to ignore.",
-            f"Five straight scoreless appearances have put {name} firmly on the overnight watch list. He keeps getting results, and stretches like this can change a reliever's place quickly.",
+            f"Five straight scoreless appearances have put {name} firmly on the radar in this bullpen. He keeps getting results, and stretches like this can change a reliever's place quickly.",
         ],
         "scoreless4of5": [
             f"{name} has been scoreless in four of his last five outings and is building real momentum. The recent body of work is strong enough to make him worth tracking more closely.",
@@ -1467,11 +1488,16 @@ def can_post_trend_now(state, now_et: datetime):
     return True
 
 
-def mark_trend_posted(state, pitcher_id, trend_code, appearance_sig, now_et: datetime):
+def mark_trend_posted(state, pitcher_id, trend_code, appearance_sig, now_et: datetime, trend_family: str = "misc"):
     day_key = now_et.strftime("%Y-%m-%d")
     hour_key = now_et.strftime("%Y-%m-%d-%H")
-    state.setdefault("trend_posted", {})[str(pitcher_id)] = {"code": trend_code, "sig": appearance_sig, "date": day_key}
-    state.setdefault("trend_history", {})[f"{pitcher_id}:{trend_code}"] = appearance_sig
+    state.setdefault("trend_posted", {})[str(pitcher_id)] = {
+        "code": trend_code,
+        "sig": appearance_sig,
+        "date": day_key,
+        "family": trend_family,
+    }
+    state.setdefault("trend_history", {})[f"{pitcher_id}:{trend_family}:{appearance_sig}"] = trend_code
     state["trend_last_post_at"] = now_et.isoformat()
     state.setdefault("trend_post_count_by_hour", {})[hour_key] = safe_int(state.setdefault("trend_post_count_by_hour", {}).get(hour_key, 0), 0) + 1
     state.setdefault("trend_total_by_date", {})[day_key] = safe_int(state.setdefault("trend_total_by_date", {}).get(day_key, 0), 0) + 1
@@ -1888,6 +1914,9 @@ async def loop():
                         "saves": safe_int(p["stats"].get("saves", 0), 0),
                         "holds": safe_int(p["stats"].get("holds", 0), 0),
                         "blownSaves": safe_int(p["stats"].get("blownSaves", 0), 0),
+                        "avg_fastball_velocity": p.get("avg_fastball_velocity"),
+                        "fastball_count": safe_int(p.get("fastball_count", 0), 0),
+                        "pitch_count": safe_int(p.get("pitch_count", 0), 0),
                     }
                     recent_for_trend = [current_app] + recent_appearances
                     processed_pitchers_by_game.append({
@@ -1911,6 +1940,21 @@ async def loop():
                     streak_count = get_streak_count(pitcher_id, game_date_et)
                     log(f"Posting {p['name']} | {p['team']} | {matchup}")
                     await post_card(channel, p, matchup, score, context, streak_count, tracked_info, recent_appearances)
+
+                    velocity_alert = build_velocity_alert(current_app, recent_for_trend)
+                    if should_post_velocity_alert(state, pitcher_id, game_id, velocity_alert, now_et):
+                        log(f"Velocity alert {p['name']} | {p['team']} | {velocity_alert.get('subject')}")
+                        await post_velocity_card(
+                            channel,
+                            {
+                                "name": p["name"],
+                                "team": p["team"],
+                                "season_stats": p.get("season_stats", {}),
+                            },
+                            velocity_alert,
+                        )
+                        mark_velocity_posted(state, pitcher_id, game_id, velocity_alert, now_et)
+
                     posted.add(key)
 
             # trend blurbs use the same channel, but only for non-depth-chart relievers
@@ -1922,7 +1966,10 @@ async def loop():
                     pid = candidate["pitcher_id"]
                     sig = appearance_signature(candidate["recent_appearances"])
                     existing = state.get("trend_posted", {}).get(str(pid), {})
-                    if existing.get("sig") == sig and existing.get("code") == candidate["trend"].get("code"):
+                    trend_family = candidate["trend"].get("family", "misc")
+                    if existing.get("sig") == sig and existing.get("family") == trend_family:
+                        continue
+                    if state.get("trend_history", {}).get(f"{pid}:{trend_family}:{sig}"):
                         continue
                     last_date = existing.get("date")
                     today_key = now_et.strftime("%Y-%m-%d")
@@ -1930,7 +1977,7 @@ async def loop():
                         continue
                     log(f"Trend blurb {candidate['meta'].get('name')} | {candidate['meta'].get('team')} | {candidate['trend'].get('subject')}")
                     await post_trend_card(channel, candidate["meta"], candidate["trend"], candidate["recent_appearances"])
-                    mark_trend_posted(state, pid, candidate["trend"].get("code"), sig, now_et)
+                    mark_trend_posted(state, pid, candidate["trend"].get("code"), sig, now_et, trend_family=trend_family)
                     break
 
             state["posted"] = list(posted)
