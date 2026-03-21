@@ -162,6 +162,19 @@ def safe_float(value, default=0.0):
         return default
 
 
+
+def baserunners_allowed(s: dict) -> int:
+    return (
+        safe_int(s.get("h", 0), 0)
+        + safe_int(s.get("bb", 0), 0)
+        + safe_int(s.get("hbp", 0), 0)
+    )
+
+
+def is_true_clean_inning(s: dict) -> bool:
+    return baseball_ip_to_outs(s.get("ip", "0.0")) >= 3 and safe_int(s.get("er", 0), 0) == 0 and baserunners_allowed(s) == 0
+
+
 def plural(word: str, count: int) -> str:
     return word if count == 1 else f"{word}s"
 
@@ -448,7 +461,7 @@ def classify(s: dict) -> str:
 
 def grade_outing(s: dict) -> str:
     outs = baseball_ip_to_outs(s["ip"])
-    baserunners = s["h"] + s["bb"]
+    baserunners = baserunners_allowed(s)
 
     if outs <= 1:
         return "MICRO"
@@ -752,6 +765,7 @@ def get_pitching_stats_for_date(target_date):
                         "h": safe_int(stats.get("hits", 0), 0),
                         "er": safe_int(stats.get("earnedRuns", 0), 0),
                         "bb": safe_int(stats.get("baseOnBalls", 0), 0),
+                        "hbp": safe_int(stats.get("hitBatsmen", stats.get("hitByPitch", 0)), 0),
                         "k": safe_int(stats.get("strikeOuts", 0), 0),
                         "saves": safe_int(stats.get("saves", 0), 0),
                         "holds": safe_int(stats.get("holds", 0), 0),
@@ -2114,6 +2128,7 @@ async def loop():
                         "h": safe_int(p["stats"].get("hits", 0), 0),
                         "er": safe_int(p["stats"].get("earnedRuns", 0), 0),
                         "bb": safe_int(p["stats"].get("baseOnBalls", 0), 0),
+                        "hbp": safe_int(p["stats"].get("hitBatsmen", p["stats"].get("hitByPitch", 0)), 0),
                         "k": safe_int(p["stats"].get("strikeOuts", 0), 0),
                         "saves": safe_int(p["stats"].get("saves", 0), 0),
                         "holds": safe_int(p["stats"].get("holds", 0), 0),
