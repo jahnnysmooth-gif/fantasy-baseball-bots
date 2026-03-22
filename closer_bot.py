@@ -84,12 +84,43 @@ def log(msg: str):
     print(f"[CLOSER] {msg}", flush=True)
 
 
+def normalize_team_abbr(team: str) -> str:
+    key = str(team or "").strip().upper()
+    alias_map = {
+        "AZ": "ARI",
+        "ARI": "ARI",
+        "CHW": "CWS",
+        "CWS": "CWS",
+        "WAS": "WSH",
+        "WSN": "WSH",
+        "WSH": "WSH",
+        "TBR": "TB",
+        "TB": "TB",
+        "KCR": "KC",
+        "KC": "KC",
+        "SDP": "SD",
+        "SD": "SD",
+        "SFG": "SF",
+        "SF": "SF",
+        "OAK": "ATH",
+        "ATH": "ATH",
+    }
+    return alias_map.get(key, key)
+
+
 def get_logo(team: str) -> str:
-    key = team.lower()
-    if team == "CWS":
-        key = "chw"
-    elif team == "ATH":
-        key = "oak"
+    normalized_team = normalize_team_abbr(team)
+    logo_key_map = {
+        "CWS": "chw",
+        "ATH": "oak",
+        "ARI": "ari",
+        "WSH": "wsh",
+        "TB": "tb",
+        "KC": "kc",
+        "SD": "sd",
+        "SF": "sf",
+    }
+    key = logo_key_map.get(normalized_team, normalized_team.lower())
     return f"https://a.espncdn.com/i/teamlogos/mlb/500/{key}.png"
 
 
@@ -137,7 +168,7 @@ def load_player_headshot_index() -> dict:
             team = entry.get("team")
             payload = {
                 "name": raw_name,
-                "team": team,
+                "team": normalize_team_abbr(team),
                 "headshot_url": headshot_url,
                 "espn_id": entry.get("espn_id"),
             }
@@ -153,9 +184,10 @@ def load_player_headshot_index() -> dict:
 def choose_headshot_entry(entries, team: str = None):
     if not entries:
         return None
-    if team:
+    normalized_team = normalize_team_abbr(team) if team else None
+    if normalized_team:
         for entry in entries:
-            if isinstance(entry, dict) and entry.get("team") == team:
+            if isinstance(entry, dict) and normalize_team_abbr(entry.get("team")) == normalized_team:
                 return entry
     for entry in entries:
         if isinstance(entry, dict) and entry.get("headshot_url"):
@@ -190,8 +222,9 @@ def get_player_headshot(name: str, team: str = None) -> str | None:
 
 
 def apply_player_card_chrome(embed: discord.Embed, name: str, team: str):
-    header_text = f"{name} | {team}"
-    logo_url = get_logo(team)
+    display_team = normalize_team_abbr(team) or "UNK"
+    header_text = f"{name} | {display_team}"
+    logo_url = get_logo(display_team)
     try:
         embed.set_author(name=header_text, icon_url=logo_url)
     except Exception:
@@ -1847,7 +1880,7 @@ async def post_trend_card(channel, meta: dict, trend: dict, recent_appearances):
     name = meta.get("name", "Unknown Pitcher")
     subject = f"{trend.get('emoji', '🧠')} {trend.get('subject', 'Bullpen Trend')}"
     embed = discord.Embed(
-        color=TEAM_COLORS.get(team, 0x2ECC71),
+        color=TEAM_COLORS.get(normalize_team_abbr(team), 0x2ECC71),
         timestamp=datetime.now(timezone.utc),
     )
     apply_player_card_chrome(embed, name, team)
@@ -1969,7 +2002,7 @@ async def post_velocity_card(channel, meta: dict, velocity_alert: dict):
     name = meta.get("name", "Unknown Pitcher")
     subject = f"{velocity_alert.get('emoji', '⚠️')} {velocity_alert.get('subject', 'Velocity Alert')}"
     embed = discord.Embed(
-        color=TEAM_COLORS.get(team, 0x2ECC71),
+        color=TEAM_COLORS.get(normalize_team_abbr(team), 0x2ECC71),
         timestamp=datetime.now(timezone.utc),
     )
     apply_player_card_chrome(embed, name, team)
@@ -2072,9 +2105,9 @@ def get_pitchers(feed: dict):
     game_teams = feed.get("gameData", {}).get("teams", {})
 
     for side in ["home", "away"]:
-        team = game_teams.get(side, {}).get("abbreviation")
+        team = normalize_team_abbr(game_teams.get(side, {}).get("abbreviation"))
         if not team:
-            team = box.get(side, {}).get("team", {}).get("abbreviation", "UNK")
+            team = normalize_team_abbr(box.get(side, {}).get("team", {}).get("abbreviation", "UNK"))
 
         players = box.get(side, {}).get("players", {})
 
@@ -2095,7 +2128,7 @@ def get_pitchers(feed: dict):
             player_obj = {
                 "id": p.get("person", {}).get("id"),
                 "name": p.get("person", {}).get("fullName", "Unknown Pitcher"),
-                "team": team,
+                "team": normalize_team_abbr(team),
                 "side": side,
                 "stats": stats,
                 "season_stats": season_stats,
@@ -2107,7 +2140,7 @@ def get_pitchers(feed: dict):
             if player_obj["id"] is not None:
                 player_meta_cache[player_obj["id"]] = {
                     "name": player_obj["name"],
-                    "team": team,
+                    "team": normalize_team_abbr(team),
                     "season_stats": season_stats,
                 }
 
@@ -2131,7 +2164,7 @@ async def post_card(channel, p: dict, matchup: str, score: str, context: dict, s
     label = classify(s)
 
     embed = discord.Embed(
-        color=TEAM_COLORS.get(p["team"], 0x2ECC71),
+        color=TEAM_COLORS.get(normalize_team_abbr(p["team"]), 0x2ECC71),
         timestamp=datetime.now(timezone.utc),
     )
     apply_player_card_chrome(embed, p["name"], p["team"])
