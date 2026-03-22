@@ -76,6 +76,9 @@ appearance_cache = {}
 pitching_stats_cache = {}
 player_meta_cache = {}
 
+ESPN_PLAYER_IDS_PATH = os.getenv("ESPN_PLAYER_IDS_PATH", "shared/player_ids/espn_player_ids.json")
+player_headshot_index = None
+
 
 def log(msg: str):
     print(f"[CLOSER] {msg}", flush=True)
@@ -88,6 +91,124 @@ def get_logo(team: str) -> str:
     elif team == "ATH":
         key = "oak"
     return f"https://a.espncdn.com/i/teamlogos/mlb/500/{key}.png"
+
+
+def normalize_lookup_name(name: str) -> str:
+    if not name:
+        return ""
+    cleaned = name.lower()
+    for ch in [".", ",", "'", "`", "-", "_", "(", ")", "[", "]"]:
+        cleaned = cleaned.replace(ch, " ")
+    return " ".join(cleaned.split())
+
+
+def load_player_headshot_index() -> dict:
+    global player_headshot_index
+    if player_headshot_index is not None:
+        return player_headshot_index
+
+    player_headshot_index = {}
+    if not os.path.exists(ESPN_PLAYER_IDS_PATH):
+        log(f"Player ID file not found: {ESPN_PLAYER_IDS_PATH}")
+        return player_headshot_index
+
+    try:
+        with open(ESPN_PLAYER_IDS_PATH, "r", encoding="utf-8") as f:
+            raw = json.load(f)
+    except Exception as e:
+        log(f"Could not load player ID file: {e}")
+        return player_headshot_index
+
+    if not isinstance(raw, dict):
+        log("Player ID file is not a dict mapping of names to ids/headshots")
+        return player_headshot_index
+
+    for raw_name, raw_value in raw.items():
+        entries = raw_value if isinstance(raw_value, list) else [raw_value]
+        for entry in entries:
+            if not isinstance(entry, dict):
+                continue
+            headshot_url = entry.get("headshot_url")
+            espn_id = entry.get("espn_id")
+            if not headshot_url and espn_id:
+                headshot_url = f"https://a.espncdn.com/i/headshots/mlb/players/full/{espn_id}.png"
+            if not headshot_url:
+                continue
+            team = entry.get("team")
+            payload = {
+                "name": raw_name,
+                "team": team,
+                "headshot_url": headshot_url,
+                "espn_id": entry.get("espn_id"),
+            }
+            player_headshot_index.setdefault(raw_name, []).append(payload)
+            normalized = normalize_lookup_name(raw_name)
+            if normalized:
+                player_headshot_index.setdefault(normalized, []).append(payload)
+
+    log(f"Loaded player headshot index from {ESPN_PLAYER_IDS_PATH}")
+    return player_headshot_index
+
+
+def choose_headshot_entry(entries, team: str = None):
+    if not entries:
+        return None
+    if team:
+        for entry in entries:
+            if isinstance(entry, dict) and entry.get("team") == team:
+                return entry
+    for entry in entries:
+        if isinstance(entry, dict) and entry.get("headshot_url"):
+            return entry
+    return None
+
+
+def get_player_headshot(name: str, team: str = None) -> str | None:
+    index = load_player_headshot_index()
+    if not index or not name:
+        return None
+
+    exact = choose_headshot_entry(index.get(name), team)
+    if exact:
+        return exact.get("headshot_url")
+
+    normalized = normalize_lookup_name(name)
+    normalized_match = choose_headshot_entry(index.get(normalized), team)
+    if normalized_match:
+        return normalized_match.get("headshot_url")
+
+    norm_from_tracker = normalize_name(name)
+    if norm_from_tracker and norm_from_tracker != name:
+        tracker_exact = choose_headshot_entry(index.get(norm_from_tracker), team)
+        if tracker_exact:
+            return tracker_exact.get("headshot_url")
+        tracker_normalized = choose_headshot_entry(index.get(normalize_lookup_name(norm_from_tracker)), team)
+        if tracker_normalized:
+            return tracker_normalized.get("headshot_url")
+
+    return None
+
+
+def apply_player_card_chrome(embed: discord.Embed, name: str, team: str):
+    header_text = f"{name} | {team}"
+    logo_url = get_logo(team)
+    try:
+        embed.set_author(name=header_text, icon_url=logo_url)
+    except Exception:
+        embed.set_author(name=header_text)
+
+    headshot_url = get_player_headshot(name, team)
+    if headshot_url:
+        try:
+            embed.set_thumbnail(url=headshot_url)
+            return
+        except Exception:
+            pass
+
+    try:
+        embed.set_thumbnail(url=logo_url)
+    except Exception:
+        pass
 
 
 # ---------------- STATE ----------------
@@ -1726,14 +1847,10 @@ async def post_trend_card(channel, meta: dict, trend: dict, recent_appearances):
     name = meta.get("name", "Unknown Pitcher")
     subject = f"{trend.get('emoji', '🧠')} {trend.get('subject', 'Bullpen Trend')}"
     embed = discord.Embed(
-        title=f"{name} | {team}",
         color=TEAM_COLORS.get(team, 0x2ECC71),
         timestamp=datetime.now(timezone.utc),
     )
-    try:
-        embed.set_thumbnail(url=get_logo(team))
-    except Exception:
-        pass
+    apply_player_card_chrome(embed, name, team)
     embed.add_field(name="", value=f"**{subject}**", inline=False)
     embed.add_field(name="Season", value=format_season_line(meta.get("season_stats", {})), inline=False)
     embed.add_field(name="Summary", value=build_trend_analysis(name, team, trend, recent_appearances, meta.get("season_stats", {})), inline=False)
@@ -1852,14 +1969,10 @@ async def post_velocity_card(channel, meta: dict, velocity_alert: dict):
     name = meta.get("name", "Unknown Pitcher")
     subject = f"{velocity_alert.get('emoji', '⚠️')} {velocity_alert.get('subject', 'Velocity Alert')}"
     embed = discord.Embed(
-        title=f"{name} | {team}",
         color=TEAM_COLORS.get(team, 0x2ECC71),
         timestamp=datetime.now(timezone.utc),
     )
-    try:
-        embed.set_thumbnail(url=get_logo(team))
-    except Exception:
-        pass
+    apply_player_card_chrome(embed, name, team)
     embed.add_field(name="", value=f"**{subject}**", inline=False)
     embed.add_field(name="Season", value=format_season_line(meta.get("season_stats", {})), inline=False)
     embed.add_field(name="Summary", value=build_velocity_analysis(name, velocity_alert), inline=False)
@@ -2017,23 +2130,11 @@ async def post_card(channel, p: dict, matchup: str, score: str, context: dict, s
 
     label = classify(s)
 
-    if label == "SAVE":
-        title = f"🚨 SAVE — {p['name']} ({p['team']})"
-    elif label == "BLOWN":
-        title = f"⚠️ BLOWN SAVE — {p['name']} ({p['team']})"
-    else:
-        title = f"{p['name']} ({p['team']})"
-
     embed = discord.Embed(
-        title=title,
         color=TEAM_COLORS.get(p["team"], 0x2ECC71),
         timestamp=datetime.now(timezone.utc),
     )
-
-    try:
-        embed.set_thumbnail(url=get_logo(p["team"]))
-    except Exception:
-        pass
+    apply_player_card_chrome(embed, p["name"], p["team"])
 
     embed.add_field(name="", value=f"**{impact_tag(label, s)}**", inline=False)
     embed.add_field(name="⚾ Matchup", value=matchup, inline=False)
