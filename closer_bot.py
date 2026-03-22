@@ -180,7 +180,6 @@ def load_player_headshot_index() -> dict:
                 "team": normalize_team_abbr(team),
                 "headshot_url": headshot_url,
                 "espn_id": entry.get("espn_id"),
-                "pos": str(entry.get("pos") or "").strip().upper(),
             }
             player_headshot_index.setdefault(raw_name, []).append(payload)
             normalized = normalize_lookup_name(raw_name)
@@ -205,46 +204,42 @@ def choose_headshot_entry(entries, team: str = None):
     return None
 
 
-def get_player_card_entry(name: str, team: str = None):
+def get_player_headshot(name: str, team: str = None) -> str | None:
     index = load_player_headshot_index()
     if not index or not name:
         return None
 
     exact = choose_headshot_entry(index.get(name), team)
     if exact:
-        return exact
+        return exact.get("headshot_url")
 
     normalized = normalize_lookup_name(name)
     normalized_match = choose_headshot_entry(index.get(normalized), team)
     if normalized_match:
-        return normalized_match
+        return normalized_match.get("headshot_url")
 
     norm_from_tracker = normalize_name(name)
     if norm_from_tracker and norm_from_tracker != name:
         tracker_exact = choose_headshot_entry(index.get(norm_from_tracker), team)
         if tracker_exact:
-            return tracker_exact
+            return tracker_exact.get("headshot_url")
         tracker_normalized = choose_headshot_entry(index.get(normalize_lookup_name(norm_from_tracker)), team)
         if tracker_normalized:
-            return tracker_normalized
+            return tracker_normalized.get("headshot_url")
 
     return None
 
 
 def apply_player_card_chrome(embed: discord.Embed, name: str, team: str):
     display_team = normalize_team_abbr(team) or "UNK"
+    header_text = f"{name} | {display_team}"
     logo_url = get_logo(display_team)
-    entry = get_player_card_entry(name, team)
-    pos = str((entry or {}).get("pos") or "").strip().upper() or "RP"
-
-    embed.title = name
-    author_text = f"{display_team} | {pos}"
     try:
-        embed.set_author(name=author_text, icon_url=logo_url)
+        embed.set_author(name=header_text, icon_url=logo_url)
     except Exception:
-        embed.set_author(name=author_text)
+        embed.set_author(name=header_text)
 
-    headshot_url = (entry or {}).get("headshot_url")
+    headshot_url = get_player_headshot(name, team)
     if headshot_url:
         try:
             embed.set_thumbnail(url=headshot_url)
