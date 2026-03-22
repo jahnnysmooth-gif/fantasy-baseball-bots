@@ -27,11 +27,20 @@ LIVE_URL = "https://statsapi.mlb.com/api/v1.1/game/{}/feed/live"
 POLL_MINUTES = 10
 RESET_CLOSER_STATE = os.getenv("RESET_CLOSER_STATE", "").lower() in {"1", "true", "yes"}
 DEPTH_CHART_OVERRIDE_CHANNEL_ID = int(os.getenv("DEPTH_CHART_OVERRIDE_CHANNEL_ID", "1484232761597366412"))
-TREND_STATE_FILE = "state/closer/trend_state.json"
-TREND_OVERNIGHT_START_HOUR = 2
-TREND_MAX_PER_HOUR = 3
-TREND_MIN_SPACING_MINUTES = 20
-TREND_MAX_OVERNIGHT_TOTAL = 25
+TTREND_STATE_FILE = "state/closer/trend_state.json"
+
+TREND_FAMILY_COOLDOWN_MINUTES = {
+    "scoreless": 180,
+    "strikeout": 90,
+    "role": 90,
+    "dominance": 90,
+    "usage": 90,
+    "command": 90,
+    "rough": 90,
+    "misc": 90,
+}
+TREND_RANDOM_INTERVAL_MIN_MINUTES = 6
+TREND_RANDOM_INTERVAL_MAX_MINUTES = 16
 VELOCITY_DELTA_THRESHOLD = 1.0
 VELOCITY_MIN_PITCHES = 10
 VELOCITY_MIN_FASTBALLS = 3
@@ -247,7 +256,7 @@ def apply_player_card_chrome(embed: discord.Embed, name: str, team: str):
 # ---------------- STATE ----------------
 
 def load_state():
-    base = {"posted": [], "trend_posted": {}, "trend_history": {}, "trend_last_post_at": None, "trend_post_count_by_hour": {}, "trend_total_by_date": {}, "velocity_posted": {}}
+    base = {"posted": [], "trend_posted": {}, "trend_history": {}, "trend_last_post_at": None, "trend_next_eligible_at": None, "trend_post_count_by_hour": {}, "trend_total_by_date": {}, "trend_family_last_post_at": {}, "velocity_posted": {}}
 
     if RESET_CLOSER_STATE:
         return base
@@ -268,7 +277,7 @@ def load_state():
             with open(TREND_STATE_FILE, "r", encoding="utf-8") as f:
                 tdata = json.load(f)
             if isinstance(tdata, dict):
-                for key in ["trend_posted", "trend_history", "trend_last_post_at", "trend_post_count_by_hour", "trend_total_by_date", "velocity_posted"]:
+                for key in ["trend_posted", "trend_history", "trend_last_post_at", "trend_next_eligible_at", "trend_post_count_by_hour", "trend_total_by_date", "trend_family_last_post_at", "velocity_posted"]:
                     if key in tdata:
                         base[key] = tdata[key]
         except Exception:
@@ -285,8 +294,10 @@ def save_state(state):
         "trend_posted": state.get("trend_posted", {}),
         "trend_history": state.get("trend_history", {}),
         "trend_last_post_at": state.get("trend_last_post_at"),
+        "trend_next_eligible_at": state.get("trend_next_eligible_at"),
         "trend_post_count_by_hour": state.get("trend_post_count_by_hour", {}),
         "trend_total_by_date": state.get("trend_total_by_date", {}),
+        "trend_family_last_post_at": state.get("trend_family_last_post_at", {}),
         "velocity_posted": state.get("velocity_posted", {}),
     }
     with open(TREND_STATE_FILE, "w", encoding="utf-8") as f:
@@ -1827,28 +1838,47 @@ def build_trend_analysis(name: str, team: str, trend: dict, recent_appearances, 
 
 
 
+def get_trend_family_cooldown_minutes(trend_family: str) -> int:
+    key = str(trend_family or "misc").strip().lower()
+    return safe_int(TREND_FAMILY_COOLDOWN_MINUTES.get(key, TREND_FAMILY_COOLDOWN_MINUTES.get("misc", 90)), 90)
+
+
+def get_next_trend_delay_minutes() -> int:
+    low = max(safe_int(TREND_RANDOM_INTERVAL_MIN_MINUTES, 6), 1)
+    high = max(safe_int(TREND_RANDOM_INTERVAL_MAX_MINUTES, 16), low)
+    return random.randint(low, high)
+
+
 def can_post_trend_now(state, now_et: datetime):
-    hour_key = now_et.strftime("%Y-%m-%d-%H")
-    day_key = now_et.strftime("%Y-%m-%d")
-    count_this_hour = safe_int(state.get("trend_post_count_by_hour", {}).get(hour_key, 0), 0)
-    total_today = safe_int(state.get("trend_total_by_date", {}).get(day_key, 0), 0)
-    if now_et.hour >= TREND_OVERNIGHT_START_HOUR and total_today >= TREND_MAX_OVERNIGHT_TOTAL:
+    next_eligible_at = state.get("trend_next_eligible_at")
+    if not next_eligible_at:
+        return True
+    try:
+        next_dt = datetime.fromisoformat(next_eligible_at)
+        if next_dt.tzinfo is None:
+            next_dt = next_dt.replace(tzinfo=ET)
+        else:
+            next_dt = next_dt.astimezone(ET)
+        return now_et >= next_dt
+    except Exception:
+        return True
+
+
+def is_trend_family_on_cooldown(state, trend_family: str, now_et: datetime) -> bool:
+    family_key = str(trend_family or "misc").strip().lower()
+    last_post_at = state.get("trend_family_last_post_at", {}).get(family_key)
+    if not last_post_at:
         return False
-    if count_this_hour >= TREND_MAX_PER_HOUR:
+    try:
+        last_dt = datetime.fromisoformat(last_post_at)
+        if last_dt.tzinfo is None:
+            last_dt = last_dt.replace(tzinfo=ET)
+        else:
+            last_dt = last_dt.astimezone(ET)
+        cooldown_minutes = get_trend_family_cooldown_minutes(family_key)
+        return (now_et - last_dt).total_seconds() < cooldown_minutes * 60
+    except Exception:
         return False
-    last_post = state.get("trend_last_post_at")
-    if last_post:
-        try:
-            last_dt = datetime.fromisoformat(last_post)
-            if last_dt.tzinfo is None:
-                last_dt = last_dt.replace(tzinfo=ET)
-            else:
-                last_dt = last_dt.astimezone(ET)
-            if (now_et - last_dt).total_seconds() < TREND_MIN_SPACING_MINUTES * 60:
-                return False
-        except Exception:
-            pass
-    return True
 
 
 def mark_trend_posted(state, pitcher_id, trend_code, appearance_sig, now_et: datetime, trend_family: str = "misc"):
@@ -1862,8 +1892,11 @@ def mark_trend_posted(state, pitcher_id, trend_code, appearance_sig, now_et: dat
     }
     state.setdefault("trend_history", {})[f"{pitcher_id}:{trend_family}:{appearance_sig}"] = trend_code
     state["trend_last_post_at"] = now_et.isoformat()
+    next_delay_minutes = get_next_trend_delay_minutes()
+    state["trend_next_eligible_at"] = (now_et + timedelta(minutes=next_delay_minutes)).isoformat()
     state.setdefault("trend_post_count_by_hour", {})[hour_key] = safe_int(state.setdefault("trend_post_count_by_hour", {}).get(hour_key, 0), 0) + 1
     state.setdefault("trend_total_by_date", {})[day_key] = safe_int(state.setdefault("trend_total_by_date", {}).get(day_key, 0), 0) + 1
+    state.setdefault("trend_family_last_post_at", {})[str(trend_family or "misc").strip().lower()] = now_et.isoformat()
 
 
 def appearance_signature(recent_appearances):
@@ -2190,7 +2223,6 @@ async def post_card(channel, p: dict, matchup: str, score: str, context: dict, s
         ),
         inline=False,
     )
-    embed.add_field(name="Final", value=score, inline=False)
 
     await channel.send(embed=embed)
 
@@ -2314,16 +2346,16 @@ async def loop():
                     posted.add(key)
 
             # trend blurbs use the same channel, but only for non-depth-chart relievers
-            if now_et.hour >= TREND_OVERNIGHT_START_HOUR or now_et.hour < 12:
+            if can_post_trend_now(state, now_et):
                 trend_candidates = gather_trend_candidates_from_recent_games(tracked, processed_pitchers_by_game)
                 for candidate in trend_candidates:
-                    if not can_post_trend_now(state, now_et):
-                        break
                     pid = candidate["pitcher_id"]
                     sig = appearance_signature(candidate["recent_appearances"])
                     existing = state.get("trend_posted", {}).get(str(pid), {})
                     trend_family = candidate["trend"].get("family", "misc")
                     if existing.get("sig") == sig and existing.get("family") == trend_family:
+                        continue
+                    if is_trend_family_on_cooldown(state, trend_family, now_et):
                         continue
                     if state.get("trend_history", {}).get(f"{pid}:{trend_family}:{sig}"):
                         continue
