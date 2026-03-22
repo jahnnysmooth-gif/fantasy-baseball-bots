@@ -27,7 +27,7 @@ LIVE_URL = "https://statsapi.mlb.com/api/v1.1/game/{}/feed/live"
 POLL_MINUTES = 10
 RESET_CLOSER_STATE = os.getenv("RESET_CLOSER_STATE", "").lower() in {"1", "true", "yes"}
 DEPTH_CHART_OVERRIDE_CHANNEL_ID = int(os.getenv("DEPTH_CHART_OVERRIDE_CHANNEL_ID", "1484232761597366412"))
-TTREND_STATE_FILE = "state/closer/trend_state.json"
+TREND_STATE_FILE = "state/closer/trend_state.json"
 
 TREND_FAMILY_COOLDOWN_MINUTES = {
     "scoreless": 180,
