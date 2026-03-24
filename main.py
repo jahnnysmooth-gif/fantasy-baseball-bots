@@ -14,6 +14,12 @@ try:
     from lineup_bot import start_lineup_bot
     print("Loaded lineup_bot", flush=True)
 
+    from news_bot import start_news_bot
+    print("Loaded news_bot", flush=True)
+
+    from performance_bot import start_performance_bot
+    print("Loaded performance_bot", flush=True)
+
 except Exception as e:
     print("IMPORT CRASH:", repr(e), flush=True)
     import traceback
@@ -79,6 +85,12 @@ async def main() -> None:
     await asyncio.sleep(3)
 
     tasks.append(asyncio.create_task(run_forever("lineup_bot", start_lineup_bot)))
+    await asyncio.sleep(3)
+
+    tasks.append(asyncio.create_task(run_forever("news_bot", start_news_bot)))
+    await asyncio.sleep(3)
+
+    tasks.append(asyncio.create_task(run_forever("performance_bot", start_performance_bot)))
 
     await asyncio.gather(*tasks, return_exceptions=True)
 

@@ -1,0 +1,218 @@
+{
+  "parker mushinski": {
+    "exact_hash": "2430ca7d8121c00d8dab5fec505c6c149103cc01",
+    "story_hash": "49017740b0f9fc928cf423990eb60d89edc292eb",
+    "update_text": "The Rockies re-signed Mushinski to a minor-league contract Tuesday.",
+    "details_text": "Mushinski was released by the Rockies on Sunday but is now back with the club on a new minor-league pact. The left-hander will give the Rockies some experienced relief depth at Triple-A Albuquerque.",
+    "category": "transaction",
+    "status": "new",
+    "updated_at": "2026-03-24T19:29:25.261973+00:00"
+  },
+  "ketel marte": {
+    "exact_hash": "6f42af86a66d73890b02caffda90bcb89623a59c",
+    "story_hash": "5baad02803448bbc091ee4629d6fd3439fef5492",
+    "update_text": "Diamondbacks manager Torey Lovullo said that Marte was scratched from Tuesday's exhibition lineup versus the Guardians due to soreness, Alex Weiner of ArizonaSports.com reports.",
+    "details_text": "Lovullo didn't specify the exact nature of Marte's soreness but added that he has no concerns about the second baseman's Opening Day availability. Ildemaro Vargas took Marte's spot in the lineup Tuesday.",
+    "category": "injury",
+    "status": "new",
+    "updated_at": "2026-03-24T19:29:25.598521+00:00"
+  },
+  "griff mcgarry": {
+    "exact_hash": "f8189b2bb1cee5a84f8e62f1c14b6260e3be0a8b",
+    "story_hash": "3e0c3541fa16c24e8efa6c6551f5ff1d36505a2e",
+    "update_text": "McGarry cleared waivers and was returned to the Phillies and assigned to Triple-A Lehigh Valley on Tuesday",
+    "details_text": "The 26-year-old righty was selected by the Nationals during the Rule 5 Draft in December but was designated for assignment over the weekend. McGarry will now rejoin the organization that drafted him in the fifth round of the 2021 First-Year Player Draft. He spent most of last year at the Double-A level and had a 3.25 ERA, 1.24 WHIP and 103:45 K:BB over 72 innings.",
+    "category": "transaction",
+    "status": "new",
+    "updated_at": "2026-03-24T19:29:25.872026+00:00"
+  },
+  "elvis peguero fa": {
+    "exact_hash": "6d05a4ebf743d2517244354fdb40e5878b88ac8b",
+    "story_hash": "5fc10ba1a4b441b28b72957167480d782a729266",
+    "update_text": "The Orioles signed Peguero (elbow) to a two-year minor-league contract Tuesday",
+    "details_text": "Peguero ended last season on the injured list with the White Sox due to a right elbow strain. That he signed a two-year minor-league deal suggests he might have needed surgery, though that hasn't been confirmed. Peguero holds a career 4.26 ERA over parts of five major-league seasons.",
+    "category": "injury",
+    "status": "new",
+    "updated_at": "2026-03-24T19:29:26.084354+00:00"
+  },
+  "akil baddoo": {
+    "exact_hash": "bac7ae4db6d99cdb1acab174bad2c332ca0457d8",
+    "story_hash": "8120211a79d178e1b0e0bc309b1c40048f521e05",
+    "update_text": "The Brewers placed Baddoo (quadriceps) on the 60-day injured list Tuesday, Adam McCalvy of MLB.com reports.",
+    "details_text": "Baddoo suffered a quadriceps strain in mid-March that was more significant than initially expected, and it's now expected to keep him sidelined until June, per Todd Rosiak of the Milwaukee Journal Sentinel. Even once healthy, the 27-year-old won't be guaranteed to be added to the big-league roster.",
+    "category": "injury",
+    "status": "new",
+    "updated_at": "2026-03-24T19:29:26.276878+00:00"
+  },
+  "joey wentz": {
+    "exact_hash": "e2b3b1b5d6a45feae9b67e6809618107313e3c75",
+    "story_hash": "fcc577667286c728c41a7938d3eb2ea37e2dd05f",
+    "update_text": "Atlanta placed Wentz on the 60-day injured list Tuesday with a right ACL tear.",
+    "details_text": "The transaction clears a 40-man roster spot for waiver claim Osvaldo Bido. Wentz will miss the entire 2026 campaign following ACL surgery earlier this month.",
+    "category": "injury",
+    "status": "new",
+    "updated_at": "2026-03-24T19:29:31.230788+00:00"
+  },
+  "osvaldo bido": {
+    "exact_hash": "7b315423991e5487d46664587572fcb2f99871fa",
+    "story_hash": "29d5582c5485b1f3193e2e38252ed9b54e2a62aa",
+    "update_text": "Atlanta claimed Bido off waivers Tuesday.",
+    "details_text": "The right-hander was recently waived by the Yankees and will now return to Atlanta, which rostered him briefly in December before he was claimed by the Rays. Bido made 26 appearances (10 starts) for the Athletics last season and had a 5.87 ERA, 1.61 WHIP and 68:35 K:BB across 79.2 innings.",
+    "category": "transaction",
+    "status": "new",
+    "updated_at": "2026-03-24T19:29:31.594227+00:00"
+  },
+  "jace jung": {
+    "exact_hash": "ebbb6d40f3305081a9ab3c9beca529f22214601d",
+    "story_hash": "1420568062daaf3a69e3ad928a7f8b11c72ccec1",
+    "update_text": "The Tigers optioned Jung to Triple-A Toledo on Tuesday",
+    "details_text": "Jung never seemed overly likely to make Detroit's Opening Day roster, but he stuck around for the entirety of spring training while posting a .286/.405/.371 slash line in 20 games. The 25-year-old had a .342 OPS in 55 plate appearances for the Tigers last year and isn't likely to see significant playing time in the majors this year unless the club dealing with some significant infield injuries.",
+    "category": "transaction",
+    "status": "new",
+    "updated_at": "2026-03-24T19:29:31.855324+00:00"
+  },
+  "wenceel perez": {
+    "exact_hash": "18c1120f7f2a105603d94565789f8c9259b77e3e",
+    "story_hash": "c2c08a0ae6b56643e172490a7891bad4be424ff7",
+    "update_text": "The Tigers optioned Perez to Triple-A Toledo on Tuesday",
+    "details_text": "The 26-year-old was the early favorite to begin the season as Detroit's primary right fielder, but he'll instead open the campaign in the minors after batting .158 (6-for-38) with no extra-base hits across 16 spring training games. Top prospect Kevin McGonigle is essentially the roster replacement for Perez, but it'll likely be Matt Vierling that benefits the most from the demotion. Perez had a .738 OPS in 383 plate appearances during the regular season last year and should still get a look with the Tigers at some point in 2026.",
+    "category": "transaction",
+    "status": "new",
+    "updated_at": "2026-03-24T19:29:32.074803+00:00"
+  },
+  "troy johnston": {
+    "exact_hash": "bed56bb6b78dd4d2e8492fca4ea0f199e5b53c94",
+    "story_hash": "7259b4307c7b909e49283257025e166682a6251c",
+    "update_text": "Johnston made the Rockies' Opening Day roster",
+    "details_text": "Johnston was claimed off waivers by the Rockies in November, and he earned a place on the Opening Day roster with a .973 OPS across 22 spring training games. The 28-year-old is expected to begin the season in a reserve role, but he could get an opportunity for regular playing time at some point given Colorado's lack of established pieces.",
+    "category": "lineup",
+    "status": "new",
+    "updated_at": "2026-03-24T19:29:32.277258+00:00"
+  },
+  "tyler freeman": {
+    "exact_hash": "b655a187ba3625ad478398311f1dfa634b5d088d",
+    "story_hash": "34b8c61a8a30a1140a13a97e1841d1481efdb93d",
+    "update_text": "The Rockies placed Freeman on the 10-day injured list Tuesday with lower-back inflammation",
+    "details_text": "Freeman didn't make his Cactus League debut until March 5 due to back problems and he encountered a setback last week. While he does not appear to have any structural damage in his back, the fact that the injury has lingered for so long could point to longer than a minimum stay on the IL. Once healthy, Freeman projects for a super utility role in Colorado.",
+    "category": "injury",
+    "status": "new",
+    "updated_at": "2026-03-24T19:29:32.511936+00:00"
+  },
+  "andres chaparro": {
+    "exact_hash": "8ec104516827d11d4301b19256cde8c7a02de572",
+    "story_hash": "0aa96cc1a9f16f9d57d14131dd12253474d86869",
+    "update_text": "Chaparro is expected to begin the season as the Nationals' primary designated hitter, Jessica Camerato and Paige Leckie of MLB.com report.",
+    "details_text": "Luis Garcia is shifting to first base and Daylen Lile should be the primary right fielder, leaving DH available for Chaparro. The 26-year-old hasn't done much yet in the majors to suggest he's capable of providing consistent offense, however, slashing .203/.268/.358 in 205 plate appearances for the Nats over the last two years with just five homers. He's also struggled this spring, batting .154 (6-for-39) with two home runs and a 6:12 BB:K. If Chaparro can't step up, he could be the player who loses his spot when it's time for Dylan Crews or Robert Hassell -- both of whom will begin the year with Triple-A Rochester -- to get another look.",
+    "category": "role",
+    "status": "new",
+    "updated_at": "2026-03-24T19:29:37.552465+00:00"
+  },
+  "porter hodge": {
+    "exact_hash": "20f2f81803132bef315f8d1ccf6933eef9d9d785",
+    "story_hash": "79982e7aa166496bffaa2f7955eba1d5dfff6c33",
+    "update_text": "The Cubs hope Hodge (elbow) is ready to play catch around April 1, MLB.com reports.",
+    "details_text": "Hodge was diagnosed with a right flexor strain in early March. Given that he will be shut down for nearly a month, at minimum, it's going to take a while for him to get built back up. Hodge posted a 6.27 ERA and 1.58 WHIP over his 36 appearances with the Cubs in 2025.",
+    "category": "injury",
+    "status": "new",
+    "updated_at": "2026-03-24T19:29:37.892396+00:00"
+  },
+  "matt mclain": {
+    "exact_hash": "cde91c56b877576acbb37231f045775a090f9a04",
+    "story_hash": "4ae1bb5b217c8cad7760faca46f6b0498ab7c1ad",
+    "update_text": "McLain (illness) is starting at second base and batting second in Tuesday's exhibition game against the Brewers",
+    "details_text": "McLain was unavailable for Monday's exhibition game due to an illness, but he's good to go after taking a day to recover. The second baseman will begin the season batting second for the Reds after posting a .220/.300/.343 slash line with 15 homers and 18 steals in 147 regular-season games last year.",
+    "category": "injury",
+    "status": "new",
+    "updated_at": "2026-03-24T19:29:38.080824+00:00"
+  },
+  "trei cruz": {
+    "exact_hash": "2e7baacd9a7f0e0635f1b0be47c31f74dc2e600b",
+    "story_hash": "575cd4bae5df706b5a42ba5f86a638dfa36535f6",
+    "update_text": "The Tigers optioned Cruz to Triple-A Toledo on Tuesday",
+    "details_text": "Cruz slashed .270/.341/.324 with a couple stolen bases during Grapefruit League action. The 27-year-old has yet to see any action at the major-league level but is a good bet to debut at some point for the Tigers this season.",
+    "category": "transaction",
+    "status": "new",
+    "updated_at": "2026-03-24T19:29:38.365067+00:00"
+  },
+  "luis garcia jr.": {
+    "exact_hash": "96144d676eb6ad31755925302fde22575320c8c0",
+    "story_hash": "ca0bb318f105e0024c5739f8cee10a70373375ac",
+    "update_text": "Garcia could see most of his playing time at first base this season, Jessica Camerato and Paige Leckie of MLB.com report.",
+    "details_text": "The Nationals' decision to send Dylan Crews and Robert Hassell to Triple-A to begin the season created a domino effect that put Daylen Lile in right field, opening up regular DH at-bats for Andres Chaparro and allowing Garcia to slide from the keystone to first base-- a position he has only two games of big-league experience at. Washington is hoping the reduced defensive responsibilities will help the 25-year-old's bat find another level after he slashed just .252/.289/.412 in 2025 with 16 homers and 14 steals in 139 games.",
+    "category": "role",
+    "status": "new",
+    "updated_at": "2026-03-24T19:29:38.749180+00:00"
+  },
+  "daylen lile": {
+    "exact_hash": "38288cff56b0bedc7280615c3f0dd035a7fa634b",
+    "story_hash": "757ae675c0e17d5688fe886cabdd413b4861017b",
+    "update_text": "Lile appears to be the likely Opening Day starter in right field for the Nationals, Jessica Camerato and Paige Leckie of MLB.com report.",
+    "details_text": "With Dylan Crews and Robert Hassell both beginning the year at Triple-A, Lile is effectively the last man standing in right, with James Wood in left field and Jacob Young in center. Lile is coming off a surprising rookie season in 2025 in which he slashed .299/.347/.498 over 91 games with nine homers and eight steals, a performance which carries a little more weight than his .213/.240/.447 slash line over 16 games this spring.",
+    "category": "role",
+    "status": "new",
+    "updated_at": "2026-03-24T19:29:39.090787+00:00"
+  },
+  "angel bastardo": {
+    "exact_hash": "9a70d3a7ab30c48830e6fc0380337d71b9d2466c",
+    "story_hash": "85d80f960d7e3c941b70aaa989b047c2fad0afb3",
+    "update_text": "Bastardo won't be on the Blue Jays' Opening Day roster, Keegan Matheson of MLB.com reports.",
+    "details_text": "It's not clear yet what the organization plans to do with the right-hander, who was a Rule 5 pick ahead of the 2025 season but spent all of last year on the IL while he completed his recovery from Tommy John surgery. Bastardo struggled to find the plate this spring, posting a 5:7 K:BB over 7.2 Grapefruit League innings.",
+    "category": "lineup",
+    "status": "new",
+    "updated_at": "2026-03-24T19:29:43.837057+00:00"
+  },
+  "nathan lukes": {
+    "exact_hash": "38511796c4c612d9d28ae4848d266f39d41c801b",
+    "story_hash": "d9df5b596308d8fd692f48225e41dbd36cd316a4",
+    "update_text": "Lukes has a spot on the Blue Jays' Opening Day roster, Rosie DiManno of The Toronto Star reports.",
+    "details_text": "The acquisition of Jesus Sanchez in February put Lukes' job security in question, but the 31-year-old will break camp as part of a crowded outfield that also includes Daulton Varsho, George Springer, Addison Barger and Myles Straw, with Davis Schneider still fighting for the final bench spot as well. Lukes did his part to prove his worth this spring, slashing .333/.468/.417 in 18 Grapefruit League games with a 9:10 BB:K, but his .255/.323/.407 line over 135 regular-season games in 2025 offers a better view of his limited upside at the plate.",
+    "category": "lineup",
+    "status": "new",
+    "updated_at": "2026-03-24T19:29:44.170367+00:00"
+  },
+  "adrian del castillo": {
+    "exact_hash": "189d9dfc44020f9fb0ec3a05a1c7b658587574a3",
+    "story_hash": "96fa3db53de867cecfb968c8cca9ca6926dc69de",
+    "update_text": "Del Castillo (calf) will begin the season on the injured list, MLB.com reports.",
+    "details_text": "Del Castillo reported to Diamondbacks camp with a left calf injury and didn't play in any Cactus League games, so it's not a surprise he's destined for the IL. It's unclear how far along he is in his rehab or how much time he might miss. Once healthy, Del Castillo could be assigned to Triple-A Reno.",
+    "category": "injury",
+    "status": "new",
+    "updated_at": "2026-03-24T19:29:44.363595+00:00"
+  },
+  "hunter bigge": {
+    "exact_hash": "c637f67c35306491e3fc9eb11683b910f93f0662",
+    "story_hash": "9dc009b5252cc82f3ec5375fa2959f84a8aedf78",
+    "update_text": "The Rays optioned Bigge to Triple-A Durham on Tuesday",
+    "details_text": "The right-hander allowed just one run with a 10:3 K:BB across 6.1 innings during spring training, but he won't crack Tampa Bay's Opening Day roster. Bigge had a 2.40 ERA, 1.07 WHIP and 12:5 K:BB over 15 big-league innings last year, and it should only be a matter of time before the Rays give him a look in 2026.",
+    "category": "transaction",
+    "status": "new",
+    "updated_at": "2026-03-24T19:29:44.576392+00:00"
+  },
+  "joe boyle": {
+    "exact_hash": "9701cae3d47b6ad7a4db9dc4770ce08fdc53d142",
+    "story_hash": "4f85ea4ff818f6b82cd66fbc9e7d3b64a29cdc04",
+    "update_text": "Boyle will rejoin the Rays to start the second game of the season Saturday against the Cardinals",
+    "details_text": "The right-hander was competing for a roster spot before being sent to minor-league camp last week, but he'll end up starting the second game of the year with Ryan Pepiot (hip) headed to the IL and Nick Martinez (knee) banged up. Boyle started in nine of his 13 appearances for Tampa Bay last season and had a 4.67 ERA, 1.37 WHIP and 58:28 K:BB across 52 innings.",
+    "category": "lineup",
+    "status": "new",
+    "updated_at": "2026-03-24T19:29:44.753607+00:00"
+  },
+  "thomas saggese": {
+    "exact_hash": "95aa0a8c8e34c6ccb4f91edeb07df2fe12c34adc",
+    "story_hash": "c3dd2b3ecc985d63fe89a689b910d190d7b5af12",
+    "update_text": "Saggese is in the mix to start games in left field for the Cardinals while Lars Nootbaar (heels) is shelved, Derrick Goold of the St. Louis Post-Dispatch reports.",
+    "details_text": "An infielder by trade, Saggese learned the outfield on the fly this spring and missed out on some development time while on Team Italy's roster for the World Baseball Classic. However, he showed enough aptitude defensively in the outfield and also had a .907 OPS this spring to convince the Cardinals to carry him on the Opening Day roster. Nathan Church and Jose Fermin will also see action in left field, and Fermin and Saggese are options to play several other positions, as well. Nootbaar is being evaluated for potential placement on the 60-day injured list, so the trio of competitors could have ample time to make a good impression.",
+    "category": "general",
+    "status": "new",
+    "updated_at": "2026-03-24T19:29:49.234964+00:00"
+  },
+  "lars nootbaar": {
+    "exact_hash": "90bd99d734df08e4771adb6c924a4858918acc74",
+    "story_hash": "fbbb069271e0839227c041893ed5d6e800432f80",
+    "update_text": "Cardinals president of baseball operations Chaim Bloom said Monday that Nootbaar (heels) will be evaluated this week for a potential placement on the 60-day injured list, Derrick Goold of the St. Louis Post-Dispatch reports.",
+    "details_text": "Bloom noted that the team's current wish is to avoid the 60-day IL with Nootbaar, as the transaction would leave him ineligible to make his season debut until late May. However, that decision will be made after the Cardinals get a better sense of how far Nootbaar is along in his rehab from offseason surgery on both heels. Per Brian Walton of TheCardinalNation.com, Nootbaar is slated to take batting practice with minor leaguers at the team's spring training complex Tuesday. St. Louis will use a combination of Nathan Church, Thomas Saggese and Jose Fermin in left field until Nootbaar is ready.",
+    "category": "injury",
+    "status": "new",
+    "updated_at": "2026-03-24T19:29:49.441489+00:00"
+  }
+}
