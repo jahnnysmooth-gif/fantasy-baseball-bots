@@ -8,6 +8,12 @@ try:
     from closer_bot import start_closer_bot
     print("Loaded closer_bot", flush=True)
 
+    from hitter_bot import start_hitter_bot
+    print("Loaded hitter_bot_full", flush=True)
+
+    from starter_bot import start_starter_bot
+    print("Loaded starter_bot_full", flush=True)
+
     from injury_bot import start_injury_bot
     print("Loaded injury_bot", flush=True)
 
@@ -73,6 +79,12 @@ async def main() -> None:
     await asyncio.sleep(3)
 
     tasks.append(asyncio.create_task(run_forever("closer_bot", start_closer_bot)))
+    await asyncio.sleep(3)
+
+    tasks.append(asyncio.create_task(run_forever("hitter_bot", start_hitter_bot)))
+    await asyncio.sleep(3)
+
+    tasks.append(asyncio.create_task(run_forever("starter_bot", start_starter_bot)))
     await asyncio.sleep(3)
 
     tasks.append(asyncio.create_task(run_forever("injury_bot", start_injury_bot)))
