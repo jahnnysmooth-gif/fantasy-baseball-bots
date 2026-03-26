@@ -9,10 +9,10 @@ try:
     print("Loaded closer_bot", flush=True)
 
     from hitter_bot import start_hitter_bot
-    print("Loaded hitter_bot_full", flush=True)
+    print("Loaded hitter_bot", flush=True)
 
     from starter_bot import start_starter_bot
-    print("Loaded starter_bot_full", flush=True)
+    print("Loaded starter_bot", flush=True)
 
     from injury_bot import start_injury_bot
     print("Loaded injury_bot", flush=True)
