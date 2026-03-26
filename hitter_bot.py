@@ -2377,9 +2377,28 @@ async def loop():
         await asyncio.sleep(POLL_MINUTES * 60)
 
 
-# ---------------- SHARED BASE RUNTIME REMOVED ----------------
-# The original closer_bot runtime block was removed in this module so only the
-# hitter/starter-specific runtime below can start the bot.
+# ---------------- START ----------------
+
+intents = discord.Intents.default()
+client = discord.Client(intents=intents)
+background_task = None
+
+
+@client.event
+async def on_ready():
+    global background_task
+    log(f"Logged in as {client.user}")
+
+    if background_task is None or background_task.done():
+        background_task = asyncio.create_task(loop())
+        log("Closer background task created")
+
+
+async def start_closer_bot():
+    if not TOKEN:
+        raise RuntimeError("ANALYTIC_BOT_TOKEN is not set")
+
+    await client.start(TOKEN, reconnect=True)
 
 
 # ================= HITTER BOT OVERRIDES =================
