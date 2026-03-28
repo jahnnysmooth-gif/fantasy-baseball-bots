@@ -969,7 +969,7 @@ def build_starter_overview(name: str, label: str, stats: dict, seed: int, team_n
         ],
         "QUALITY": [
             f"{name} gave the {team_name} a strong {ip_text} and kept the damage to a minimum.",
-            f"{name} turned in a quality outing and rarely let the game get loose on him.",
+            f"{name} turned in a quality outing and kept the game from getting away in any one inning.",
             f"{name} gave the {team_name} exactly the kind of stable start it needed.",
             f"{name} was not flashy every inning, but the overall work was strong and useful.",
         ],
@@ -986,7 +986,7 @@ def build_starter_overview(name: str, label: str, stats: dict, seed: int, team_n
             f"{name} kept the pressure light for most of the night and never looked rushed.",
         ],
         "SOLID": [
-            f"{name} gave the {team_name} a useful start and kept the game on stable footing while he was in it.",
+            f"{name} gave the {team_name} a useful start and kept things steady while he was on the mound.",
             f"{name} turned in a steady outing and did the job without much extra drama.",
             f"{name} was not overpowering, but he gave the {team_name} the kind of start it could work with.",
             f"{name} kept this thing under control well enough to hand over a playable game.",
@@ -1080,11 +1080,11 @@ def build_starter_pressure_sentence(stats: dict, label: str, seed: int) -> str:
     if label in GOOD_STARTER_LABELS:
         choices = [
             "When hitters did get on, he usually found a way to keep the inning from turning ugly.",
-            "The few threats against him never had enough time to become the whole story.",
-            "He kept the traffic from snowballing and stayed in control of the bigger moments.",
+            "The few threats against him never had time to turn into a big inning.",
+            "He kept the traffic from snowballing and kept the bigger innings off the board.",
             "Even when the lineup pushed a little, he was usually the one who got the last word.",
             "There were not many clean looks for the lineup, and that kept the pressure light for most of the night.",
-            "Most of the trouble stopped at one baserunner, which kept the game from changing on him.",
+            "Most of the traffic stayed scattered, which kept the game from turning on him.",
         ]
         if k >= 8:
             choices.append("When things tightened up, he still had enough putaway stuff to end the threat himself.")
@@ -1130,9 +1130,11 @@ def build_starter_team_context(p: dict, stats: dict, label: str, game_context: d
     if p.get("side") == "away":
         team_runs = away_score
         opp_runs = home_score
+        opp_name = team_name_from_abbr(game_context.get("home_abbr"))
     else:
         team_runs = home_score
         opp_runs = away_score
+        opp_name = team_name_from_abbr(game_context.get("away_abbr"))
 
     win_decision = safe_int(stats.get("wins", 0), 0) > 0
     won = team_runs > opp_runs
@@ -1140,39 +1142,39 @@ def build_starter_team_context(p: dict, stats: dict, label: str, game_context: d
 
     if won and label in POSITIVE_STARTER_LABELS:
         choices = [
-            f"Those innings let the {team_name} play from in front instead of scrambling to catch up.",
-            f"He handed the rest of the night over in good shape and let the {team_name} dictate the pace.",
-            f"That work gave the {team_name} a cleaner path through the rest of the game.",
-            "He did his part to hand the bullpen a much more manageable finish.",
-            f"It let the {team_name} stay in control for most of the night.",
+            f"Those innings let the {team_name} stay in front instead of scrambling to catch up.",
+            f"He kept the {team_name} in control for most of the night.",
+            f"He handed the bullpen a game the {team_name} could finish from in front.",
+            f"He made sure the {opp_name} never really got the game swinging their way.",
+            f"The {team_name} were still in a good spot once he turned it over late.",
         ]
         if win_decision:
             choices.append("He wound up with the win, and the outing put him in line for it from the start.")
         elif team_runs <= 2:
-            choices.append("He did it without much offensive cushion, which made the cleaner innings matter even more.")
+            choices.append(f"He did it without much offensive cushion, which made every cleaner inning bigger for the {team_name}.")
         elif margin >= 4:
-            choices.append(f"Once the {team_name} gave him room to work, he mostly kept the game pointed in the right direction.")
+            choices.append(f"Once the {team_name} built some room, he kept the {opp_name} from putting together the inning that could change it.")
     elif won and label in SUBPAR_STARTER_LABELS:
         choices = [
-            "His offense gave him enough breathing room to survive the line, even if the start itself stayed shaky.",
+            f"The {team_name} scored enough to move past it, even if the start itself stayed shaky.",
             "The bats covered for it, though the outing itself was bumpier than the final margin suggests.",
-            f"The {team_name} scored enough to move past it, even if the start demanded more cleanup than anyone wanted.",
+            f"He still left the {team_name} needing more cleanup than they would have liked.",
             "The final result worked out, but the outing itself was rougher than the scoreboard alone implies.",
         ]
     elif (not won) and label in POSITIVE_STARTER_LABELS:
         choices = [
-            "He kept the game within reach, but the support around the outing never quite matched it.",
+            f"He kept the {team_name} within reach, but the support around the outing never quite matched it.",
             f"The line was good enough to keep the {team_name} hanging around, even if the result went the other way.",
-            f"He gave the {team_name} a chance, even if the rest of the game never quite tilted back toward him.",
-            "He did enough to make the game winnable, even if the ending did not break his way.",
+            f"He gave the {team_name} a chance, even if the rest of the game never quite tilted back toward them.",
+            f"He did enough to keep the {opp_name} from running away with it early.",
             "It was the kind of start that usually keeps a team alive deep into the game.",
         ]
     else:
         choices = [
             f"Once the damage landed, the {team_name} spent the rest of the night trying to claw back.",
-            "The early hole changed the shape of the game from there.",
-            f"It left the {team_name} playing uphill once the outing slipped.",
-            f"From there, the {team_name} was chasing the game more than controlling it.",
+            f"The early hole left the {team_name} playing uphill for the rest of the game.",
+            f"From there, the {team_name} were chasing more than controlling things.",
+            f"It gave the {opp_name} too much room to play from ahead.",
         ]
 
     if margin >= 5 and won and label in SUBPAR_STARTER_LABELS:
@@ -1201,7 +1203,7 @@ def build_starter_game_flow_sentence(p: dict, label: str, seed: int) -> str:
 
     if flow.get("only_damage_in_one_inning") and opp_runs_while_in > 0:
         choices = [
-            "The damage was mostly contained to one inning, which kept the rest of the outing from unraveling.",
+            "Most of the damage came in one inning, and the rest of the outing was much steadier.",
             "Almost all of the trouble came in one stretch, and he was steadier outside of that pocket.",
             "One rough inning did most of the damage against him, but the rest of the night was much calmer.",
         ]
@@ -1210,7 +1212,7 @@ def build_starter_game_flow_sentence(p: dict, label: str, seed: int) -> str:
     if flow.get("late_damage") and label in POSITIVE_STARTER_LABELS:
         choices = [
             "He kept the lineup quiet for most of the night and did not see real damage until late.",
-            "For most of the outing, he had the game under control before the only real trouble arrived near the end.",
+            "He looked in control through the middle innings before the only real trouble arrived near the end.",
             "He was rolling for a while before the lineup finally scratched out something late.",
         ]
         return choices[(seed // 23) % len(choices)]
@@ -1218,7 +1220,7 @@ def build_starter_game_flow_sentence(p: dict, label: str, seed: int) -> str:
     if scoreless_to_start >= 4:
         choices = [
             f"He opened with {number_word(scoreless_to_start)} straight scoreless innings and set a strong tone right away.",
-            f"The lineup did not get much going early, as he stacked {number_word(scoreless_to_start)} quiet innings to begin the night.",
+            f"He stacked {number_word(scoreless_to_start)} quiet innings to begin the night before anything changed.",
             f"He gave the opposition very little early, opening with {number_word(scoreless_to_start)} scoreless frames before anything changed.",
         ]
         return choices[(seed // 23) % len(choices)]
@@ -1226,8 +1228,8 @@ def build_starter_game_flow_sentence(p: dict, label: str, seed: int) -> str:
     if team_runs_while_in >= 4 and exit_margin > 0 and label in POSITIVE_STARTER_LABELS:
         choices = [
             f"The {team_name} gave him room to work, and he mostly kept the game tilted in their direction.",
-            "With some run support behind him, he was able to stay on the attack and keep control of the game script.",
-            "His side scored enough while he was in there to let him pitch with a little more freedom.",
+            "With run support behind him, he stayed on the attack instead of pitching from behind.",
+            f"The {team_name} scored enough while he was in there to let him pitch with a little more freedom.",
         ]
         return choices[(seed // 23) % len(choices)]
 
@@ -1241,9 +1243,9 @@ def build_starter_game_flow_sentence(p: dict, label: str, seed: int) -> str:
 
     if exit_margin > 0 and label in POSITIVE_STARTER_LABELS:
         choices = [
-            f"By the time he left, the {team_name} was still in a good spot to finish the job.",
+            f"By the time he left, the {team_name} were still in a good spot to finish the job.",
             "He handed over a game that was under control enough for the bullpen to take it home.",
-            f"He exited with the {team_name} in decent shape, which is exactly what a starter wants to do.",
+            f"He exited with the {team_name} still out in front.",
         ]
         return choices[(seed // 23) % len(choices)]
 
