@@ -986,7 +986,7 @@ def build_starter_overview(name: str, label: str, stats: dict, seed: int) -> str
             f"{name} gave his club a sturdy {ip_text} and limited the damage well.",
             f"{name} turned in the kind of stable start that keeps a team in good shape.",
             f"{name} was not perfect every inning, but the overall work gave his side exactly what it needed.",
-            f"{name} put together a strong, useful start and rarely let the game get loose on him.",
+            f"{name} put together a strong outing and kept {team_name} in control most of the night.",
         ],
         "STRIKEOUT": [
             f"{name} brought real bat-missing to the mound, even if the outing was not spotless.",
@@ -1106,16 +1106,9 @@ def build_starter_pressure_sentence(stats: dict, label: str, seed: int) -> str:
             "Most of the traffic died quickly, which kept the game from getting dragged into long innings.",
         ]
         if k >= 8:
-            choices.extend([
-                "When things tightened up, he still had enough putaway stuff to end the threat himself.",
-                "He had hitters chasing when he needed a big pitch and never let the lineup get comfortable.",
-                "The swing-and-miss stuff was there all night, especially once runners reached base.",
-            ])
+            choices.append("When things tightened up, he still had enough putaway stuff to end the threat himself.")
         elif traffic <= 4:
-            choices.extend([
-                "There were very few real openings for the lineup, which helped the outing stay under control from start to finish.",
-                "He scattered the few hits he allowed and never gave the lineup a chance to build momentum.",
-            ])
+            choices.append("There were very few real openings for the lineup, which helped the outing stay under control from start to finish.")
     elif label in BAD_STARTER_LABELS:
         if outs < 3:
             choices = [
@@ -1167,9 +1160,9 @@ def build_starter_team_context(p: dict, stats: dict, label: str, game_context: d
         choices = [
             "Those innings let his side play from in front instead of scrambling to catch up.",
             "He handed the rest of the night over in good shape and let his club dictate the pace.",
-            "That work gave his side a cleaner path through the rest of the game.",
+            "That outing helped his club settle into the game and protect the lead.",
             "He did his part to hand the bullpen a much more manageable finish.",
-            "It let his side keep the game on its own terms for most of the night.",
+            "It helped keep the pressure off the bullpen and allowed his club to stay in front.",
         ]
         if win_decision:
             choices.append("He wound up with the win, and the outing put him in line for it from the start.")
@@ -1247,7 +1240,7 @@ def build_starter_game_flow_sentence(p: dict, label: str, seed: int) -> str:
         choices = [
             f"At one point he retired {number_word(max_retired_in_row)} straight hitters and really took control of the game.",
             f"He found a strong rhythm in the middle innings, retiring {number_word(max_retired_in_row)} in a row at one point.",
-            f"The game settled into his hands once he ran off {number_word(max_retired_in_row)} straight outs.",
+            f"He settled in after the early traffic and retired {number_word(max_retired_in_row)} straight hitters at one point.",
         ]
         return choices[(seed // 23) % len(choices)]
 
