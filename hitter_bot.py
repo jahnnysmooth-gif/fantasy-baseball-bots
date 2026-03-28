@@ -25,7 +25,7 @@ SCHEDULE_URL = "https://statsapi.mlb.com/api/v1/schedule?sportId=1"
 LIVE_URL = "https://statsapi.mlb.com/api/v1.1/game/{}/feed/live"
 
 POLL_MINUTES = 10
-RESET_HITTER_STATE = os.getenv("RESET_HITTER_STATE", "").lower() in {"1", "true", "yes"}
+RESET_CLOSER_STATE = os.getenv("RESET_HITTER_STATE", "").lower() in {"1", "true", "yes"}
 DEPTH_CHART_OVERRIDE_CHANNEL_ID = int(os.getenv("DEPTH_CHART_OVERRIDE_CHANNEL_ID", "1484232761597366412"))
 TREND_STATE_FILE = "state/hitter/trend_state.json"
 
@@ -258,7 +258,7 @@ def apply_player_card_chrome(embed: discord.Embed, name: str, team: str):
 def load_state():
     base = {"posted": [], "trend_posted": {}, "trend_history": {}, "trend_last_post_at": None, "trend_next_eligible_at": None, "trend_post_count_by_hour": {}, "trend_total_by_date": {}, "trend_family_last_post_at": {}, "velocity_posted": {}}
 
-    if RESET_HITTER_STATE:
+    if RESET_CLOSER_STATE:
         return base
 
     if not os.path.exists(STATE_FILE):
@@ -2235,8 +2235,8 @@ async def loop():
     state = load_state()
     posted = set(state.get("posted", []))
 
-    if RESET_HITTER_STATE:
-        log("RESET_HITTER_STATE enabled — posted state cleared for this run")
+    if RESET_CLOSER_STATE:
+        log("RESET_CLOSER_STATE enabled — posted state cleared for this run")
 
     tracked = await refresh_tracked_pitchers()
     last_refresh_date = datetime.now(ET).date()
@@ -2384,7 +2384,24 @@ client = discord.Client(intents=intents)
 background_task = None
 
 
-# ================= HITTER BOT =================
+@client.event
+async def on_ready():
+    global background_task
+    log(f"Logged in as {client.user}")
+
+    if background_task is None or background_task.done():
+        background_task = asyncio.create_task(loop())
+        log("Closer background task created")
+
+
+async def start_closer_bot():
+    if not TOKEN:
+        raise RuntimeError("ANALYTIC_BOT_TOKEN is not set")
+
+    await client.start(TOKEN, reconnect=True)
+
+
+# ================= HITTER BOT OVERRIDES =================
 
 HITTER_GAMELOG_CACHE = {}
 MIN_HITTER_SCORE = float(os.getenv("HITTER_MIN_SCORE", "5.0"))
@@ -2551,44 +2568,68 @@ def build_hitter_summary(name: str, team: str, stats: dict, label: str, matchup:
     triples = safe_int(stats.get("triples", 0), 0)
     bb = safe_int(stats.get("baseOnBalls", 0), 0)
     sb = safe_int(stats.get("stolenBases", 0), 0)
+    strikeouts = safe_int(stats.get("strikeOuts", 0), 0)
     tb = hitter_total_bases(stats)
 
     opening = {
-        "MULTI_HR": f"{name} supplied the thump in {matchup}, launching {hr} home runs and finishing with {tb} total bases.",
-        "POWER": f"{name} made a major impact at the plate in {matchup}, turning his best swings into extra damage.",
-        "FOUR_HIT": f"{name} was on everything in {matchup}, piling up four hits and constantly putting pressure on the defense.",
-        "THREE_HIT": f"{name} stayed hot throughout {matchup}, stacking a three-hit night and driving offense most of the game.",
-        "RUN_GAME": f"{name} created offense in multiple ways in {matchup}, adding impact on the bases as well as at the plate.",
-        "RBI_GAME": f"{name} came through in run-producing spots in {matchup} and helped swing the game with key contact.",
-        "SOLID": f"{name} turned in one of the more productive hitting lines from {matchup} and gave his club quality offense.",
-    }.get(label, f"{name} turned in one of the more productive hitting lines from {matchup}.")
+        "MULTI_HR": f"{name} carried the offense in {matchup}, leaving the yard {hr} times and finishing with {tb} total bases.",
+        "POWER": f"{name} did his damage with impact contact in {matchup} and gave {team} a big lift in the middle of the order.",
+        "FOUR_HIT": f"{name} was all over everything in {matchup}, turning in a four-hit night and constantly putting pressure on the defense.",
+        "THREE_HIT": f"{name} kept finding barrels in {matchup}, stringing together a three-hit night and driving the offense for {team}.",
+        "RUN_GAME": f"{name} affected the game in several ways in {matchup}, creating offense both at the plate and on the bases.",
+        "RBI_GAME": f"{name} came through in the biggest spots in {matchup}, cashing in run-scoring chances for {team}.",
+        "SOLID": f"{name} turned in one of the better offensive performances from {matchup} and helped keep {team} moving all night.",
+    }.get(label, f"{name} put together a productive night in {matchup} and gave {team} quality offense.")
 
-    details = []
+    game_bits = []
     if hits:
-        details.append(f"He finished {hits}-for-{ab}")
-    if runs:
-        details.append(f"scored {runs} run{'s' if runs != 1 else ''}")
+        game_bits.append(f"finished {hits}-for-{ab}")
+    if hr:
+        game_bits.append(f"homered {hr} time{'s' if hr != 1 else ''}")
+    elif doubles or triples:
+        xbh_parts = []
+        if doubles:
+            xbh_parts.append(f"{doubles} double{'s' if doubles != 1 else ''}")
+        if triples:
+            xbh_parts.append(f"{triples} triple{'s' if triples != 1 else ''}")
+        game_bits.append("added " + " and ".join(xbh_parts))
     if rbi:
-        details.append(f"drove in {rbi}")
-    if doubles:
-        details.append(f"ripped {doubles} double{'s' if doubles != 1 else ''}")
-    if triples:
-        details.append(f"added {triples} triple{'s' if triples != 1 else ''}")
+        game_bits.append(f"drove in {rbi}")
+    if runs:
+        game_bits.append(f"scored {runs} run{'s' if runs != 1 else ''}")
     if bb:
-        details.append(f"drew {bb} walk{'s' if bb != 1 else ''}")
+        game_bits.append(f"drew {bb} walk{'s' if bb != 1 else ''}")
     if sb:
-        details.append(f"stole {sb} base{'s' if sb != 1 else ''}")
+        game_bits.append(f"stole {sb} base{'s' if sb != 1 else ''}")
 
-    second = ""
-    if details:
-        if len(details) == 1:
-            second = details[0] + "."
+    middle = ""
+    if game_bits:
+        if len(game_bits) == 1:
+            middle = f"He {game_bits[0]}."
         else:
-            second = ", ".join(details[:-1]) + ", and " + details[-1] + "."
-            second = second[0].upper() + second[1:]
+            middle = f"He {', '.join(game_bits[:-1])}, and {game_bits[-1]}."
 
-    closer = f"Final score: {score}."
-    return " ".join([x for x in [opening, second, closer] if x])
+    closer_parts = []
+    if hr >= 2:
+        closer_parts.append("It was one of the bigger power performances anywhere on the slate")
+    elif hits >= 4:
+        closer_parts.append("Every trip to the plate seemed productive")
+    elif hits >= 3 and rbi >= 3:
+        closer_parts.append("He consistently came through in run-producing spots")
+    elif sb >= 2:
+        closer_parts.append("His legs were just as important as his bat")
+    elif strikeouts >= 3 and hits <= 1:
+        closer_parts.append("The strikeouts still kept the line from being completely clean")
+    elif hits >= 2:
+        closer_parts.append("He stayed involved in the offense from start to finish")
+
+    closer = ""
+    if closer_parts:
+        closer = closer_parts[0] + f". Final score: {score}."
+    else:
+        closer = f"Final score: {score}."
+
+    return " ".join([x for x in [opening, middle, closer] if x])
 
 
 async def post_card(channel, p: dict, matchup: str, score: str, context=None, streak_count: int = 0, tracked_info=None, recent_appearances=None, usage_note: str = "", velocity_alert=None):
