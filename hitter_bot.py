@@ -25,8 +25,14 @@ LIVE_URL = "https://statsapi.mlb.com/api/v1.1/game/{}/feed/live"
 POLL_MINUTES = int(os.getenv("HITTER_POLL_MINUTES", "10"))
 RESET_HITTER_STATE = os.getenv("RESET_HITTER_STATE", "").lower() in {"1", "true", "yes"}
 MIN_HITTER_SCORE = float(os.getenv("HITTER_MIN_SCORE", "5.0"))
-MAX_CARDS_PER_GAME = int(os.getenv("HITTER_MAX_CARDS_PER_GAME", "4"))
+MAX_CARDS_PER_GAME = int(os.getenv("HITTER_MAX_CARDS_PER_GAME", "10"))
 REQUEST_TIMEOUT = float(os.getenv("HITTER_REQUEST_TIMEOUT", "30"))
+MAX_POSTS_PER_SCAN = int(os.getenv("HITTER_MAX_POSTS_PER_SCAN", "3"))
+POST_DELAY_SECONDS = float(os.getenv("HITTER_POST_DELAY_SECONDS", "1.25"))
+AWAKE_SCAN_MIN_MINUTES = int(os.getenv("HITTER_AWAKE_SCAN_MIN_MINUTES", "4"))
+AWAKE_SCAN_MAX_MINUTES = int(os.getenv("HITTER_AWAKE_SCAN_MAX_MINUTES", "9"))
+SLEEP_START_HOUR_ET = int(os.getenv("HITTER_SLEEP_START_HOUR_ET", "3"))
+SLEEP_END_HOUR_ET = int(os.getenv("HITTER_SLEEP_END_HOUR_ET", "13"))
 ESPN_PLAYER_IDS_PATH = os.getenv("ESPN_PLAYER_IDS_PATH", "shared/player_ids/espn_player_ids.json")
 
 intents = discord.Intents.default()
@@ -292,6 +298,41 @@ def save_state(state: dict) -> None:
     STATE_FILE.write_text(json.dumps({"posted": state.get("posted", [])}, indent=2), encoding="utf-8")
 
 
+
+
+# ---------------- SCHEDULING ----------------
+
+def now_et() -> datetime:
+    return datetime.now(ET)
+
+
+def is_sleep_window(current_dt: datetime) -> bool:
+    hour = current_dt.hour
+    start = SLEEP_START_HOUR_ET
+    end = SLEEP_END_HOUR_ET
+
+    if start == end:
+        return False
+    if start < end:
+        return start <= hour < end
+    return hour >= start or hour < end
+
+
+def seconds_until_wake(current_dt: datetime) -> int:
+    wake_today = current_dt.replace(hour=SLEEP_END_HOUR_ET, minute=0, second=0, microsecond=0)
+    if current_dt < wake_today and is_sleep_window(current_dt):
+        target = wake_today
+    else:
+        target = (current_dt + timedelta(days=1)).replace(hour=SLEEP_END_HOUR_ET, minute=0, second=0, microsecond=0)
+    return max(int((target - current_dt).total_seconds()), 60)
+
+
+def get_random_awake_interval_seconds() -> int:
+    low = max(AWAKE_SCAN_MIN_MINUTES, 1)
+    high = max(AWAKE_SCAN_MAX_MINUTES, low)
+    return random.randint(low * 60, high * 60)
+
+
 # ---------------- MLB DATA ----------------
 
 def get_games() -> list[dict]:
@@ -315,36 +356,6 @@ def get_feed(game_id: int) -> dict:
     response = requests.get(LIVE_URL.format(game_id), timeout=REQUEST_TIMEOUT)
     response.raise_for_status()
     return response.json()
-
-
-
-
-def parse_game_date_et(game: dict):
-    game_datetime = (
-        game.get("gameDate")
-        or game.get("officialDate")
-        or game.get("game_datetime")
-    )
-
-    if not game_datetime:
-        return datetime.now(ET).date()
-
-    try:
-        if isinstance(game_datetime, str):
-            normalized = game_datetime.replace("Z", "+00:00")
-            parsed = datetime.fromisoformat(normalized)
-
-            if parsed.tzinfo is None:
-                parsed = parsed.replace(tzinfo=timezone.utc)
-
-            return parsed.astimezone(ET).date()
-    except Exception:
-        pass
-
-    try:
-        return datetime.strptime(str(game_datetime), "%Y-%m-%d").date()
-    except Exception:
-        return datetime.now(ET).date()
 
 
 def get_hitting_stats_for_date(target_date):
@@ -951,11 +962,23 @@ async def hitter_loop() -> None:
         posted = set()
 
     while True:
+        sleep_seconds = get_random_awake_interval_seconds()
         try:
+            current_dt = now_et()
+            if is_sleep_window(current_dt):
+                sleep_seconds = seconds_until_wake(current_dt)
+                wake_time = current_dt + timedelta(seconds=sleep_seconds)
+                log(f"Sleeping until {wake_time.strftime('%Y-%m-%d %I:%M %p ET')}")
+                continue
+
             games = get_games()
             log(f"Checking {len(games)} games")
+            posts_this_scan = 0
 
             for game in games:
+                if posts_this_scan >= MAX_POSTS_PER_SCAN:
+                    break
+
                 if game.get("status", {}).get("detailedState") != "Final":
                     continue
 
@@ -989,6 +1012,7 @@ async def hitter_loop() -> None:
                 matchup = f"{away_abbr} @ {home_abbr}"
                 away_name = team_name_from_abbr(away_abbr)
                 home_name = team_name_from_abbr(home_abbr)
+                game_date_et = parse_game_date_et(game)
 
                 ranked: list[tuple[float, dict]] = []
                 for hitter in hitters:
@@ -1009,8 +1033,9 @@ async def hitter_loop() -> None:
 
                 posted_this_game = 0
                 for score_value, hitter in ranked:
-                    if posted_this_game >= MAX_CARDS_PER_GAME:
+                    if posts_this_scan >= MAX_POSTS_PER_SCAN or posted_this_game >= MAX_CARDS_PER_GAME:
                         break
+
                     hitter_id = hitter.get("id")
                     if hitter_id is None:
                         continue
@@ -1026,16 +1051,24 @@ async def hitter_loop() -> None:
                     )
 
                     log(f"Posting {hitter['name']} | {hitter['team']} | {matchup} | score={score_value}")
-                    await post_card(channel, hitter, opponent, team_won, feed, parse_game_date_et(game))
+                    await post_card(channel, hitter, opponent, team_won, feed, game_date_et)
                     posted.add(post_key)
                     posted_this_game += 1
+                    posts_this_scan += 1
+
+                    if posts_this_scan < MAX_POSTS_PER_SCAN:
+                        await asyncio.sleep(max(POST_DELAY_SECONDS, 0.0))
 
             state["posted"] = sorted(posted)
             save_state(state)
         except Exception as exc:
             log(f"Loop error: {exc}")
 
-        await asyncio.sleep(POLL_MINUTES * 60)
+        if is_sleep_window(now_et()):
+            continue
+
+        log(f"Sleeping {sleep_seconds} seconds before next scan")
+        await asyncio.sleep(sleep_seconds)
 
 
 # ---------------- DISCORD LIFECYCLE ----------------
