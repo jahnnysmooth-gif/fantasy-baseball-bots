@@ -12,7 +12,7 @@ from utils.closer_depth_chart import fetch_closer_depth_chart
 from utils.closer_tracker import build_tracked_relief_map, normalize_name
 
 intents = discord.Intents.default()
-client = discord.Client(intents=intents)
+client = None
 background_task = None
 
 # ---------------- CONFIG ----------------
@@ -2665,7 +2665,6 @@ async def loop():
         await asyncio.sleep(POLL_MINUTES * 60)
 
 
-@client.event
 async def on_ready():
     global background_task
     log(f"Logged in as {client.user}")
@@ -2675,6 +2674,11 @@ async def on_ready():
 
 
 async def start_hitter_bot():
+    global client, background_task
     if not TOKEN:
         raise RuntimeError("ANALYTIC_BOT_TOKEN is not set")
+
+    background_task = None
+    client = discord.Client(intents=intents)
+    client.event(on_ready)
     await client.start(TOKEN, reconnect=True)
