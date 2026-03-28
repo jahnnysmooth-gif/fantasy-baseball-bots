@@ -33,6 +33,8 @@ intents = discord.Intents.default()
 client: discord.Client | None = None
 background_task: asyncio.Task | None = None
 player_headshot_index: dict | None = None
+hitter_stats_cache: dict = {}
+
 
 TEAM_COLORS = {
     "ARI": 0xA71930,
@@ -315,6 +317,247 @@ def get_feed(game_id: int) -> dict:
     return response.json()
 
 
+def get_hitting_stats_for_date(target_date):
+    if target_date in hitter_stats_cache:
+        return hitter_stats_cache[target_date]
+
+    stats_by_hitter: dict[int, dict] = {}
+    try:
+        response = requests.get(f"{SCHEDULE_URL}&date={target_date.isoformat()}", timeout=REQUEST_TIMEOUT)
+        response.raise_for_status()
+        payload = response.json()
+        games = []
+        for date_block in payload.get("dates", []):
+            games.extend(date_block.get("games", []))
+
+        for game in games:
+            game_id = game.get("gamePk")
+            if not game_id:
+                continue
+            try:
+                feed = get_feed(int(game_id))
+            except Exception:
+                continue
+
+            box = feed.get("liveData", {}).get("boxscore", {}).get("teams", {})
+            game_teams = feed.get("gameData", {}).get("teams", {})
+            for side in ["home", "away"]:
+                team = normalize_team_abbr(game_teams.get(side, {}).get("abbreviation"))
+                if not team:
+                    team = normalize_team_abbr(box.get(side, {}).get("team", {}).get("abbreviation", "UNK"))
+                players = box.get(side, {}).get("players", {})
+                for player in players.values():
+                    stats = player.get("stats", {}).get("batting")
+                    if not stats:
+                        continue
+                    hitter_id = player.get("person", {}).get("id")
+                    if hitter_id is None:
+                        continue
+                    ab = safe_int(stats.get("atBats", 0), 0)
+                    pa = ab + safe_int(stats.get("baseOnBalls", 0), 0) + safe_int(stats.get("hitByPitch", 0), 0) + safe_int(stats.get("sacFlies", 0), 0) + safe_int(stats.get("sacBunts", 0), 0)
+                    if pa <= 0:
+                        continue
+                    stats_by_hitter[int(hitter_id)] = {
+                        "ab": ab,
+                        "h": safe_int(stats.get("hits", 0), 0),
+                        "hr": safe_int(stats.get("homeRuns", 0), 0),
+                        "rbi": safe_int(stats.get("rbi", 0), 0),
+                        "r": safe_int(stats.get("runs", 0), 0),
+                        "bb": safe_int(stats.get("baseOnBalls", 0), 0),
+                        "k": safe_int(stats.get("strikeOuts", 0), 0),
+                        "sb": safe_int(stats.get("stolenBases", 0), 0),
+                        "2b": safe_int(stats.get("doubles", 0), 0),
+                        "3b": safe_int(stats.get("triples", 0), 0),
+                        "team": team,
+                    }
+    except Exception as exc:
+        log(f"Hitting stats cache load failed for {target_date}: {exc}")
+
+    hitter_stats_cache[target_date] = stats_by_hitter
+    return stats_by_hitter
+
+
+def get_recent_hitter_games(hitter_id: int, game_date_et, limit: int = 7, max_days: int = 30) -> list[dict]:
+    recent_games: list[dict] = []
+    if hitter_id is None or game_date_et is None:
+        return recent_games
+
+    check_date = game_date_et - timedelta(days=1)
+    for _ in range(max_days):
+        stats_by_hitter = get_hitting_stats_for_date(check_date)
+        if hitter_id in stats_by_hitter:
+            recent_games.append(stats_by_hitter[hitter_id])
+            if len(recent_games) >= limit:
+                break
+        check_date -= timedelta(days=1)
+    return recent_games
+
+
+def _number_word(value: int) -> str:
+    words = {0: "zero", 1: "one", 2: "two", 3: "three", 4: "four", 5: "five", 6: "six", 7: "seven", 8: "eight", 9: "nine", 10: "ten"}
+    return words.get(int(value), str(value))
+
+
+def _small_count_phrase(value: int, noun: str, plural: str | None = None, include_article: bool = False) -> str:
+    plural = plural or f"{noun}s"
+    value = int(value)
+    if value == 1:
+        return f"a {noun}" if include_article else noun
+    if 2 <= value <= 10:
+        return f"{_number_word(value)} {plural}"
+    return f"{value} {plural}"
+
+
+def _count_only_phrase(value: int) -> str:
+    value = int(value)
+    if value == 1:
+        return "a"
+    if 2 <= value <= 10:
+        return _number_word(value)
+    return str(value)
+
+
+def build_hitter_game_context(feed: dict, hitter: dict) -> dict:
+    hitter_id = hitter.get("id")
+    team = normalize_team_abbr(hitter.get("team"))
+    side = hitter.get("side")
+    context = {
+        "go_ahead_hit": False,
+        "go_ahead_homer": False,
+        "game_tying_hit": False,
+        "walkoff": False,
+        "insurance_hit": False,
+        "late_rbi_hit": False,
+        "multi_rbi_hit": False,
+        "hardest_ev": None,
+        "balls_100": 0,
+        "homers": [],
+        "extra_base_hits": [],
+    }
+    if hitter_id is None:
+        return context
+
+    plays = feed.get("liveData", {}).get("plays", {}).get("allPlays", [])
+    for play in plays:
+        matchup = play.get("matchup", {}) or {}
+        batter = matchup.get("batter", {}) or {}
+        if batter.get("id") != hitter_id:
+            continue
+
+        result = play.get("result", {}) or {}
+        event = str(result.get("event") or "").lower()
+        event_type = str(result.get("eventType") or "").lower()
+        rbi = safe_int(result.get("rbi", 0), 0)
+        about = play.get("about", {}) or {}
+        inning = safe_int(about.get("inning", 0), 0)
+        is_scoring_play = bool(about.get("isScoringPlay"))
+        half = str(about.get("halfInning") or "").lower()
+
+        if side == "away":
+            before_team = safe_int(result.get("awayScore", 0), 0) - rbi
+            before_opp = safe_int(result.get("homeScore", 0), 0)
+            after_team = safe_int(result.get("awayScore", 0), 0)
+            after_opp = safe_int(result.get("homeScore", 0), 0)
+        else:
+            before_team = safe_int(result.get("homeScore", 0), 0) - rbi
+            before_opp = safe_int(result.get("awayScore", 0), 0)
+            after_team = safe_int(result.get("homeScore", 0), 0)
+            after_opp = safe_int(result.get("awayScore", 0), 0)
+
+        if is_scoring_play and rbi > 0:
+            if before_team <= before_opp and after_team > after_opp:
+                context["go_ahead_hit"] = True
+                if "home run" in event or event_type == "home_run":
+                    context["go_ahead_homer"] = True
+            elif before_team < before_opp and after_team == after_opp:
+                context["game_tying_hit"] = True
+            elif inning >= 7 and after_team > before_team and after_team > after_opp and (after_team - before_opp) >= 2:
+                context["insurance_hit"] = True
+            elif inning >= 7:
+                context["late_rbi_hit"] = True
+
+        if rbi >= 2:
+            context["multi_rbi_hit"] = True
+
+        if inning >= 9 and is_scoring_play and after_team > after_opp:
+            if (side == "home" and half == "bottom") or (side == "away" and half == "top"):
+                context["walkoff"] = side == "home" and half == "bottom"
+
+        for event_obj in play.get("playEvents", []) or []:
+            hit_data = event_obj.get("hitData") if isinstance(event_obj, dict) else None
+            if not isinstance(hit_data, dict):
+                continue
+            launch_speed = hit_data.get("launchSpeed")
+            if launch_speed not in (None, ""):
+                ev = float(launch_speed)
+                if context["hardest_ev"] is None or ev > context["hardest_ev"]:
+                    context["hardest_ev"] = ev
+                if ev >= 100:
+                    context["balls_100"] += 1
+
+        if "home run" in event or event_type == "home_run":
+            context["homers"].append({"inning": inning, "rbi": rbi})
+        if event_type in {"double", "triple"}:
+            context["extra_base_hits"].append({"type": event_type, "inning": inning, "rbi": rbi})
+
+    if context["hardest_ev"] is not None:
+        context["hardest_ev"] = round(float(context["hardest_ev"]), 1)
+    return context
+
+
+def build_recent_form_blurb(recent_games: list[dict], stats: dict) -> str:
+    if not recent_games:
+        return ""
+    total_hits = sum(g.get("h", 0) for g in recent_games[:5]) + safe_int(stats.get("hits", 0), 0)
+    total_hr = sum(g.get("hr", 0) for g in recent_games[:5]) + safe_int(stats.get("homeRuns", 0), 0)
+    total_rbi = sum(g.get("rbi", 0) for g in recent_games[:5]) + safe_int(stats.get("rbi", 0), 0)
+    games = len(recent_games[:5]) + 1
+
+    streak_hits = 0
+    for game in recent_games:
+        if game.get("h", 0) > 0:
+            streak_hits += 1
+        else:
+            break
+    hit_streak = streak_hits + (1 if safe_int(stats.get("hits", 0), 0) > 0 else 0)
+
+    hitless_tail = 0
+    for game in recent_games:
+        if game.get("h", 0) == 0:
+            hitless_tail += 1
+        else:
+            break
+
+    if hitless_tail >= 3 and safe_int(stats.get("hits", 0), 0) >= 2:
+        return random.choice([
+            "It also looked like a possible step out of a recent skid.",
+            "After a quiet stretch, this looked more like the hitter they needed.",
+            "It felt like the sort of night that can pull a hitter out of a slump.",
+        ])
+    if hit_streak >= 5:
+        return random.choice([
+            f"He has now pushed his hitting streak to {hit_streak} games.",
+            f"That keeps a hot stretch going, with hits now in {hit_streak} straight games.",
+            f"He has kept the heater going with hits in {hit_streak} straight games.",
+        ])
+    if games >= 5 and total_hits >= 8:
+        return random.choice([
+            f"He has piled up {total_hits} hits over his last {games} games.",
+            f"That gives him {total_hits} hits across his last {games} games and keeps the recent run rolling.",
+        ])
+    if games >= 5 and total_hr >= 3:
+        return random.choice([
+            f"He has now left the yard {total_hr} times over his last {games} games.",
+            f"The power has been carrying over lately, with {total_hr} homers across his last {games} games.",
+        ])
+    if games >= 5 and total_rbi >= 8:
+        return random.choice([
+            f"He has also driven in {total_rbi} runs over his last {games} games.",
+            f"The recent production keeps building, with {total_rbi} RBI across his last {games} games.",
+        ])
+    return ""
+
+
 def get_hitters(feed: dict) -> list[dict]:
     results: list[dict] = []
     box = feed.get("liveData", {}).get("boxscore", {}).get("teams", {})
@@ -425,68 +668,56 @@ def classify_hitter(stats: dict) -> str:
 
 # ---------------- CARD TEXT ----------------
 
-def build_hitter_subject(name: str, stats: dict, label: str) -> str:
+def build_hitter_subject(name: str, stats: dict, label: str, context: dict, recent_games: list[dict]) -> str:
     hits = safe_int(stats.get("hits", 0), 0)
     homers = safe_int(stats.get("homeRuns", 0), 0)
     rbi = safe_int(stats.get("rbi", 0), 0)
     steals = safe_int(stats.get("stolenBases", 0), 0)
-    doubles = safe_int(stats.get("doubles", 0), 0)
-    triples = safe_int(stats.get("triples", 0), 0)
-    xbh = homers + doubles + triples
+    total_bases = hitter_total_bases(stats)
 
-    subject_sets = {
-        "power_show": [
-            "Power Show At The Plate",
-            "The Bat Carried Real Weight",
-            "A Loud Night In The Box",
-            "Impact Power From Start To Finish",
-        ],
-        "hit_parade": [
-            "Everything Was Falling In",
-            "A Hit Parade At The Plate",
-            "Locked In From The Jump",
-            "Barrels All Night Long",
-        ],
-        "loud_three_hit": [
-            "Damage In Bunches",
-            "A Loud Three-Hit Night",
-            "Plenty Of Thump In The Bat",
-            "Consistent Damage All Night",
-        ],
-        "impact_power": [
-            "Big Swing After Big Swing",
-            "Middle-Order Damage",
-            "A Real Run-Producing Night",
-            "The Power Showed Up",
-        ],
-        "speed_pressure": [
-            "Pressure On Every Basepath",
-            "Dynamic Offense All Night",
-            "He Created Trouble Constantly",
-            "Impact With Bat And Legs",
-        ],
-        "run_producer": [
-            "He Cashed In Chances",
-            "Timely Damage At The Plate",
-            "A Big Night In Run-Scoring Spots",
-            "Production When It Mattered",
-        ],
-        "steady_attack": [
-            "A Steady Night At The Plate",
-            "The Offense Kept Running Through Him",
-            "Consistent Pressure In The Box",
-            "A Strong All-Around Night",
-        ],
-        "solid_night": [
-            "A Strong Offensive Night",
-            "Useful Production At The Plate",
-            "A Quality Box-Score Night",
-            "He Helped Drive The Offense",
-        ],
-    }
+    streak_hits = 0
+    for game in recent_games:
+        if game.get("h", 0) > 0:
+            streak_hits += 1
+        else:
+            break
+    hit_streak = streak_hits + (1 if hits > 0 else 0)
+    slump_breaker = False
+    hitless_tail = 0
+    for game in recent_games:
+        if game.get("h", 0) == 0:
+            hitless_tail += 1
+        else:
+            break
+    if hitless_tail >= 3 and hits >= 2:
+        slump_breaker = True
 
-    seed = len(name) + hits + homers * 3 + rbi * 2 + steals + xbh
-    options = subject_sets.get(label, subject_sets["solid_night"])
+    if context.get("walkoff"):
+        options = ["Walk-Off Hero", "Won It With One Swing", "Delivered The Walk-Off", "Ended It Himself"]
+    elif context.get("go_ahead_homer"):
+        options = ["Crushed The Go-Ahead Homer", "Supplied The Lead-Changing Swing", "Turned The Game With One Swing", "Changed The Night With A Homer"]
+    elif context.get("go_ahead_hit"):
+        options = ["Delivered The Decisive Hit", "Came Through With The Go-Ahead Swing", "Put His Club In Front", "Produced The Biggest Hit Of The Night"]
+    elif slump_breaker:
+        options = ["Looked Like A Slump Breaker", "A Needed Breakthrough Night", "May Have Turned A Corner", "Finally Broke Through At The Plate"]
+    elif hit_streak >= 5:
+        options = ["Kept The Hot Streak Rolling", "Stayed Red Hot At The Plate", "Another Big Night In A Strong Run", "The Heater Stayed Alive"]
+    elif homers >= 2:
+        options = ["A Two-Homer Statement", "Left The Yard Twice", "Two Big Flies, Big Impact", "Power That Changed The Game"]
+    elif homers >= 1 and rbi >= 3:
+        options = ["Power With Real Damage Behind It", "Big Swing Night", "Middle-Of-The-Order Damage", "Thunder In The Right Spots"]
+    elif hits >= 4:
+        options = ["A Four-Hit Showcase", "Everything He Touched Fell In", "A Barrel-Heavy Night", "Hit After Hit All Night"]
+    elif hits >= 3 and total_bases >= 6:
+        options = ["Loud Contact From Start To Finish", "Damage In Bunches", "A Three-Hit Night With Thump", "The Bat Never Quieted Down"]
+    elif steals >= 2:
+        options = ["Pressure On Every Basepath", "Created Chaos On The Bases", "Speed That Changed The Game", "A Dynamic Night On The Move"]
+    elif rbi >= 4:
+        options = ["Drove In The Difference", "A Huge Night In Run-Scoring Spots", "Kept Cashing In Chances", "Production When It Mattered"]
+    else:
+        options = ["A Strong Offensive Night", "A Real Lift For The Offense", "A Productive Night At The Plate", "Quality Damage In The Box"]
+
+    seed = len(name) + hits + homers * 3 + rbi * 2 + steals + total_bases
     return options[seed % len(options)]
 
 
@@ -540,7 +771,7 @@ def format_hitter_season_line(season_stats: dict) -> str:
     return " • ".join(parts)
 
 
-def build_hitter_summary(name: str, team: str, stats: dict, label: str, opponent: str, team_won: bool) -> str:
+def build_hitter_summary(name: str, team: str, stats: dict, label: str, opponent: str, team_won: bool, context: dict, recent_games: list[dict]) -> str:
     hits = safe_int(stats.get("hits", 0), 0)
     ab = safe_int(stats.get("atBats", 0), 0)
     runs = safe_int(stats.get("runs", 0), 0)
@@ -550,188 +781,128 @@ def build_hitter_summary(name: str, team: str, stats: dict, label: str, opponent
     triples = safe_int(stats.get("triples", 0), 0)
     walks = safe_int(stats.get("baseOnBalls", 0), 0)
     steals = safe_int(stats.get("stolenBases", 0), 0)
-    strikeouts = safe_int(stats.get("strikeOuts", 0), 0)
     total_bases = hitter_total_bases(stats)
     opponent_text = opponent or "the opposition"
 
-    opener_sets = {
-        "power_show": [
-            f"{name} brought the thunder against the {opponent_text}.",
-            f"Against the {opponent_text}, {name} supplied the loudest swings in the lineup.",
-            f"The offense leaned heavily on {name}'s power against the {opponent_text}.",
-            f"It was a power-driven night for {name} against the {opponent_text}.",
-        ],
-        "hit_parade": [
-            f"{name} was everywhere offensively against the {opponent_text}.",
-            f"Few hitters were busier than {name} against the {opponent_text}.",
-            f"The at-bats kept adding up for {name} against the {opponent_text}.",
-            f"{name} kept the offense moving all night against the {opponent_text}.",
-        ],
-        "loud_three_hit": [
-            f"{name} kept doing damage against the {opponent_text}.",
-            f"Against the {opponent_text}, {name} turned a strong hit total into real impact.",
-            f"There was plenty of thump in {name}'s night against the {opponent_text}.",
-            f"{name} stayed on the barrel against the {opponent_text}.",
-        ],
-        "impact_power": [
-            f"{name} gave {team} a serious jolt against the {opponent_text}.",
-            f"The biggest swings for {team} came off {name}'s bat against the {opponent_text}.",
-            f"Against the {opponent_text}, {name} made his damage count.",
-            f"{name} packed real force into his night against the {opponent_text}.",
-        ],
-        "speed_pressure": [
-            f"{name} put the {opponent_text} under pressure in more than one way.",
-            f"Against the {opponent_text}, {name} kept creating action once he got involved.",
-            f"The game sped up whenever {name} got moving against the {opponent_text}.",
-            f"{name} gave the {opponent_text} trouble all night with both his bat and legs.",
-        ],
-        "run_producer": [
-            f"{name} came through in the biggest run-scoring spots against the {opponent_text}.",
-            f"Against the {opponent_text}, {name} made his RBI chances matter.",
-            f"A lot of the damage on the scoreboard traced back to {name} against the {opponent_text}.",
-            f"{name} kept cashing in chances against the {opponent_text}.",
-        ],
-        "steady_attack": [
-            f"{name} stayed in the middle of the action against the {opponent_text}.",
-            f"Against the {opponent_text}, {name} kept adding useful offense.",
-            f"{name} put together a steady line against the {opponent_text}.",
-            f"The offense kept getting a boost from {name} against the {opponent_text}.",
-        ],
-        "solid_night": [
-            f"{name} turned in a useful offensive night against the {opponent_text}.",
-            f"Against the {opponent_text}, {name} gave {team} a helpful line from the plate.",
-            f"There was quiet value in {name}'s night against the {opponent_text}.",
-            f"{name} gave the offense a lift against the {opponent_text}.",
-        ],
-    }
+    opening_pool = [
+        f"Against the {opponent_text}, {name} supplied some of the loudest contact in the lineup.",
+        f"{name} gave {team} a real offensive lift against the {opponent_text}.",
+        f"The biggest swings for {team} came off {name}'s bat against the {opponent_text}.",
+        f"{name} stayed in the middle of everything offensively against the {opponent_text}.",
+    ]
 
-    seed = len(name) + hits + runs + rbi + homers + doubles + triples + walks + steals + strikeouts
-    opening_options = opener_sets.get(label, opener_sets["solid_night"])
-    opening = opening_options[seed % len(opening_options)]
+    if context.get("go_ahead_homer"):
+        opening_pool = [
+            f"{name} turned this game with a go-ahead homer against the {opponent_text}.",
+            f"Against the {opponent_text}, {name} delivered the swing that put his club in front for good.",
+            f"{name} came up with the lead-changing homer against the {opponent_text} and never let that moment fade.",
+        ]
+    elif context.get("go_ahead_hit"):
+        opening_pool = [
+            f"{name} came through with the go-ahead hit against the {opponent_text}.",
+            f"Against the {opponent_text}, {name} delivered the hit that changed the shape of the game.",
+            f"The biggest swing of the night belonged to {name}, who put his club in front against the {opponent_text}.",
+        ]
+    elif context.get("game_tying_hit"):
+        opening_pool = [
+            f"{name} helped swing the game back by delivering the tying hit against the {opponent_text}.",
+            f"Against the {opponent_text}, {name} supplied the swing that pulled his club back even.",
+            f"{name} kept this one alive with the hit that drew his club level against the {opponent_text}.",
+        ]
+    elif homers >= 2:
+        opening_pool = [
+            f"Against the {opponent_text}, {name} brought real thunder to the middle of the order.",
+            f"{name} gave the offense a huge jolt against the {opponent_text} with one loud swing after another.",
+            f"This turned into a power show for {name} against the {opponent_text}.",
+        ]
 
-    action_bits: list[str] = []
-    if hits:
-        action_bits.append(f"He finished {hits}-for-{ab}")
+    opening = opening_pool[(len(name) + hits + rbi + homers + total_bases) % len(opening_pool)]
+
+    pieces = [f"He finished {hits}-for-{ab}"]
     if homers:
-        action_bits.append(f"left the yard {homers} time{'s' if homers != 1 else ''}")
+        pieces.append(f"left the yard {_count_only_phrase(homers)} time{'s' if homers != 1 else ''}")
     elif doubles or triples:
-        xbh_bits: list[str] = []
+        xbh_bits = []
         if doubles:
-            xbh_bits.append(f"{doubles} double{'s' if doubles != 1 else ''}")
+            xbh_bits.append(_small_count_phrase(doubles, "double"))
         if triples:
-            xbh_bits.append(f"{triples} triple{'s' if triples != 1 else ''}")
-        action_bits.append("ripped " + " and ".join(xbh_bits))
+            xbh_bits.append(_small_count_phrase(triples, "triple"))
+        if len(xbh_bits) == 1:
+            pieces.append(f"ripped {xbh_bits[0]}")
+        else:
+            pieces.append("ripped " + " and ".join(xbh_bits))
     if rbi:
-        action_bits.append(f"drove in {rbi}")
+        pieces.append(f"drove in {_count_only_phrase(rbi)}")
     if runs:
-        action_bits.append(f"scored {runs} run{'s' if runs != 1 else ''}")
+        pieces.append(f"scored {_small_count_phrase(runs, 'run', include_article=True)}")
     if walks:
-        action_bits.append(f"worked {walks} walk{'s' if walks != 1 else ''}")
+        pieces.append(f"worked {_small_count_phrase(walks, 'walk', include_article=True)}")
     if steals:
-        action_bits.append(f"stole {steals} base{'s' if steals != 1 else ''}")
+        pieces.append(f"stole {_small_count_phrase(steals, 'base', include_article=True)}")
 
-    middle = ""
-    if action_bits:
-        if len(action_bits) == 1:
-            middle = action_bits[0] + "."
-        else:
-            middle = ", ".join(action_bits[:-1]) + ", and " + action_bits[-1] + "."
-
-    closer_pool: list[str] = []
-    if team_won:
-        if homers >= 2:
-            closer_pool.extend(
-                [
-                    "His power had a lot to do with the way this one swung.",
-                    "That kind of thunder usually ends up deciding the game.",
-                    "He carried real weight in the result with those swings.",
-                ]
-            )
-        elif rbi >= 3:
-            closer_pool.extend(
-                [
-                    "He did a lot of the run-producing work in this one.",
-                    "That line came with real scoreboard impact.",
-                    "He kept showing up when the offense needed a big swing.",
-                ]
-            )
-        elif steals >= 2:
-            closer_pool.extend(
-                [
-                    "His pressure on the bases helped shape the game.",
-                    "He kept forcing the defense to rush everything once he got aboard.",
-                ]
-            )
-        elif total_bases >= 6:
-            closer_pool.extend(
-                [
-                    "He supplied a lot of the offense's loud contact in this one.",
-                    "The quality of contact kept showing up at the right time.",
-                ]
-            )
-        else:
-            closer_pool.extend(
-                [
-                    "He played a meaningful part in the way this one unfolded.",
-                    "There was more impact here than the basic line alone suggests.",
-                ]
-            )
+    if len(pieces) == 1:
+        middle = pieces[0] + "."
     else:
-        if homers >= 2:
-            closer_pool.extend(
-                [
-                    "Even without the win, he was still one of the biggest offensive stories in the game.",
-                    "The final result did not take much away from how loud this line was.",
-                ]
-            )
-        elif hits >= 3 or rbi >= 2:
-            closer_pool.extend(
-                [
-                    "He still did plenty of damage even though the result went the other way.",
-                    "There was real production here despite the final outcome.",
-                ]
-            )
-        elif strikeouts >= 3 and hits <= 1:
-            closer_pool.extend(
-                [
-                    "The strikeouts kept it from being a cleaner night overall.",
-                    "There was still some swing-and-miss attached to the line.",
-                ]
-            )
+        middle = ", ".join(pieces[:-1]) + ", and " + pieces[-1] + "."
+
+    context_pool: list[str] = []
+    if context.get("walkoff"):
+        context_pool.append("He ended it with the walk-off swing.")
+    if context.get("go_ahead_homer"):
+        context_pool.append("That homer put his club in front for good.")
+    elif context.get("go_ahead_hit"):
+        context_pool.append("That swing turned into the deciding hit of the night.")
+    if context.get("game_tying_hit"):
+        context_pool.append("He also had the hit that pulled his club back even.")
+    if context.get("insurance_hit"):
+        context_pool.append("He also helped create breathing room once his club got in front.")
+    if context.get("late_rbi_hit") and not context.get("go_ahead_hit"):
+        context_pool.append("His damage also came in a big late spot.")
+    if context.get("multi_rbi_hit") and rbi >= 3 and not context.get("go_ahead_hit"):
+        context_pool.append("A lot of the run-producing work traced back to him in this one.")
+    if context.get("hardest_ev"):
+        ev_sentence = f"His hardest-hit ball came off the bat at {context['hardest_ev']:.1f} mph."
+        if context.get("balls_100", 0) >= 2:
+            ev_sentence = f"He also produced {context['balls_100']} batted balls at 100-plus mph, topped by a {context['hardest_ev']:.1f} mph shot."
+        context_pool.append(ev_sentence)
+
+    recent_blurb = build_recent_form_blurb(recent_games, stats)
+    if recent_blurb:
+        context_pool.append(recent_blurb)
+
+    if not context_pool:
+        if team_won and total_bases >= 6:
+            context_pool.append("He carried real weight in the result with the quality of contact he produced.")
+        elif team_won:
+            context_pool.append("He played a meaningful part in the way this one unfolded.")
+        elif homers >= 2:
+            context_pool.append("The final result did not take much away from how loud this line was.")
         else:
-            closer_pool.extend(
-                [
-                    "He was one of the few bats to give the lineup a lift in this one.",
-                    "It was still a useful offensive line even without the win.",
-                ]
-            )
+            context_pool.append("There was real value in the line even if the box score does not tell the whole story.")
 
-    if rbi >= 2 and homers == 0 and hits >= 2:
-        closer_pool.append("He kept finding a way to matter once traffic built on the bases.")
-    if total_bases >= 8:
-        closer_pool.append("He piled up extra-base damage all night long.")
-
-    closer = closer_pool[seed % len(closer_pool)] if closer_pool else ""
-    return " ".join(part for part in [opening, middle, closer] if part)
+    closing = context_pool[(hits + rbi + runs + homers + walks + steals + len(context_pool)) % len(context_pool)]
+    return " ".join([opening, middle, closing]).strip()
 
 
 # ---------------- EMBED POSTING ----------------
 
-async def post_card(channel: discord.abc.Messageable, hitter: dict, opponent: str, team_won: bool) -> None:
+async def post_card(channel: discord.abc.Messageable, hitter: dict, opponent: str, team_won: bool, feed: dict, game_date_et) -> None:
     stats = hitter["stats"]
     label = classify_hitter(stats)
+    recent_games = get_recent_hitter_games(hitter.get("id"), game_date_et)
+    game_context = build_hitter_game_context(feed, hitter)
     embed = discord.Embed(
         color=TEAM_COLORS.get(normalize_team_abbr(hitter["team"]), 0x2ECC71),
         timestamp=datetime.now(timezone.utc),
     )
     apply_player_card_chrome(embed, hitter["name"], hitter["team"])
-    embed.add_field(name="", value=f"**{build_hitter_subject(hitter['name'], stats, label)}**", inline=False)
-    embed.add_field(name="Game Line", value=format_hitter_game_line(stats), inline=False)
+    embed.add_field(name="", value=f"**{build_hitter_subject(hitter['name'], stats, label, game_context, recent_games)}**", inline=False)
     embed.add_field(
         name="Summary",
-        value=build_hitter_summary(hitter["name"], hitter["team"], stats, label, opponent, team_won),
+        value=build_hitter_summary(hitter["name"], hitter["team"], stats, label, opponent, team_won, game_context, recent_games),
         inline=False,
     )
+    embed.add_field(name="Game Line", value=format_hitter_game_line(stats), inline=False)
     embed.add_field(name="Season", value=format_hitter_season_line(hitter.get("season_stats", {})), inline=False)
     await channel.send(embed=embed)
 
@@ -825,7 +996,7 @@ async def hitter_loop() -> None:
                     )
 
                     log(f"Posting {hitter['name']} | {hitter['team']} | {matchup} | score={score_value}")
-                    await post_card(channel, hitter, opponent, team_won)
+                    await post_card(channel, hitter, opponent, team_won, feed, parse_game_date_et(game))
                     posted.add(post_key)
                     posted_this_game += 1
 
