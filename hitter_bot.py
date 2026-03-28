@@ -317,6 +317,36 @@ def get_feed(game_id: int) -> dict:
     return response.json()
 
 
+
+
+def parse_game_date_et(game: dict):
+    game_datetime = (
+        game.get("gameDate")
+        or game.get("officialDate")
+        or game.get("game_datetime")
+    )
+
+    if not game_datetime:
+        return datetime.now(ET).date()
+
+    try:
+        if isinstance(game_datetime, str):
+            normalized = game_datetime.replace("Z", "+00:00")
+            parsed = datetime.fromisoformat(normalized)
+
+            if parsed.tzinfo is None:
+                parsed = parsed.replace(tzinfo=timezone.utc)
+
+            return parsed.astimezone(ET).date()
+    except Exception:
+        pass
+
+    try:
+        return datetime.strptime(str(game_datetime), "%Y-%m-%d").date()
+    except Exception:
+        return datetime.now(ET).date()
+
+
 def get_hitting_stats_for_date(target_date):
     if target_date in hitter_stats_cache:
         return hitter_stats_cache[target_date]
