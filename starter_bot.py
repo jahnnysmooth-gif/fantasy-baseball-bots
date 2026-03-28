@@ -971,7 +971,7 @@ def build_starter_overview(name: str, label: str, stats: dict, seed: int, team_n
             f"{name} gave the {team_name} a strong {ip_text} and kept the damage to a minimum.",
             f"{name} turned in a quality outing and kept the game from getting away in any one inning.",
             f"{name} gave the {team_name} exactly the kind of stable start it needed.",
-            f"{name} was not flashy every inning, but the overall work was strong and useful.",
+            f"{name} did not dominate from start to finish, but he gave the {team_name} a steady outing overall.",
         ],
         "STRIKEOUT": [
             f"{name} missed bats all night, even if the outing was not completely clean.",
@@ -992,7 +992,7 @@ def build_starter_overview(name: str, label: str, stats: dict, seed: int, team_n
             f"{name} kept this thing under control well enough to hand over a playable game.",
         ],
         "UNEVEN": [
-            f"{name} got through {ip_text}, though the outing had traffic on it most of the way.",
+            f"{name} got through {ip_text}, working around traffic in multiple innings along the way.",
             f"{name} covered enough ground, but there was pressure on the line for much of the night.",
             f"{name} never looked fully comfortable, even though he kept the outing from breaking apart.",
             f"{name} had to grind through this one more than the final line might suggest.",
@@ -1081,10 +1081,10 @@ def build_starter_pressure_sentence(stats: dict, label: str, seed: int) -> str:
         choices = [
             "When hitters did get on, he usually found a way to keep the inning from turning ugly.",
             "The few threats against him never had time to turn into a big inning.",
-            "He kept the traffic from snowballing and kept the bigger innings off the board.",
+            "He worked around traffic in multiple innings and kept the bigger inning off the board.",
             "Even when the lineup pushed a little, he was usually the one who got the last word.",
             "There were not many clean looks for the lineup, and that kept the pressure light for most of the night.",
-            "Most of the traffic stayed scattered, which kept the game from turning on him.",
+            "Most of the hits and baserunners stayed scattered, which kept the game from swinging against him.",
         ]
         if k >= 8:
             choices.append("When things tightened up, he still had enough putaway stuff to end the threat himself.")
@@ -1101,7 +1101,7 @@ def build_starter_pressure_sentence(stats: dict, label: str, seed: int) -> str:
             choices = [
                 "He never found the clean inning that might have slowed the game down.",
                 "Too many hitters kept reaching, which left him with almost no room to work.",
-                "Once traffic started to stack up, the outing kept moving in the wrong direction.",
+                "Once the baserunners started piling up, the outing became much tougher to control.",
                 "He spent too much of the night pitching under stress, and it finally caught up with him.",
                 "There were too many leverage pitches for this to ever feel stable.",
             ]
@@ -1110,10 +1110,10 @@ def build_starter_pressure_sentence(stats: dict, label: str, seed: int) -> str:
         elif h >= 6 and bb <= 1:
             choices.append("This was more about too much hittable contact than scattered command.")
         elif traffic >= 10:
-            choices.append("The traffic never really stopped, and that kept the outing from ever calming down.")
+            choices.append("The baserunners kept coming, and he never really found a clean stretch.")
     else:
         choices = [
-            "There was enough traffic to keep the start from feeling smooth, even if it never fully broke.",
+            "There were enough baserunners to keep the outing from ever feeling comfortable.",
             "He had to work through a few jams, which gave the line more stress than the runs alone suggest.",
             "The outing held together, but there were still a couple moments where he had to work for the escape.",
             "He was not cruising, but he did enough in the tougher spots to keep the line usable.",
@@ -1144,7 +1144,7 @@ def build_starter_team_context(p: dict, stats: dict, label: str, game_context: d
         choices = [
             f"Those innings let the {team_name} stay in front instead of scrambling to catch up.",
             f"He kept the {team_name} in control for most of the night.",
-            f"He handed the bullpen a game the {team_name} could finish from in front.",
+            f"He left with the {team_name} still in front and in position to close it out.",
             f"He made sure the {opp_name} never really got the game swinging their way.",
             f"The {team_name} were still in a good spot once he turned it over late.",
         ]
@@ -1235,16 +1235,16 @@ def build_starter_game_flow_sentence(p: dict, label: str, seed: int) -> str:
 
     if exit_margin == 0 and label in POSITIVE_STARTER_LABELS:
         choices = [
-            "He handed things off with the game still right there to be won.",
+            "He left with the game still within reach for the bullpen.",
             "When he left, the game was still very much in the balance.",
-            "He did enough to keep the result unresolved when it became the bullpen's game.",
+            "He kept the game close enough to give the bullpen a chance once he exited.",
         ]
         return choices[(seed // 23) % len(choices)]
 
     if exit_margin > 0 and label in POSITIVE_STARTER_LABELS:
         choices = [
             f"By the time he left, the {team_name} were still in a good spot to finish the job.",
-            "He handed over a game that was under control enough for the bullpen to take it home.",
+            "He turned it over with the game still under control for the bullpen.",
             f"He exited with the {team_name} still out in front.",
         ]
         return choices[(seed // 23) % len(choices)]
