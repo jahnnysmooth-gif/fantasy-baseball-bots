@@ -267,7 +267,7 @@ def apply_player_card_chrome(embed: discord.Embed, name: str, team: str) -> None
     headshot = get_player_headshot(name, team)
     if headshot:
         try:
-            embed.set_thumbnail(url=headshot)
+            embed.set_image(url=headshot)
             return
         except Exception:
             pass
@@ -812,15 +812,18 @@ def format_hitter_season_line(season_stats: dict) -> str:
     ops = season.get("ops") or season.get("onBasePlusSlugging")
     hr = safe_int(season.get("homeRuns", 0), 0)
     rbi = safe_int(season.get("rbi", 0), 0)
+    runs = safe_int(season.get("runs", 0), 0)
     sb = safe_int(season.get("stolenBases", 0), 0)
 
-    parts = [f"AVG {avg}", f"OBP {obp}", f"SLG {slg}"]
-    if ops not in (None, ""):
-        parts.append(f"OPS {ops}")
+    parts = [f"AVG {avg}", f"OBP {obp}"]
+    if hr:
+        parts.append(f"{hr} HR")
     if hr:
         parts.append(f"{hr} HR")
     if rbi:
         parts.append(f"{rbi} RBI")
+    if runs:
+        parts.append(f"{runs} R")
     if sb:
         parts.append(f"{sb} SB")
     return " • ".join(parts)
@@ -841,9 +844,9 @@ def build_hitter_summary(name: str, team: str, stats: dict, label: str, opponent
 
     opening_pool = [
         f"Against the {opponent_text}, {name} supplied some of the loudest contact in the lineup.",
-        f"{name} gave {team} a real offensive lift against the {opponent_text}.",
-        f"The biggest swings for {team} came off {name}'s bat against the {opponent_text}.",
-        f"{name} stayed in the middle of everything offensively against the {opponent_text}.",
+        f"{name} helped spark the offense against the {opponent_text}.",
+        f"{name} gave {team} some of its biggest offensive moments against the {opponent_text}.",
+        f"{name} was right in the middle of the offense against the {opponent_text}.",
     ]
 
     if context.get("go_ahead_homer"):
@@ -875,7 +878,16 @@ def build_hitter_summary(name: str, team: str, stats: dict, label: str, opponent
 
     pieces = [f"He finished {hits}-for-{ab}"]
     if homers:
-        pieces.append(f"left the yard {_count_only_phrase(homers)} time{'s' if homers != 1 else ''}")
+        if homers == 1:
+        homer_phrase_options = [
+            "homered once",
+            "went deep",
+            "launched a homer",
+            "connected for a homer",
+        ]
+        pieces.append(random.choice(homer_phrase_options))
+    else:
+        pieces.append(f"homered {homers} times")
     elif doubles or triples:
         xbh_bits = []
         if doubles:
