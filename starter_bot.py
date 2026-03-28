@@ -923,7 +923,7 @@ def format_percent_text(value) -> str:
 
 
 
-def build_starter_overview(name: str, label: str, stats: dict, seed: int, team_name: str = "club") -> str:
+def build_starter_overview(name: str, label: str, stats: dict, seed: int, team_name: str = "club", opp_name: str = "opponent") -> str:
     ip = str(stats.get("inningsPitched", "0.0"))
     ip_text = format_starter_ip_for_summary(ip)
     outs = baseball_ip_to_outs(ip)
@@ -958,15 +958,14 @@ def build_starter_overview(name: str, label: str, stats: dict, seed: int, team_n
         "GEM": [
             f"{name} turned in one of the cleanest starts of the day, covering {ip_text} without allowing an earned run.",
             f"{name} set the tone early and stayed in command through {ip_text} of scoreless work.",
-            f"{name} was in control all night and gave the lineup very little to work with.",
+            f"{name} was in control all night and gave the {opp_name} very little to work with.",
             f"{name} gave the {team_name} a true stopper-type outing and never let the game drift.",
         ],
         "DOMINANT": [
             f"{name} took over this start early and stayed on top of it for {ip_text}.",
             f"{name} looked overpowering and spent most of the night dictating every at-bat.",
             f"{name} had real finish to his stuff and was clearly the one in control.",
-            f"{name} looked like the best version of himself and never really let the lineup breathe.",
-            f"{name} stayed ahead in counts, missed bats, and never let the lineup get comfortable.",
+            f"{name} looked like the best version of himself and never really let the {opp_name} breathe.",
         ],
         "QUALITY": [
             f"{name} gave the {team_name} a strong {ip_text} and kept the damage to a minimum.",
@@ -977,19 +976,18 @@ def build_starter_overview(name: str, label: str, stats: dict, seed: int, team_n
         "STRIKEOUT": [
             f"{name} missed bats all night, even if the outing was not completely clean.",
             f"{name} leaned on putaway stuff and kept finding strikeouts when he needed them.",
-            f"{name} had enough swing-and-miss to overpower stretches of this lineup.",
+            f"{name} had enough swing-and-miss to overpower stretches of the {opp_name} lineup.",
             f"{name} brought real bat-missing tonight, and that was the biggest story of the outing.",
         ],
         "SHARP": [
             f"{name} looked sharp and kept most of the night under control.",
-            f"{name} gave a crisp outing and rarely let the lineup get anything going.",
+            f"{name} gave a crisp outing and rarely let the {opp_name} get anything going.",
             f"{name} was steady from the outset and did not give hitters many clean openings.",
             f"{name} kept the pressure light for most of the night and never looked rushed.",
         ],
         "SOLID": [
             f"{name} gave the {team_name} a useful start and kept things steady while he was on the mound.",
             f"{name} turned in a steady outing and did the job without much extra drama.",
-            f"{name} was not overpowering, but he kept answering little pockets of traffic and gave the {team_name} a playable game.",
             f"{name} was not overpowering, but he gave the {team_name} the kind of start it could work with.",
             f"{name} kept this thing under control well enough to hand over a playable game.",
         ],
@@ -1072,7 +1070,7 @@ def build_starter_positive_sentence(stats: dict, label: str, seed: int) -> str:
 
 
 
-def build_starter_pressure_sentence(stats: dict, label: str, seed: int) -> str:
+def build_starter_pressure_sentence(stats: dict, label: str, seed: int, opp_name: str = "opponent") -> str:
     h = safe_int(stats.get("hits", 0), 0)
     bb = safe_int(stats.get("baseOnBalls", 0), 0)
     k = safe_int(stats.get("strikeOuts", 0), 0)
@@ -1083,12 +1081,10 @@ def build_starter_pressure_sentence(stats: dict, label: str, seed: int) -> str:
         choices = [
             "When hitters did get on, he usually found a way to keep the inning from turning ugly.",
             "The few threats against him never had time to turn into a big inning.",
-            "He had an answer when traffic showed up and never let the inning snowball.",
             "He worked around traffic in multiple innings and kept the bigger inning off the board.",
-            "Even when the lineup pushed a little, he was usually the one who got the last word.",
-            "There were not many clean looks for the lineup, and that kept the pressure light for most of the night.",
+            f"Even when the {opp_name} pushed a little, he was usually the one who got the last word.",
+            f"There were not many clean looks for the {opp_name}, and that kept the pressure light for most of the night.",
             "Most of the hits and baserunners stayed scattered, which kept the game from swinging against him.",
-            "He scattered the contact well enough to keep the lineup from putting together a crooked inning.",
         ]
         if k >= 8:
             choices.append("When things tightened up, he still had enough putaway stuff to end the threat himself.")
@@ -1188,7 +1184,7 @@ def build_starter_team_context(p: dict, stats: dict, label: str, game_context: d
     return choices[(seed // 7) % len(choices)]
 
 
-def build_starter_game_flow_sentence(p: dict, label: str, seed: int) -> str:
+def build_starter_game_flow_sentence(p: dict, label: str, seed: int, opp_name: str = "opponent") -> str:
     flow = p.get("game_flow") or {}
     scoreless_to_start = safe_int(flow.get("scoreless_to_start", 0), 0)
     opp_runs_while_in = safe_int(flow.get("opp_runs_while_in", 0), 0)
@@ -1210,23 +1206,20 @@ def build_starter_game_flow_sentence(p: dict, label: str, seed: int) -> str:
             "Most of the damage came in one inning, and the rest of the outing was much steadier.",
             "Almost all of the trouble came in one stretch, and he was steadier outside of that pocket.",
             "One rough inning did most of the damage against him, but the rest of the night was much calmer.",
-            "One inning did most of the damage, but he kept the rest of the outing from getting away.",
         ]
         return choices[(seed // 23) % len(choices)]
 
     if flow.get("late_damage") and label in POSITIVE_STARTER_LABELS:
         choices = [
-            "He kept the lineup quiet for most of the night and did not see real damage until late.",
+            f"He kept the {opp_name} quiet for most of the night and did not see real damage until late.",
             "He looked in control through the middle innings before the only real trouble arrived near the end.",
-            "He was rolling for a while before the lineup finally scratched out something late.",
-            "He cruised early, then had to work harder once the lineup pushed back late.",
+            f"He was rolling for a while before the {opp_name} finally scratched out something late.",
         ]
         return choices[(seed // 23) % len(choices)]
 
     if scoreless_to_start >= 4:
         choices = [
             f"He opened with {number_word(scoreless_to_start)} straight scoreless innings and set a strong tone right away.",
-            f"He opened with {number_word(scoreless_to_start)} scoreless innings and never let the lineup settle in.",
             f"He stacked {number_word(scoreless_to_start)} quiet innings to begin the night before anything changed.",
             f"He gave the opposition very little early, opening with {number_word(scoreless_to_start)} scoreless frames before anything changed.",
         ]
@@ -1559,11 +1552,12 @@ def build_starter_subject_line(p: dict, label: str, game_context: dict, seed: in
 def build_starter_summary(p: dict, label: str, game_context: dict, recent_appearances=None) -> str:
     stats = p["stats"]
     seed = build_starter_summary_seed(p["name"], stats, game_context)
-    overview = build_starter_overview(p["name"], label, stats, seed, team_name=team_name_from_abbr(p.get("team")))
+    opp_name = team_name_from_abbr(game_context.get("home_abbr")) if p.get("side") == "away" else team_name_from_abbr(game_context.get("away_abbr"))
+    overview = build_starter_overview(p["name"], label, stats, seed, team_name=team_name_from_abbr(p.get("team")), opp_name=opp_name)
     stat_sentence = build_starter_stat_sentence(stats, seed)
-    pressure_sentence = build_starter_pressure_sentence(stats, label, seed)
+    pressure_sentence = build_starter_pressure_sentence(stats, label, seed, opp_name=opp_name)
     team_sentence = build_starter_team_context(p, stats, label, game_context, seed)
-    flow_sentence = build_starter_game_flow_sentence(p, label, seed)
+    flow_sentence = build_starter_game_flow_sentence(p, label, seed, opp_name=opp_name)
     velocity_sentence = build_starter_velocity_sentence(p, label, seed, recent_appearances=recent_appearances)
     csw_sentence = build_starter_csw_sentence(p, label, seed)
     pitch_sentence = build_starter_pitch_count_sentence(p, label, seed)
