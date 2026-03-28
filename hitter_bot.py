@@ -1105,7 +1105,7 @@ async def post_card(channel: discord.abc.Messageable, hitter: dict, opponent: st
     embed.add_field(name="", value=f"**{build_hitter_subject(hitter['name'], stats, label, game_context, recent_games)}**", inline=False)
     embed.add_field(
         name="Summary",
-        value=build_hitter_summary(hitter["name"], hitter["team"], stats, label, opponent, team_won, game_context, recent_games),
+        value=build_hitter_summary(hitter["name"], hitter["team"], stats, label, game_context, opponent, team_won, recent_games),
         inline=False,
     )
     embed.add_field(name="Game Line", value=format_hitter_game_line(stats), inline=False)
