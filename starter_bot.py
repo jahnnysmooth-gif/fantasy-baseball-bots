@@ -1154,69 +1154,77 @@ def build_starter_game_flow_sentence(p: dict, label: str, seed: int) -> str:
 
     if flow.get("settled_after_rough"):
         choices = [
-            "After a shaky opening frame, he settled down and gave his club several quieter innings behind it.",
-            "He wobbled early, then found a much better rhythm once he got deeper into the start.",
-            "The beginning was messy, but he recovered well enough to keep the outing from spiraling.",
+            "After a rough first inning, he settled in and gave his club several steadier frames after that.",
+            "He had to battle through some early trouble, but the outing looked much cleaner once he found a rhythm.",
+            "The start wobbled early before he regrouped and settled into the game.",
+            "He did not have much in the opening inning, but he recovered well enough to keep the outing together.",
         ]
         return choices[(seed // 23) % len(choices)]
 
     if flow.get("only_damage_in_one_inning") and opp_runs_while_in > 0:
         choices = [
-            "The damage was mostly contained to one inning, which kept the rest of the outing from unraveling.",
-            "Almost all of the trouble came in one stretch, and he was steadier outside of that pocket.",
-            "One rough inning did most of the damage against him, but the rest of the night was much calmer.",
+            "Almost all of the damage came in one inning, and the rest of the outing was far more controlled.",
+            "One rough stretch did most of the damage against him, but he was much steadier outside of it.",
+            "The line was hurt by one bad inning more than anything else.",
+            "Outside of one inning that got away from him, he mostly kept the game under control.",
         ]
         return choices[(seed // 23) % len(choices)]
 
     if flow.get("late_damage") and label in POSITIVE_STARTER_LABELS:
         choices = [
-            "He kept the lineup quiet for most of the night and did not see real damage until late.",
-            "For most of the outing, he had the game under control before the only real trouble arrived near the end.",
-            "He was rolling for a while before the lineup finally scratched out something late.",
+            "He cruised through most of the outing before the lineup finally got to him late.",
+            "The game was mostly on his terms until some late damage changed the line a bit.",
+            "He stayed in control for several innings before things got tougher near the end.",
+            "Most of the trouble showed up late after he had been rolling for much of the night.",
         ]
         return choices[(seed // 23) % len(choices)]
 
     if scoreless_to_start >= 4:
         choices = [
-            f"He opened with {number_word(scoreless_to_start)} straight scoreless innings and set a strong tone right away.",
-            f"The lineup did not get much going early, as he stacked {number_word(scoreless_to_start)} quiet innings to begin the night.",
-            f"He gave the opposition very little early, opening with {number_word(scoreless_to_start)} scoreless frames before anything changed.",
+            f"He opened with {number_word(scoreless_to_start)} straight scoreless innings and never let the lineup settle in early.",
+            f"He came out sharp and stacked {number_word(scoreless_to_start)} quiet innings before the opposition got anything going.",
+            f"He controlled the early part of the game, opening with {number_word(scoreless_to_start)} scoreless frames.",
+            f"The lineup had very little going early, as he rolled through {number_word(scoreless_to_start)} scoreless innings to start the night.",
         ]
         return choices[(seed // 23) % len(choices)]
 
     if team_runs_while_in >= 4 and exit_margin > 0 and label in POSITIVE_STARTER_LABELS:
         choices = [
-            "His offense gave him room to work, and he mostly kept the game tilted in his club's direction.",
-            "With some run support behind him, he was able to stay on the attack and keep control of the game script.",
-            "His side scored enough while he was in there to let him pitch with a little more freedom.",
+            "His offense gave him a lead to work with, and he mostly kept the game moving in the right direction.",
+            "He pitched with a cushion for much of the night and did a good job protecting it.",
+            "With run support behind him, he was able to stay aggressive and attack the zone.",
+            "His side gave him enough breathing room to pitch with confidence for most of the outing.",
         ]
         return choices[(seed // 23) % len(choices)]
 
     if exit_margin == 0 and label in POSITIVE_STARTER_LABELS:
         choices = [
-            "He handed things off with the game still right there to be won.",
-            "When he left, the game was still very much in the balance.",
-            "He did enough to keep the result unresolved when it became the bullpen's game.",
+            "He handed the game to the bullpen with the score still tied.",
+            "When he left, the game was still hanging in the balance.",
+            "He kept things close enough to give the bullpen a real chance to decide it.",
+            "He left with the result still very much up for grabs.",
         ]
         return choices[(seed // 23) % len(choices)]
 
     if exit_margin > 0 and label in POSITIVE_STARTER_LABELS:
         choices = [
-            "By the time he left, his club was still in a good spot to finish the job.",
-            "He handed over a game that was under control enough for the bullpen to take it home.",
-            "He exited with his side in decent shape, which is exactly what a starter wants to do.",
+            "He handed the bullpen a lead and put his club in a good spot to close it out.",
+            "By the time he left, his side still had control of the game.",
+            "He left with his team in front, which is exactly what you want from a starter.",
+            "He did his part and handed things over with the lead intact.",
         ]
         return choices[(seed // 23) % len(choices)]
 
     if biggest_inning_runs >= 2 and label in BAD_STARTER_LABELS | {"UNEVEN"}:
         choices = [
-            "One crooked inning changed the feel of the whole start, and he never fully got back on top of it.",
-            "A multi-run inning did most of the damage, and it left him chasing the line after that.",
-            "The start took a hard turn once one inning got away from him.",
+            "One crooked inning changed the feel of the whole outing and left him chasing the line after that.",
+            "A multi-run inning did most of the damage, and he never really got fully back on top of it.",
+            "The start turned once one inning got away from him.",
+            "He was hurt most by one inning that snowballed in a hurry.",
         ]
         return choices[(seed // 23) % len(choices)]
 
-    return 
+    return ""
 
 def build_starter_velocity_sentence(p: dict, label: str, seed: int, recent_appearances=None) -> str:
     velo = p.get("avg_fastball_velocity")
@@ -1599,7 +1607,7 @@ async def post_card(channel, p: dict, game_context: dict, score_value: str, rece
     )
     apply_player_card_chrome(embed, p["name"], p["team"])
     embed.add_field(name="", value=f"**{build_starter_subject_line(p, label, game_context, seed)}**", inline=False)
-    embed.add_field(name="Summary", value=build_starter_summary(p, label, game_context, recent_appearances=recent_appearances), inline=False)
+    embed.add_field(name="", value=build_starter_summary(p, label, game_context, recent_appearances=recent_appearances), inline=False)
     embed.add_field(name="Game Line", value=format_starter_game_line(stats), inline=False)
     embed.add_field(name="Season", value=format_starter_season_line(p.get("season_stats", {})), inline=False)
     embed.add_field(name="⚾ Score", value=score_value, inline=False)
