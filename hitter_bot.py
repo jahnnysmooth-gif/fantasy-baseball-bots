@@ -27,7 +27,7 @@ RESET_HITTER_STATE = os.getenv("RESET_HITTER_STATE", "").lower() in {"1", "true"
 MIN_HITTER_SCORE = float(os.getenv("HITTER_MIN_SCORE", "5.0"))
 MAX_CARDS_PER_GAME = int(os.getenv("HITTER_MAX_CARDS_PER_GAME", "10"))
 REQUEST_TIMEOUT = float(os.getenv("HITTER_REQUEST_TIMEOUT", "30"))
-MAX_POSTS_PER_SCAN = int(os.getenv("HITTER_MAX_POSTS_PER_SCAN", "3"))
+MAX_POSTS_PER_SCAN = int(os.getenv("HITTER_MAX_POSTS_PER_SCAN", "10"))
 MAX_POSTS_PER_GAME_PER_SCAN = int(os.getenv("HITTER_MAX_POSTS_PER_GAME_PER_SCAN", "1"))
 POST_DELAY_SECONDS = float(os.getenv("HITTER_POST_DELAY_SECONDS", "1.25"))
 AWAKE_SCAN_MIN_MINUTES = int(os.getenv("HITTER_AWAKE_SCAN_MIN_MINUTES", "2"))
@@ -547,7 +547,7 @@ def build_game_detail_sentences(context: dict, team: str, opponent_text: str, te
             details.append(f"His loudest contact came at {float(hardest_ev):.1f} mph.")
 
     if team_won and not any(context.get(key) for key in ["walkoff", "go_ahead_hit", "go_ahead_homer"]):
-        details.append(f"It was the kind of line that helped tilt the game in {team}'s favor.")
+        details.append(f"He was a big part of why {team} came away with this one.")
 
     return details
 
@@ -902,10 +902,10 @@ def build_hitter_subject(name: str, stats: dict, label: str, context: dict, rece
         ]
     elif context.get("go_ahead_hit"):
         options = [
-            "Delivered The Hit That Changed Everything",
             "Came Through In The Biggest Spot",
-            "Produced The Decisive Swing",
-            "Put His Club In Front When It Mattered",
+            "Delivered The Swing That Changed The Game",
+            "Put His Club In Front Late",
+            "Produced The Hit Everyone Remembered",
         ]
     elif slump_breaker:
         options = [
@@ -930,10 +930,10 @@ def build_hitter_subject(name: str, stats: dict, label: str, context: dict, rece
         ]
     elif homers >= 1 and rbi >= 3:
         options = [
-            "Big Power, Bigger Damage",
-            "Middle-Of-The-Order Thump All Night",
-            "The Power Came With Real Impact",
-            "A Loud Night In Run-Scoring Spots",
+            "Big Swing, Big Damage",
+            "Turned One Swing Into A Huge Night",
+            "The Power Showed Up In A Big Spot",
+            "Came Through With The Long Ball",
         ]
     elif hits >= 4:
         options = [
@@ -965,10 +965,10 @@ def build_hitter_subject(name: str, stats: dict, label: str, context: dict, rece
         ]
     else:
         options = [
-            "A Strong Offensive Night",
-            "A Real Boost For The Offense",
-            "He Gave The Lineup A Needed Lift",
-            "A Productive Night At The Plate",
+            "Came Through With A Big Night",
+            "One Of The Better Bats In The Game",
+            "Put Together A Strong Night At The Plate",
+            "Made His Presence Felt All Night",
         ]
 
     seed = len(name) + hits + homers * 3 + rbi * 2 + steals + total_bases
@@ -1064,11 +1064,11 @@ def build_hitter_summary(name: str, team: str, stats: dict, label: str, context:
         descriptor = random.choice(["the young hitter", "the steady hitter", "the rookie", "the second-year bat", "the veteran hitter"])
 
     opening_pool = [
-        f"Against the {opponent_text}, {name} came through with one of the more important offensive lines for {team}.",
-        f"{name} helped drive the offense for {team} against the {opponent_text}.",
-        f"{name} kept pressure on the {opponent_text} pitching staff throughout the game.",
-        f"{name} found multiple ways to impact the game against the {opponent_text}.",
-        f"{name} turned in a productive night for {team} against the {opponent_text}.",
+        f"{name} was right in the middle of everything for {team} against the {opponent_text}.",
+        f"{name} turned in one of his better games of the year against the {opponent_text}.",
+        f"{name} gave {team} a big lift against the {opponent_text}.",
+        f"{name} had a hand in a lot of what went right for {team} against the {opponent_text}.",
+        f"{name} was one of the biggest reasons {team} stayed in control against the {opponent_text}.",
     ]
     if descriptor:
         opening_pool.append(f"Against the {opponent_text}, {descriptor} {name} gave {team} a needed lift.")
@@ -1200,6 +1200,8 @@ async def hitter_loop() -> None:
     assert client is not None
     await client.wait_until_ready()
     channel = await client.fetch_channel(CHANNEL_ID)
+
+    load_player_headshot_index()
 
     state = load_state()
     posted = set(state.get("posted", []))
