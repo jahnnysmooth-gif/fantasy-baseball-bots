@@ -333,6 +333,20 @@ def get_random_awake_interval_seconds() -> int:
     return random.randint(low * 60, high * 60)
 
 
+
+
+def parse_game_date_et(game: dict):
+    game_date = game.get("gameDate")
+    if not game_date:
+        return now_et().date()
+
+    try:
+        parsed = datetime.fromisoformat(game_date.replace("Z", "+00:00"))
+        return parsed.astimezone(ET).date()
+    except Exception:
+        return now_et().date()
+
+
 # ---------------- MLB DATA ----------------
 
 def get_games() -> list[dict]:
