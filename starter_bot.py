@@ -2740,11 +2740,11 @@ def build_starter_overview(name: str, label: str, stats: dict, seed: int) -> str
         ],
         "SHARP": [
             f"{name} looked sharp through {ip_text} and kept the innings moving in his favor.",
-            f"{name} gave a crisp {ip_text} and did not let many innings get noisy.",
+            f"{name} gave a crisp {ip_text} and rarely let the lineup build any momentum.",
         ],
         "SOLID": [
             f"{name} gave his side a useful {ip_text} and kept the game from drifting too far while he was in it.",
-            f"{name} turned in a steady {ip_text} and kept things playable for most of the night.",
+            f"{name} turned in a steady {ip_text} and kept his side within striking distance most of the night.",
         ],
         "UNEVEN": [
             f"{name} got through {ip_text}, though the outing had traffic on it from start to finish.",
@@ -2782,13 +2782,47 @@ def build_starter_stat_sentence(stats: dict, seed: int) -> str:
     bb_text = stat_phrase(bb, "walk")
     k_text = stat_phrase(k, "strikeout")
     choices = [
-        f"Across {ip_text}, he allowed {hit_text} and {er_text}, issued {bb_text}, and finished with {k_text}.",
+        f"He allowed {hit_text} and {er_text}, issued {bb_text}, and finished with {k_text} over the course of the outing.",
         f"He wound up allowing {hit_text} and {er_text}, with {bb_text} against {k_text} over {ip_text}.",
-        f"By the time he was done, he had given up {hit_text} and {er_text}, with {bb_text} and {k_text} over {ip_text}.",
+        f"He gave up {hit_text} and {er_text}, while finishing with {bb_text} and {k_text} across the outing.",
     ]
     return choices[(seed // 3) % len(choices)]
 
 
+
+
+def build_game_context_sentence(name: str, stats: dict, label: str, seed: int) -> str:
+    innings = float(stats.get("inningsPitched", 0) or 0)
+    walks = int(stats.get("baseOnBalls", 0) or 0)
+    runs = int(stats.get("earnedRuns", 0) or 0)
+    strikeouts = int(stats.get("strikeOuts", 0) or 0)
+
+    dominant = [
+        "He controlled the pace from the first inning and never gave the lineup much room to breathe.",
+        "There were very few stressful innings, even when a couple runners reached.",
+        "He stayed ahead in counts all night and forced the offense to play on his terms.",
+    ]
+    solid = [
+        "Most of the traffic against him never turned into a serious threat.",
+        "He settled in quickly and rarely let the opposing lineup build any momentum.",
+        "Even when runners reached, he usually had an answer waiting.",
+        "The outing let his club stay in control instead of chasing the game.",
+    ]
+    rough = [
+        "The pitch count climbed quickly and he never really found much rhythm.",
+        "Too many deep counts kept him from working deeper into the game.",
+        "Once hitters started squaring balls up, the outing became difficult to stabilize.",
+    ]
+
+    if label in {"GEM", "DOMINANT", "STRIKEOUT"}:
+        return dominant[seed % len(dominant)]
+    if label in {"ROUGH", "NO_COMMAND", "HIT_HARD", "SHORT", "UNEVEN"}:
+        return rough[seed % len(rough)]
+    if runs == 0 and innings >= 6:
+        return "He pitched with confidence most of the night and kept the pressure off the bullpen."
+    if walks >= 3 and strikeouts >= 6:
+        return "There were a few extra baserunners, but he found key strikeouts when he needed them."
+    return solid[seed % len(solid)]
 def build_starter_positive_sentence(stats: dict, label: str, seed: int) -> str:
     if label not in BAD_STARTER_LABELS:
         return ""
@@ -3162,18 +3196,19 @@ def build_starter_summary(p: dict, label: str, game_context: dict, recent_appear
     csw_sentence = build_starter_csw_sentence(p, label, seed)
     pitch_sentence = build_starter_pitch_count_sentence(p, label, seed)
     positive_sentence = build_starter_positive_sentence(stats, label, seed)
+    game_flow_sentence = build_game_context_sentence(p["name"], stats, label, seed)
 
     if is_bad_starter_label(label):
         order_options = [
-            [overview, stat_sentence, pressure_sentence, positive_sentence, csw_sentence, pitch_sentence, team_sentence, velocity_sentence],
-            [overview, positive_sentence, stat_sentence, pitch_sentence, pressure_sentence, csw_sentence, team_sentence, velocity_sentence],
-            [overview, stat_sentence, csw_sentence, pressure_sentence, pitch_sentence, team_sentence, velocity_sentence],
+            [overview, stat_sentence, pressure_sentence, game_flow_sentence, positive_sentence, csw_sentence, pitch_sentence, team_sentence, velocity_sentence],
+            [overview, positive_sentence, game_flow_sentence, stat_sentence, pitch_sentence, pressure_sentence, csw_sentence, team_sentence, velocity_sentence],
+            [overview, stat_sentence, game_flow_sentence, csw_sentence, pressure_sentence, pitch_sentence, team_sentence, velocity_sentence],
         ]
     else:
         order_options = [
-            [overview, stat_sentence, pressure_sentence, csw_sentence, pitch_sentence, team_sentence, velocity_sentence],
-            [overview, csw_sentence, stat_sentence, pitch_sentence, pressure_sentence, team_sentence, velocity_sentence],
-            [overview, pitch_sentence, stat_sentence, pressure_sentence, csw_sentence, team_sentence, velocity_sentence],
+            [overview, stat_sentence, pressure_sentence, game_flow_sentence, csw_sentence, pitch_sentence, team_sentence, velocity_sentence],
+            [overview, csw_sentence, game_flow_sentence, stat_sentence, pitch_sentence, pressure_sentence, team_sentence, velocity_sentence],
+            [overview, pitch_sentence, game_flow_sentence, stat_sentence, pressure_sentence, csw_sentence, team_sentence, velocity_sentence],
         ]
 
     ordered = [s for s in order_options[seed % len(order_options)] if s]
@@ -3184,7 +3219,7 @@ def build_starter_summary(p: dict, label: str, game_context: dict, recent_appear
         if len(final_sentences) >= 4:
             break
     if len(final_sentences) < 3:
-        fillers = [stat_sentence, pressure_sentence, csw_sentence, pitch_sentence, team_sentence, velocity_sentence, positive_sentence]
+        fillers = [stat_sentence, pressure_sentence, game_flow_sentence, csw_sentence, pitch_sentence, team_sentence, velocity_sentence, positive_sentence]
         for sentence in fillers:
             if sentence and sentence not in final_sentences:
                 final_sentences.append(sentence)
