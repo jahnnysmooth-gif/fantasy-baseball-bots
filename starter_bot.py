@@ -1,6 +1,7 @@
 import asyncio
 import json
 import os
+import unicodedata
 from datetime import datetime, timedelta, timezone
 from zoneinfo import ZoneInfo
 
@@ -133,8 +134,10 @@ def get_logo(team: str) -> str:
 def normalize_lookup_name(name: str) -> str:
     if not name:
         return ""
-    cleaned = name.lower()
-    for ch in [".", ",", "'", "`", "-", "_", "(", ")", "[", "]"]:
+    cleaned = unicodedata.normalize("NFKD", str(name))
+    cleaned = "".join(ch for ch in cleaned if not unicodedata.combining(ch))
+    cleaned = cleaned.lower()
+    for ch in [".", ",", "'", "`", "-", "_", "(", ")", "[", "]", "’", "´"]:
         cleaned = cleaned.replace(ch, " ")
     return " ".join(cleaned.split())
 
@@ -582,6 +585,10 @@ def build_starter_game_flow(feed: dict, pitcher_id: int, side: str):
         "exit_margin": 0,
         "first_inning": None,
         "last_inning": None,
+        "max_retired_in_row": 0,
+        "long_first_inning": False,
+        "homer_allowed": False,
+        "scoreless_after_homer": False,
     }
     if not feed or pitcher_id is None:
         return default
@@ -604,6 +611,18 @@ def build_starter_game_flow(feed: dict, pitcher_id: int, side: str):
         result = play.get("result", {}) if isinstance(play, dict) else {}
         return safe_int(result.get("awayScore", 0), 0), safe_int(result.get("homeScore", 0), 0)
 
+    safe_reach_events = {
+        "single", "double", "triple", "home_run", "walk", "intent_walk", "hit_by_pitch",
+        "field_error", "catcher_interf", "fielders_choice", "force_out", "sac_bunt",
+        "sac_fly", "triple_play", "double_play"
+    }
+    definite_out_events = {
+        "strikeout", "strikeout_double_play", "field_out", "grounded_into_double_play",
+        "double_play", "triple_play", "sac_fly_double_play", "sac_bunt_double_play",
+        "lineout", "flyout", "pop_out", "force_out", "fielders_choice_out",
+        "other_out", "pickoff_1b", "pickoff_2b", "pickoff_3b", "runner_double_play",
+    }
+
     first_idx = pitcher_plays[0][0]
     prev_away, prev_home = score_tuple(plays[first_idx - 1]) if first_idx > 0 else (0, 0)
 
@@ -616,6 +635,10 @@ def build_starter_game_flow(feed: dict, pitcher_id: int, side: str):
 
     innings_sequence = []
     runs_by_inning = {}
+    pitches_by_inning = {}
+    retired_in_row = 0
+    max_retired_in_row = 0
+    homer_inning = None
 
     for _, play in pitcher_plays:
         about = play.get("about", {}) if isinstance(play, dict) else {}
@@ -623,10 +646,27 @@ def build_starter_game_flow(feed: dict, pitcher_id: int, side: str):
         if inning and inning not in innings_sequence:
             innings_sequence.append(inning)
 
+        pitch_events = [evt for evt in play.get("playEvents", []) if isinstance(evt, dict) and evt.get("isPitch")]
+        if inning:
+            pitches_by_inning[inning] = pitches_by_inning.get(inning, 0) + len(pitch_events)
+
+        result = play.get("result", {}) if isinstance(play, dict) else {}
+        event_type = str(result.get("eventType") or "").lower()
+
         away_after, home_after = score_tuple(play)
         opp_runs_on_play = (away_after - prev_away) if side == "home" else (home_after - prev_home)
         if opp_runs_on_play > 0 and inning:
             runs_by_inning[inning] = runs_by_inning.get(inning, 0) + opp_runs_on_play
+
+        if event_type == "home_run" and inning:
+            homer_inning = inning
+
+        batter_reached = event_type in safe_reach_events and event_type not in definite_out_events
+        if batter_reached:
+            retired_in_row = 0
+        elif event_type:
+            retired_in_row += 1
+            max_retired_in_row = max(max_retired_in_row, retired_in_row)
 
         prev_away, prev_home = away_after, home_after
 
@@ -650,6 +690,13 @@ def build_starter_game_flow(feed: dict, pitcher_id: int, side: str):
     settled_after_rough = scored_in_first and len(inning_runs) >= 3 and all(r == 0 for r in inning_runs[1:3])
     late_damage = len(inning_runs) >= 2 and inning_runs[-1] > 0 and sum(inning_runs[:-1]) == 0
 
+    scoreless_after_homer = False
+    if homer_inning and homer_inning in innings_sequence:
+        later_innings = [inn for inn in innings_sequence if inn > homer_inning]
+        if len(later_innings) >= 2 and all(runs_by_inning.get(inn, 0) == 0 for inn in later_innings[:2]):
+            scoreless_after_homer = True
+
+    first_inning = innings_sequence[0] if innings_sequence else None
     payload = dict(default)
     payload.update({
         "innings_sequence": innings_sequence,
@@ -664,8 +711,12 @@ def build_starter_game_flow(feed: dict, pitcher_id: int, side: str):
         "opp_runs_while_in": max(exit_opp - entry_opp, 0),
         "entry_margin": entry_team - entry_opp,
         "exit_margin": exit_team - exit_opp,
-        "first_inning": innings_sequence[0] if innings_sequence else None,
+        "first_inning": first_inning,
         "last_inning": innings_sequence[-1] if innings_sequence else None,
+        "max_retired_in_row": max_retired_in_row,
+        "long_first_inning": bool(first_inning and pitches_by_inning.get(first_inning, 0) >= 25),
+        "homer_allowed": homer_inning is not None,
+        "scoreless_after_homer": scoreless_after_homer,
     })
     return payload
 
@@ -1157,6 +1208,15 @@ def build_starter_game_flow_sentence(p: dict, label: str, seed: int) -> str:
     biggest_inning_runs = safe_int(flow.get("biggest_inning_runs", 0), 0)
     first_inning = safe_int(flow.get("first_inning", 0), 0)
     last_inning = safe_int(flow.get("last_inning", 0), 0)
+    max_retired_in_row = safe_int(flow.get("max_retired_in_row", 0), 0)
+
+    if flow.get("scoreless_after_homer"):
+        choices = [
+            "He gave up a homer, then settled right back in and strung together scoreless work behind it.",
+            "The homer could have changed the feel of the outing, but he answered it with cleaner innings after that.",
+            "After allowing a homer, he recovered well and kept the rest of the outing from tilting any further.",
+        ]
+        return choices[(seed // 23) % len(choices)]
 
     if flow.get("settled_after_rough"):
         choices = [
@@ -1173,6 +1233,22 @@ def build_starter_game_flow_sentence(p: dict, label: str, seed: int) -> str:
             "One rough stretch did most of the damage against him, but he was much steadier outside of it.",
             "The line was hurt by one bad inning more than anything else.",
             "Outside of one inning that got away from him, he mostly kept the game under control.",
+        ]
+        return choices[(seed // 23) % len(choices)]
+
+    if max_retired_in_row >= 7 and label in POSITIVE_STARTER_LABELS:
+        choices = [
+            f"At one point he retired {number_word(max_retired_in_row)} straight hitters and really took control of the game.",
+            f"He found a strong rhythm in the middle innings, retiring {number_word(max_retired_in_row)} in a row at one point.",
+            f"The game settled into his hands once he ran off {number_word(max_retired_in_row)} straight outs.",
+        ]
+        return choices[(seed // 23) % len(choices)]
+
+    if flow.get("long_first_inning") and label in {"SOLID", "QUALITY", "SHARP"}:
+        choices = [
+            "He had to work through a long opening inning, then settled into a much better pace after that.",
+            "The first inning made him labor a bit, but the outing got cleaner once he got past it.",
+            "It took some work early, though the tempo of the start improved once he got through the opening frame.",
         ]
         return choices[(seed // 23) % len(choices)]
 
@@ -1261,45 +1337,37 @@ def build_starter_velocity_sentence(p: dict, label: str, seed: int, recent_appea
             except Exception:
                 continue
 
-    drop = (prev_v - current_v) if prev_v is not None else None
-    mention_drop = drop is not None and drop >= 1.0
-    if current_v < 95.0 and not mention_drop:
+    delta = round((current_v - prev_v), 1) if prev_v is not None else None
+    notable_drop = delta is not None and delta <= -1.0
+    notable_jump = delta is not None and delta >= 0.8
+    premium_velo = current_v >= 97.5 or (label in {"GEM", "DOMINANT", "STRIKEOUT"} and current_v >= 96.5)
+
+    if not (notable_drop or notable_jump or premium_velo):
         return ""
 
     velo_text = f"{current_v:.1f} mph"
-    if mention_drop:
-        drop_text = f"{drop:.1f} mph"
+
+    if notable_drop:
+        drop_text = f"{abs(delta):.1f} mph"
         choices = [
             f"His fastball averaged {velo_text}, down {drop_text} from his previous outing, so the dip stood out right away.",
             f"The heater checked in at {velo_text}, which was {drop_text} lighter than his last start and worth keeping an eye on.",
         ]
         return choices[(seed // 11) % len(choices)]
 
-    bb = safe_int(p.get("stats", {}).get("baseOnBalls", 0), 0)
-    hits = safe_int(p.get("stats", {}).get("hits", 0), 0)
-    if label in GOOD_STARTER_LABELS:
+    if notable_jump:
+        jump_text = f"{delta:.1f} mph"
         choices = [
-            f"His fastball averaged {velo_text}, and the life on it showed up whenever he needed to finish a count.",
-            f"The fastball sat {velo_text}, giving him enough finish to stay aggressive when he got ahead.",
+            f"His fastball averaged {velo_text}, up {jump_text} from his previous outing, and the extra life showed up in the way hitters reacted.",
+            f"The heater sat {velo_text}, which was {jump_text} firmer than his last start and matched the sharper look to the outing.",
         ]
-    elif is_bad_starter_label(label):
-        if bb <= 1 and hits >= 5:
-            choices = [
-                f"He still averaged {velo_text} on the fastball, so this was more about the contact against him than a lack of arm strength.",
-                f"The heater checked in at {velo_text}, and the trouble came more from the quality of contact than from missing with the fastball.",
-            ]
-        else:
-            choices = [
-                f"He still averaged {velo_text} on the fastball, but the outing never came together around it.",
-                f"The heater sat {velo_text}, though the raw velocity never translated into a cleaner line.",
-            ]
-    else:
-        choices = [
-            f"His fastball averaged {velo_text}, which gave the outing some carry even when the line was not fully clean.",
-            f"The heater sat {velo_text}, and there were stretches where that helped steady him.",
-        ]
-    return choices[(seed // 11) % len(choices)]
+        return choices[(seed // 11) % len(choices)]
 
+    choices = [
+        f"His fastball averaged {velo_text}, and that kind of velocity helped explain why hitters had such a hard time getting comfortable.",
+        f"The heater sat {velo_text}, giving him more than enough life to stay aggressive when he got ahead.",
+    ]
+    return choices[(seed // 11) % len(choices)]
 
 def build_starter_csw_sentence(p: dict, label: str, seed: int) -> str:
     csw = p.get("csw_percent")
@@ -1565,22 +1633,22 @@ def build_starter_summary(p: dict, label: str, game_context: dict, recent_appear
         ]
     elif label == "STRIKEOUT":
         order_options = [
-            [overview, csw_sentence, stat_sentence, flow_sentence, pressure_sentence, pitch_sentence, team_sentence, velocity_sentence],
-            [overview, flow_sentence, csw_sentence, stat_sentence, team_sentence, pitch_sentence, velocity_sentence, pressure_sentence],
-            [overview, stat_sentence, csw_sentence, flow_sentence, team_sentence, velocity_sentence, pressure_sentence, pitch_sentence],
+            [overview, csw_sentence, flow_sentence, stat_sentence, pressure_sentence, pitch_sentence, team_sentence, velocity_sentence],
+            [overview, flow_sentence, csw_sentence, stat_sentence, team_sentence, pitch_sentence, pressure_sentence, velocity_sentence],
+            [overview, stat_sentence, csw_sentence, flow_sentence, team_sentence, pressure_sentence, pitch_sentence, velocity_sentence],
         ]
     elif label in {"GEM", "DOMINANT"}:
         order_options = [
-            [overview, flow_sentence, csw_sentence, pressure_sentence, stat_sentence, team_sentence, velocity_sentence, pitch_sentence],
+            [overview, flow_sentence, csw_sentence, pressure_sentence, stat_sentence, team_sentence, pitch_sentence, velocity_sentence],
             [overview, pressure_sentence, stat_sentence, flow_sentence, csw_sentence, team_sentence, pitch_sentence, velocity_sentence],
-            [overview, csw_sentence, stat_sentence, flow_sentence, team_sentence, pressure_sentence, velocity_sentence, pitch_sentence],
+            [overview, csw_sentence, stat_sentence, flow_sentence, team_sentence, pressure_sentence, pitch_sentence, velocity_sentence],
         ]
     else:
         order_options = [
             [overview, flow_sentence, stat_sentence, pressure_sentence, team_sentence, pitch_sentence, csw_sentence, velocity_sentence],
             [overview, pitch_sentence, flow_sentence, stat_sentence, pressure_sentence, team_sentence, csw_sentence, velocity_sentence],
-            [overview, pressure_sentence, stat_sentence, flow_sentence, csw_sentence, team_sentence, velocity_sentence, pitch_sentence],
-            [overview, stat_sentence, team_sentence, flow_sentence, pressure_sentence, pitch_sentence, velocity_sentence, csw_sentence],
+            [overview, pressure_sentence, stat_sentence, flow_sentence, csw_sentence, team_sentence, pitch_sentence, velocity_sentence],
+            [overview, stat_sentence, team_sentence, flow_sentence, pressure_sentence, pitch_sentence, csw_sentence, velocity_sentence],
         ]
 
     ordered = [s for s in order_options[seed % len(order_options)] if s]
