@@ -28,6 +28,7 @@ MIN_HITTER_SCORE = float(os.getenv("HITTER_MIN_SCORE", "5.0"))
 MAX_CARDS_PER_GAME = int(os.getenv("HITTER_MAX_CARDS_PER_GAME", "10"))
 REQUEST_TIMEOUT = float(os.getenv("HITTER_REQUEST_TIMEOUT", "30"))
 MAX_POSTS_PER_SCAN = int(os.getenv("HITTER_MAX_POSTS_PER_SCAN", "3"))
+MAX_POSTS_PER_GAME_PER_SCAN = int(os.getenv("HITTER_MAX_POSTS_PER_GAME_PER_SCAN", "1"))
 POST_DELAY_SECONDS = float(os.getenv("HITTER_POST_DELAY_SECONDS", "1.25"))
 AWAKE_SCAN_MIN_MINUTES = int(os.getenv("HITTER_AWAKE_SCAN_MIN_MINUTES", "2"))
 AWAKE_SCAN_MAX_MINUTES = int(os.getenv("HITTER_AWAKE_SCAN_MAX_MINUTES", "5"))
@@ -193,22 +194,49 @@ def load_player_headshot_index() -> dict:
     if not isinstance(raw, dict):
         return player_headshot_index
 
-    for raw_name, raw_value in raw.items():
-        entries = raw_value if isinstance(raw_value, list) else [raw_value]
-        for entry in entries:
-            if not isinstance(entry, dict):
-                continue
+    def coerce_headshot_payload(raw_name: str, entry) -> dict | None:
+        if isinstance(entry, dict):
             headshot_url = entry.get("headshot_url")
             espn_id = entry.get("espn_id")
-            if not headshot_url and espn_id:
-                headshot_url = f"https://a.espncdn.com/i/headshots/mlb/players/full/{espn_id}.png"
-            if not headshot_url:
+            team = normalize_team_abbr(entry.get("team"))
+        elif isinstance(entry, str):
+            stripped = entry.strip()
+            if not stripped:
+                return None
+            if stripped.startswith("http://") or stripped.startswith("https://"):
+                headshot_url = stripped
+                espn_id = None
+            elif stripped.isdigit():
+                headshot_url = None
+                espn_id = stripped
+            else:
+                return None
+            team = None
+        else:
+            return None
+
+        if not headshot_url and espn_id:
+            headshot_url = f"https://a.espncdn.com/i/headshots/mlb/players/full/{espn_id}.png"
+        if not headshot_url:
+            return None
+
+        return {
+            "name": raw_name,
+            "team": team,
+            "headshot_url": headshot_url,
+        }
+
+    for raw_name, raw_value in raw.items():
+        entries = raw_value if isinstance(raw_value, list) else [raw_value]
+        seen_urls = set()
+        for entry in entries:
+            payload = coerce_headshot_payload(raw_name, entry)
+            if not payload:
                 continue
-            payload = {
-                "name": raw_name,
-                "team": normalize_team_abbr(entry.get("team")),
-                "headshot_url": headshot_url,
-            }
+            headshot_url = payload.get("headshot_url")
+            if not headshot_url or headshot_url in seen_urls:
+                continue
+            seen_urls.add(headshot_url)
             player_headshot_index.setdefault(raw_name, []).append(payload)
             normalized = normalize_lookup_name(raw_name)
             if normalized:
@@ -221,12 +249,21 @@ def load_player_headshot_index() -> dict:
 def choose_headshot_entry(entries, team: str | None = None):
     if not entries:
         return None
+
+    valid_entries = [entry for entry in entries if isinstance(entry, dict)]
+    if not valid_entries:
+        return None
+
     normalized_team = normalize_team_abbr(team) if team else None
     if normalized_team:
-        for entry in entries:
+        for entry in valid_entries:
             if normalize_team_abbr(entry.get("team")) == normalized_team:
                 return entry
-    return entries[0]
+
+    for entry in valid_entries:
+        if entry.get("headshot_url"):
+            return entry
+    return valid_entries[0]
 
 
 def get_player_headshot(name: str, team: str | None = None) -> str | None:
@@ -262,15 +299,12 @@ def apply_player_card_chrome(embed: discord.Embed, name: str, team: str) -> None
     headshot = get_player_headshot(name, team)
 
     try:
-        if headshot:
-            embed.set_author(name=f"{name} | {display_team}", icon_url=headshot)
-        else:
-            embed.set_author(name=f"{name} | {display_team}", icon_url=logo_url)
+        embed.set_author(name=f"{name} | {display_team}", icon_url=logo_url)
     except Exception:
         embed.set_author(name=f"{name} | {display_team}")
 
     try:
-        embed.set_thumbnail(url=logo_url)
+        embed.set_thumbnail(url=headshot or logo_url)
     except Exception:
         pass
 
@@ -461,14 +495,61 @@ def _small_count_phrase(value: int, noun: str, plural: str | None = None, includ
     return f"{value} {plural}"
 
 
-def _count_only_phrase(value: int) -> str:
+def _ordinal(value: int) -> str:
     value = int(value)
-    if value == 1:
-        return "a"
-    if 2 <= value <= 10:
-        return _number_word(value)
-    return str(value)
+    if 10 <= value % 100 <= 20:
+        suffix = "th"
+    else:
+        suffix = {1: "st", 2: "nd", 3: "rd"}.get(value % 10, "th")
+    return f"{value}{suffix}"
 
+
+def build_game_detail_sentences(context: dict, team: str, opponent_text: str, team_won: bool) -> list[str]:
+    details: list[str] = []
+    homers = context.get("homers") or []
+    extra_base_hits = context.get("extra_base_hits") or []
+
+    if homers:
+        first_homer = homers[0]
+        inning = safe_int(first_homer.get("inning", 0), 0)
+        rbi = safe_int(first_homer.get("rbi", 0), 0)
+        if context.get("go_ahead_homer") and inning:
+            details.append(f"His homer in the {_ordinal(inning)} gave {team} the lead for good.")
+        elif inning:
+            details.append(f"He also went deep in the {_ordinal(inning)} against the {opponent_text}.")
+        if rbi >= 3:
+            details.append("That swing accounted for a huge chunk of the scoring in one shot.")
+
+    if extra_base_hits:
+        first_xbh = extra_base_hits[0]
+        inning = safe_int(first_xbh.get("inning", 0), 0)
+        hit_type = "double" if first_xbh.get("type") == "double" else "triple"
+        if inning:
+            details.append(f"He added a {hit_type} in the {_ordinal(inning)} to keep pressure on the pitching staff.")
+        else:
+            details.append(f"He also chipped in an extra-base hit against the {opponent_text}.")
+
+    if context.get("first_run_hit"):
+        details.append(f"He was responsible for getting {team} on the board first.")
+    if context.get("first_lead_hit") and not context.get("go_ahead_hit"):
+        details.append(f"He also helped {team} grab its first lead of the game.")
+    if context.get("insurance_hit"):
+        details.append(f"He later added insurance that helped {team} open up some breathing room.")
+    elif context.get("late_rbi_hit"):
+        details.append("His biggest damage also came once the game moved into the late innings.")
+
+    balls_100 = safe_int(context.get("balls_100", 0), 0)
+    hardest_ev = context.get("hardest_ev")
+    if balls_100 >= 3:
+        details.append(f"He produced {balls_100} batted balls at 100-plus mph in the game.")
+    elif hardest_ev:
+        if float(hardest_ev) >= 108:
+            details.append(f"His loudest contact came at {float(hardest_ev):.1f} mph.")
+
+    if team_won and not any(context.get(key) for key in ["walkoff", "go_ahead_hit", "go_ahead_homer"]):
+        details.append(f"It was the kind of line that helped tilt the game in {team}'s favor.")
+
+    return details
 
 
 
@@ -983,10 +1064,11 @@ def build_hitter_summary(name: str, team: str, stats: dict, label: str, context:
         descriptor = random.choice(["the young hitter", "the steady hitter", "the rookie", "the second-year bat", "the veteran hitter"])
 
     opening_pool = [
-        f"Against the {opponent_text}, {name} gave {team} some of its biggest offensive moments.",
-        f"{name} was right in the middle of the offense against the {opponent_text}.",
-        f"{name} helped set the tone for {team} against the {opponent_text}.",
-        f"{name} gave {team} a real boost against the {opponent_text}.",
+        f"Against the {opponent_text}, {name} came through with one of the more important offensive lines for {team}.",
+        f"{name} helped drive the offense for {team} against the {opponent_text}.",
+        f"{name} kept pressure on the {opponent_text} pitching staff throughout the game.",
+        f"{name} found multiple ways to impact the game against the {opponent_text}.",
+        f"{name} turned in a productive night for {team} against the {opponent_text}.",
     ]
     if descriptor:
         opening_pool.append(f"Against the {opponent_text}, {descriptor} {name} gave {team} a needed lift.")
@@ -1046,6 +1128,7 @@ def build_hitter_summary(name: str, team: str, stats: dict, label: str, context:
     middle = _join_phrases(detail_parts) + "."
 
     context_pool = []
+    context_pool.extend(build_game_detail_sentences(context, team, opponent_text, team_won))
     if context.get("walkoff"):
         context_pool.append("He ended it with the walk-off swing.")
     if context.get("go_ahead_homer"):
@@ -1195,8 +1278,9 @@ async def hitter_loop() -> None:
                 )
 
                 posted_this_game = 0
+                game_scan_limit = max(1, min(MAX_CARDS_PER_GAME, MAX_POSTS_PER_GAME_PER_SCAN))
                 for score_value, hitter in ranked:
-                    if posts_this_scan >= MAX_POSTS_PER_SCAN or posted_this_game >= MAX_CARDS_PER_GAME:
+                    if posts_this_scan >= MAX_POSTS_PER_SCAN or posted_this_game >= game_scan_limit:
                         break
 
                     hitter_id = hitter.get("id")
