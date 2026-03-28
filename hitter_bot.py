@@ -259,18 +259,16 @@ def get_player_headshot(name: str, team: str | None = None) -> str | None:
 def apply_player_card_chrome(embed: discord.Embed, name: str, team: str) -> None:
     display_team = normalize_team_abbr(team) or "UNK"
     logo_url = get_logo(display_team)
+    headshot = get_player_headshot(name, team)
+
     try:
-        embed.set_author(name=f"{name} | {display_team}", icon_url=logo_url)
+        if headshot:
+            embed.set_author(name=f"{name} | {display_team}", icon_url=headshot)
+        else:
+            embed.set_author(name=f"{name} | {display_team}", icon_url=logo_url)
     except Exception:
         embed.set_author(name=f"{name} | {display_team}")
 
-    headshot = get_player_headshot(name, team)
-    if headshot:
-        try:
-            embed.set_thumbnail(url=headshot)
-            return
-        except Exception:
-            pass
     try:
         embed.set_thumbnail(url=logo_url)
     except Exception:
@@ -982,7 +980,7 @@ def build_hitter_summary(name: str, team: str, stats: dict, label: str, context:
     elif homers >= 2 or total_bases >= 6:
         descriptor = random.choice(["the power bat", "the middle-of-the-order bat"])
     elif hits >= 3:
-        descriptor = random.choice(["the young hitter", "the steady hitter"])
+        descriptor = random.choice(["the young hitter", "the steady hitter", "the rookie", "the second-year bat", "the veteran hitter"])
 
     opening_pool = [
         f"Against the {opponent_text}, {name} gave {team} some of its biggest offensive moments.",
@@ -1081,13 +1079,13 @@ def build_hitter_summary(name: str, team: str, stats: dict, label: str, context:
         if team_won and total_bases >= 6:
             context_pool.append("He carried real weight in the result with the quality of contact he produced.")
         elif team_won:
-            context_pool.append("He played a meaningful part in the way this one unfolded.")
+            context_pool.append("He played a meaningful part in the way this one unfolded and kept pressure on the pitching staff throughout the game.")
         elif homers >= 2:
             context_pool.append("The final result did not take much away from how loud this line was.")
         else:
             context_pool.append("There was real value in the line even if the box score did not tell the whole story.")
 
-    extras = _pick_context_sentences(context_pool, count=2)
+    extras = _pick_context_sentences(context_pool, count=3)
     return " ".join([opening, middle] + extras).strip()
 
 # ---------------- EMBED POSTING ----------------
