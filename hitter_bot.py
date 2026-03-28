@@ -81,6 +81,39 @@ TEAM_COLORS = {
     "WSH": 0xAB0003,
 }
 
+TEAM_NAME_MAP = {
+    "ARI": "Diamondbacks",
+    "ATH": "Athletics",
+    "ATL": "Braves",
+    "BAL": "Orioles",
+    "BOS": "Red Sox",
+    "CHC": "Cubs",
+    "CWS": "White Sox",
+    "CIN": "Reds",
+    "CLE": "Guardians",
+    "COL": "Rockies",
+    "DET": "Tigers",
+    "HOU": "Astros",
+    "KC": "Royals",
+    "LAA": "Angels",
+    "LAD": "Dodgers",
+    "MIA": "Marlins",
+    "MIL": "Brewers",
+    "MIN": "Twins",
+    "NYM": "Mets",
+    "NYY": "Yankees",
+    "PHI": "Phillies",
+    "PIT": "Pirates",
+    "SD": "Padres",
+    "SF": "Giants",
+    "SEA": "Mariners",
+    "STL": "Cardinals",
+    "TB": "Rays",
+    "TEX": "Rangers",
+    "TOR": "Blue Jays",
+    "WSH": "Nationals",
+}
+
 appearance_cache = {}
 pitching_stats_cache = {}
 player_meta_cache = {}
@@ -2182,207 +2215,6 @@ def get_pitchers(feed: dict):
 
 # ---------------- POST ----------------
 
-async def post_card(channel, p: dict, matchup: str, score: str, context: dict, streak_count: int, tracked_info: dict, recent_appearances, usage_note: str = "", velocity_alert: dict = None):
-    s = {
-        "ip": str(p["stats"].get("inningsPitched", "0.0")),
-        "h": safe_int(p["stats"].get("hits", 0), 0),
-        "er": safe_int(p["stats"].get("earnedRuns", 0), 0),
-        "bb": safe_int(p["stats"].get("baseOnBalls", 0), 0),
-        "k": safe_int(p["stats"].get("strikeOuts", 0), 0),
-        "saves": safe_int(p["stats"].get("saves", 0), 0),
-        "holds": safe_int(p["stats"].get("holds", 0), 0),
-        "blownSaves": safe_int(p["stats"].get("blownSaves", 0), 0),
-    }
-
-    label = classify(s)
-
-    embed = discord.Embed(
-        color=TEAM_COLORS.get(normalize_team_abbr(p["team"]), 0x2ECC71),
-        timestamp=datetime.now(timezone.utc),
-    )
-    apply_player_card_chrome(embed, p["name"], p["team"])
-
-    embed.add_field(name="", value=f"**{impact_tag(label, s)}**", inline=False)
-    embed.add_field(name="⚾ Matchup", value=matchup, inline=False)
-    embed.add_field(name="Game Line", value=format_game_line(s), inline=False)
-    embed.add_field(name="Pitch Count", value=format_pitch_count(p["stats"]), inline=False)
-    embed.add_field(name="Season", value=format_season_line(p.get("season_stats", {})), inline=False)
-    embed.add_field(
-        name="Summary",
-        value=build_summary(
-            p["name"],
-            p["team"],
-            s,
-            label,
-            context,
-            streak_count,
-            tracked_info,
-            recent_appearances,
-            usage_note=usage_note,
-            velocity_alert=velocity_alert,
-        ),
-        inline=False,
-    )
-
-    await channel.send(embed=embed)
-
-
-
-async def loop():
-    await client.wait_until_ready()
-    channel = await client.fetch_channel(CHANNEL_ID)
-
-    state = load_state()
-    posted = set(state.get("posted", []))
-
-    if RESET_CLOSER_STATE:
-        log("RESET_CLOSER_STATE enabled — posted state cleared for this run")
-
-    tracked = await refresh_tracked_pitchers()
-    last_refresh_date = datetime.now(ET).date()
-
-    while True:
-        try:
-            now_et = datetime.now(ET)
-            current_date = now_et.date()
-            if current_date != last_refresh_date:
-                tracked = await refresh_tracked_pitchers()
-                last_refresh_date = current_date
-
-            games = get_games()
-            log(f"Checking {len(games)} games")
-            processed_pitchers_by_game = []
-
-            for g in games:
-                if g.get("status", {}).get("detailedState") != "Final":
-                    continue
-
-                game_id = g.get("gamePk")
-                if not game_id:
-                    continue
-
-                feed = get_feed(game_id)
-                pitchers = get_pitchers(feed)
-                game_date_et = parse_game_date_et(g)
-
-                game_teams = feed.get("gameData", {}).get("teams", {})
-                away_abbr = game_teams.get("away", {}).get("abbreviation") or g.get("teams", {}).get("away", {}).get("team", {}).get("abbreviation") or "AWAY"
-                home_abbr = game_teams.get("home", {}).get("abbreviation") or g.get("teams", {}).get("home", {}).get("team", {}).get("abbreviation") or "HOME"
-                away_score = safe_int(g.get("teams", {}).get("away", {}).get("score", 0), 0)
-                home_score = safe_int(g.get("teams", {}).get("home", {}).get("score", 0), 0)
-                matchup = f"{away_abbr} @ {home_abbr}"
-                score = build_score_line(away_abbr, away_score, home_abbr, home_score)
-
-                for p in pitchers:
-                    pitcher_id = p.get("id")
-                    if pitcher_id is None:
-                        continue
-
-                    context = get_pitcher_entry_context(feed, pitcher_id, p["side"])
-                    recent_appearances = get_recent_appearances(pitcher_id, game_date_et, limit=5, max_days=21)
-                    current_app = {
-                        "ip": str(p["stats"].get("inningsPitched", "0.0")),
-                        "h": safe_int(p["stats"].get("hits", 0), 0),
-                        "er": safe_int(p["stats"].get("earnedRuns", 0), 0),
-                        "bb": safe_int(p["stats"].get("baseOnBalls", 0), 0),
-                        "k": safe_int(p["stats"].get("strikeOuts", 0), 0),
-                        "saves": safe_int(p["stats"].get("saves", 0), 0),
-                        "holds": safe_int(p["stats"].get("holds", 0), 0),
-                        "blownSaves": safe_int(p["stats"].get("blownSaves", 0), 0),
-                        "avg_fastball_velocity": p.get("avg_fastball_velocity"),
-                        "fastball_count": safe_int(p.get("fastball_count", 0), 0),
-                        "pitch_count": safe_int(p.get("pitch_count", 0), 0),
-                    }
-                    recent_for_trend = [current_app] + recent_appearances
-                    processed_pitchers_by_game.append({
-                        "pitcher": p,
-                        "current_app": current_app,
-                        "recent_appearances": recent_for_trend,
-                        "context": context,
-                        "game_date_et": game_date_et,
-                    })
-
-                    key = f"{game_id}_{pitcher_id}"
-                    if key in posted:
-                        continue
-
-                    tracked_info = find_tracked_pitcher_info(p["name"], p["team"], tracked)
-                    is_save = safe_int(p["stats"].get("saves", 0), 0) > 0
-                    is_tracked = tracked_info is not None
-                    if not (is_save or is_tracked):
-                        continue
-
-                    streak_count = get_streak_count(pitcher_id, game_date_et)
-                    usage_note = build_usage_sentence(get_recent_usage_snapshot(pitcher_id, game_date_et))
-                    velocity_alert = build_velocity_alert(current_app, recent_for_trend)
-
-                    log(f"Posting {p['name']} | {p['team']} | {matchup}")
-                    await post_card(
-                        channel,
-                        p,
-                        matchup,
-                        score,
-                        context,
-                        streak_count,
-                        tracked_info,
-                        recent_appearances,
-                        usage_note=usage_note,
-                        velocity_alert=velocity_alert if is_tracked else None,
-                    )
-
-                    if (not is_tracked) and should_post_velocity_alert(state, pitcher_id, game_id, velocity_alert, now_et):
-                        log(f"Velocity alert {p['name']} | {p['team']} | {velocity_alert.get('subject')}")
-                        await post_velocity_card(
-                            channel,
-                            {
-                                "name": p["name"],
-                                "team": p["team"],
-                                "season_stats": p.get("season_stats", {}),
-                            },
-                            velocity_alert,
-                        )
-                        mark_velocity_posted(state, pitcher_id, game_id, velocity_alert, now_et)
-
-                    posted.add(key)
-
-            # trend blurbs use the same channel, but only for non-depth-chart relievers
-            if can_post_trend_now(state, now_et):
-                trend_candidates = gather_trend_candidates_from_recent_games(tracked, processed_pitchers_by_game)
-                for candidate in trend_candidates:
-                    pid = candidate["pitcher_id"]
-                    sig = appearance_signature(candidate["recent_appearances"])
-                    existing = state.get("trend_posted", {}).get(str(pid), {})
-                    trend_family = candidate["trend"].get("family", "misc")
-                    if existing.get("sig") == sig and existing.get("family") == trend_family:
-                        continue
-                    if is_trend_family_on_cooldown(state, trend_family, now_et):
-                        continue
-                    if state.get("trend_history", {}).get(f"{pid}:{trend_family}:{sig}"):
-                        continue
-                    last_date = existing.get("date")
-                    today_key = now_et.strftime("%Y-%m-%d")
-                    if last_date == today_key:
-                        continue
-                    log(f"Trend blurb {candidate['meta'].get('name')} | {candidate['meta'].get('team')} | {candidate['trend'].get('subject')}")
-                    await post_trend_card(channel, candidate["meta"], candidate["trend"], candidate["recent_appearances"])
-                    mark_trend_posted(state, pid, candidate["trend"].get("code"), sig, now_et, trend_family=trend_family)
-                    break
-
-            state["posted"] = list(posted)
-            save_state(state)
-
-        except Exception as e:
-            log(f"Loop error: {e}")
-
-        await asyncio.sleep(POLL_MINUTES * 60)
-
-
-# ---------------- START ----------------
-
-intents = discord.Intents.default()
-client = discord.Client(intents=intents)
-background_task = None
-
 
 @client.event
 async def on_ready():
@@ -2518,17 +2350,72 @@ def classify_hitter(stats: dict) -> str:
     return "SOLID"
 
 
-def hitter_impact_tag(label: str, stats: dict) -> str:
-    tags = {
-        "MULTI_HR": "💥 Multi-Homer Game",
-        "POWER": "🚀 Power Night",
-        "FOUR_HIT": "🔥 Four-Hit Game",
-        "THREE_HIT": "✅ Three-Hit Game",
-        "RUN_GAME": "⚡ Speed Impact",
-        "RBI_GAME": "🍽️ Run Producer",
-        "SOLID": "📈 Productive Night",
+def team_name_from_abbr(team: str) -> str:
+    return TEAM_NAME_MAP.get(normalize_team_abbr(team), normalize_team_abbr(team) or "opponent")
+
+
+def build_hitter_subject(name: str, stats: dict, label: str) -> str:
+    hits = safe_int(stats.get("hits", 0), 0)
+    hr = safe_int(stats.get("homeRuns", 0), 0)
+    rbi = safe_int(stats.get("rbi", 0), 0)
+    runs = safe_int(stats.get("runs", 0), 0)
+    sb = safe_int(stats.get("stolenBases", 0), 0)
+    doubles = safe_int(stats.get("doubles", 0), 0)
+    triples = safe_int(stats.get("triples", 0), 0)
+    xbh = hr + doubles + triples
+    subjects = {
+        "MULTI_HR": [
+            f"{hr}-Homer Statement",
+            "Power Show",
+            "Left the Yard Twice",
+            "Big Fly Night",
+        ],
+        "POWER": [
+            "Impact Power Night",
+            "Game-Changing Pop",
+            "Middle-of-the-Order Damage",
+            "Big Swing Night",
+        ],
+        "FOUR_HIT": [
+            "Four-Hit Showcase",
+            "Everything Found Grass",
+            "Hit Parade",
+            "Barrel After Barrel",
+        ],
+        "THREE_HIT": [
+            "Three-Hit Night",
+            "Locked In At The Plate",
+            "Rope Show",
+            "Steady Pressure All Night",
+        ],
+        "RUN_GAME": [
+            "Speed And Spark",
+            "Created Pressure All Night",
+            "Impact On The Bases",
+            "Dynamic Offensive Night",
+        ],
+        "RBI_GAME": [
+            "Run-Producing Night",
+            "Came Through In Big Spots",
+            "Clutch At The Plate",
+            "Middle-Order Production",
+        ],
+        "SOLID": [
+            "Strong Offensive Night",
+            "Productive Evening At The Plate",
+            "Quality Fantasy Line",
+            "Impact Across The Box Score",
+        ],
     }
-    return tags.get(label, "📈 Productive Night")
+    if hr >= 2:
+        return subjects["MULTI_HR"][hr % len(subjects["MULTI_HR"])]
+    if hits >= 4:
+        return subjects["FOUR_HIT"][rbi % len(subjects["FOUR_HIT"])]
+    if label in subjects:
+        pick_seed = hits + rbi + runs + sb + xbh
+        options = subjects[label]
+        return options[pick_seed % len(options)]
+    return "Strong Offensive Night"
 
 
 def format_hitter_game_line(stats: dict) -> str:
@@ -2558,7 +2445,7 @@ def format_hitter_game_line(stats: dict) -> str:
     return " • ".join(parts)
 
 
-def build_hitter_summary(name: str, team: str, stats: dict, label: str, matchup: str, score: str) -> str:
+def build_hitter_summary(name: str, team: str, stats: dict, label: str, opponent: str, score: str, team_won: bool) -> str:
     hits = safe_int(stats.get("hits", 0), 0)
     ab = safe_int(stats.get("atBats", 0), 0)
     runs = safe_int(stats.get("runs", 0), 0)
@@ -2570,69 +2457,143 @@ def build_hitter_summary(name: str, team: str, stats: dict, label: str, matchup:
     sb = safe_int(stats.get("stolenBases", 0), 0)
     strikeouts = safe_int(stats.get("strikeOuts", 0), 0)
     tb = hitter_total_bases(stats)
+    opponent_text = opponent or "opposition"
 
-    opening = {
-        "MULTI_HR": f"{name} carried the offense in {matchup}, leaving the yard {hr} times and finishing with {tb} total bases.",
-        "POWER": f"{name} did his damage with impact contact in {matchup} and gave {team} a big lift in the middle of the order.",
-        "FOUR_HIT": f"{name} was all over everything in {matchup}, turning in a four-hit night and constantly putting pressure on the defense.",
-        "THREE_HIT": f"{name} kept finding barrels in {matchup}, stringing together a three-hit night and driving the offense for {team}.",
-        "RUN_GAME": f"{name} affected the game in several ways in {matchup}, creating offense both at the plate and on the bases.",
-        "RBI_GAME": f"{name} came through in the biggest spots in {matchup}, cashing in run-scoring chances for {team}.",
-        "SOLID": f"{name} turned in one of the better offensive performances from {matchup} and helped keep {team} moving all night.",
-    }.get(label, f"{name} put together a productive night in {matchup} and gave {team} quality offense.")
+    openers = {
+        "MULTI_HR": [
+            f"{name} brought the thunder against the {opponent_text}.",
+            f"Against the {opponent_text}, {name} supplied most of the loud contact.",
+            f"{name} did major damage against the {opponent_text} and gave the offense real life.",
+            f"This one turned into a power showcase for {name} against the {opponent_text}.",
+        ],
+        "POWER": [
+            f"{name} gave {team} a serious jolt against the {opponent_text}.",
+            f"The loudest swings for {team} came off {name}'s bat against the {opponent_text}.",
+            f"{name} made his impact count against the {opponent_text}.",
+            f"There was real thump in {name}'s line against the {opponent_text}.",
+        ],
+        "FOUR_HIT": [
+            f"{name} was everywhere offensively against the {opponent_text}.",
+            f"Few hitters were busier than {name} against the {opponent_text}.",
+            f"{name} kept the pressure on the {opponent_text} from his first trip to the plate on.",
+            f"It felt like {name} was in the middle of everything against the {opponent_text}.",
+        ],
+        "THREE_HIT": [
+            f"{name} stayed locked in all night against the {opponent_text}.",
+            f"Against the {opponent_text}, {name} kept finding ways to move the offense.",
+            f"{name} put together a steady barrage against the {opponent_text}.",
+            f"The at-bats were consistently strong for {name} against the {opponent_text}.",
+        ],
+        "RUN_GAME": [
+            f"{name} affected the game in more than one way against the {opponent_text}.",
+            f"There was action every time {name} got involved against the {opponent_text}.",
+            f"Against the {opponent_text}, {name} created offense with both his bat and his legs.",
+            f"{name} kept the {opponent_text} under pressure all night.",
+        ],
+        "RBI_GAME": [
+            f"{name} came through when run-scoring chances showed up against the {opponent_text}.",
+            f"Against the {opponent_text}, {name} made his trips with men on base matter.",
+            f"{name} supplied the kind of timely production {team} needed against the {opponent_text}.",
+            f"The big RBI moments belonged to {name} against the {opponent_text}.",
+        ],
+        "SOLID": [
+            f"{name} turned in a strong offensive night against the {opponent_text}.",
+            f"Against the {opponent_text}, {name} gave {team} quality offense from start to finish.",
+            f"{name} was one of the steadier bats in this one against the {opponent_text}.",
+            f"There was plenty to like in {name}'s line against the {opponent_text}.",
+        ],
+    }
+    seed = hits + runs + rbi + hr + doubles + triples + bb + sb + strikeouts + len(name)
+    opening_options = openers.get(label, openers["SOLID"])
+    opening = opening_options[seed % len(opening_options)]
 
     game_bits = []
     if hits:
-        game_bits.append(f"finished {hits}-for-{ab}")
+        game_bits.append(f"He finished {hits}-for-{ab}")
     if hr:
-        game_bits.append(f"homered {hr} time{'s' if hr != 1 else ''}")
+        game_bits.append(f"left the yard {hr} time{'s' if hr != 1 else ''}")
     elif doubles or triples:
         xbh_parts = []
         if doubles:
             xbh_parts.append(f"{doubles} double{'s' if doubles != 1 else ''}")
         if triples:
             xbh_parts.append(f"{triples} triple{'s' if triples != 1 else ''}")
-        game_bits.append("added " + " and ".join(xbh_parts))
+        game_bits.append("ripped " + " and ".join(xbh_parts))
     if rbi:
         game_bits.append(f"drove in {rbi}")
     if runs:
         game_bits.append(f"scored {runs} run{'s' if runs != 1 else ''}")
     if bb:
-        game_bits.append(f"drew {bb} walk{'s' if bb != 1 else ''}")
+        game_bits.append(f"worked {bb} walk{'s' if bb != 1 else ''}")
     if sb:
         game_bits.append(f"stole {sb} base{'s' if sb != 1 else ''}")
 
     middle = ""
     if game_bits:
         if len(game_bits) == 1:
-            middle = f"He {game_bits[0]}."
+            middle = game_bits[0] + "."
         else:
-            middle = f"He {', '.join(game_bits[:-1])}, and {game_bits[-1]}."
+            middle = ", ".join(game_bits[:-1]) + ", and " + game_bits[-1] + "."
 
-    closer_parts = []
-    if hr >= 2:
-        closer_parts.append("It was one of the bigger power performances anywhere on the slate")
-    elif hits >= 4:
-        closer_parts.append("Every trip to the plate seemed productive")
-    elif hits >= 3 and rbi >= 3:
-        closer_parts.append("He consistently came through in run-producing spots")
-    elif sb >= 2:
-        closer_parts.append("His legs were just as important as his bat")
-    elif strikeouts >= 3 and hits <= 1:
-        closer_parts.append("The strikeouts still kept the line from being completely clean")
-    elif hits >= 2:
-        closer_parts.append("He stayed involved in the offense from start to finish")
-
-    closer = ""
-    if closer_parts:
-        closer = closer_parts[0] + f". Final score: {score}."
+    closers = []
+    if team_won:
+        if hr >= 2:
+            closers.extend([
+                "He was a huge reason this one tilted in his club's favor.",
+                "That kind of power output usually ends up deciding the game.",
+                "His swings ended up carrying real weight in the result.",
+            ])
+        elif rbi >= 3:
+            closers.extend([
+                "He did a lot of the run-producing work in this one.",
+                "That line came with real scoreboard impact.",
+                "He kept showing up in the biggest offensive moments.",
+            ])
+        elif sb >= 2:
+            closers.extend([
+                "His pressure on the bases helped shape the game.",
+                "He created extra stress every time he got aboard.",
+            ])
+        elif hits >= 3:
+            closers.extend([
+                "He kept the offense moving whenever the game needed another push.",
+                "It was the kind of all-around line that helped steady the attack.",
+            ])
+        else:
+            closers.extend([
+                "He played a meaningful part in the way this game unfolded.",
+                "There was more impact here than the basic line alone suggests.",
+            ])
     else:
-        closer = f"Final score: {score}."
+        if hr >= 2:
+            closers.extend([
+                "Even in a loss, he was easily one of the biggest offensive stories in the game.",
+                "The final result did not take much away from how loud this line was.",
+            ])
+        elif hits >= 3 or rbi >= 2:
+            closers.extend([
+                "He still did plenty of damage even though the result did not follow.",
+                "There was real production here despite the final outcome.",
+            ])
+        elif strikeouts >= 3 and hits <= 1:
+            closers.extend([
+                "The strikeouts kept it from being a cleaner night overall.",
+                "There was still some swing-and-miss attached to the line.",
+            ])
+        else:
+            closers.extend([
+                "He was one of the few bats to provide a lift in this one.",
+                "It was still a useful offensive line even without the win.",
+            ])
 
-    return " ".join([x for x in [opening, middle, closer] if x])
+    if tb >= 8:
+        closers.append("Nine total bases or close to it will play any night of the week." if tb == 9 else "He piled up extra-base damage all night long.")
+
+    closer = closers[seed % len(closers)] if closers else ""
+    return " ".join(part for part in [opening, middle, closer] if part)
 
 
-async def post_card(channel, p: dict, matchup: str, score: str, context=None, streak_count: int = 0, tracked_info=None, recent_appearances=None, usage_note: str = "", velocity_alert=None):
+async def post_card(channel, p: dict, matchup: str, score: str, opponent: str, team_won: bool, context=None, streak_count: int = 0, tracked_info=None, recent_appearances=None, usage_note: str = "", velocity_alert=None):
     stats = p["stats"]
     label = classify_hitter(stats)
     embed = discord.Embed(
@@ -2640,11 +2601,10 @@ async def post_card(channel, p: dict, matchup: str, score: str, context=None, st
         timestamp=datetime.now(timezone.utc),
     )
     apply_player_card_chrome(embed, p["name"], p["team"])
-    embed.add_field(name="", value=f"**{hitter_impact_tag(label, stats)}**", inline=False)
-    embed.add_field(name="⚾ Matchup", value=matchup, inline=False)
+    embed.add_field(name="", value=f"**{build_hitter_subject(p['name'], stats, label)}**", inline=False)
     embed.add_field(name="Game Line", value=format_hitter_game_line(stats), inline=False)
+    embed.add_field(name="Summary", value=build_hitter_summary(p["name"], p["team"], stats, label, opponent, score, team_won), inline=False)
     embed.add_field(name="Season", value=format_hitter_season_line(p.get("season_stats", {})), inline=False)
-    embed.add_field(name="Summary", value=build_hitter_summary(p["name"], p["team"], stats, label, matchup, score), inline=False)
     await channel.send(embed=embed)
 
 
@@ -2681,6 +2641,8 @@ async def loop():
                 home_score = safe_int(g.get("teams", {}).get("home", {}).get("score", 0), 0)
                 matchup = f"{away_abbr} @ {home_abbr}"
                 score = build_score_line(away_abbr, away_score, home_abbr, home_score)
+                away_name = team_name_from_abbr(away_abbr)
+                home_name = team_name_from_abbr(home_abbr)
 
                 ranked = []
                 for p in hitters:
@@ -2700,8 +2662,11 @@ async def loop():
                     key = f"{game_id}_{pid}"
                     if key in posted:
                         continue
+                    player_team = normalize_team_abbr(p.get("team"))
+                    opponent = home_name if player_team == normalize_team_abbr(away_abbr) else away_name
+                    team_won = (player_team == normalize_team_abbr(away_abbr) and away_score > home_score) or (player_team == normalize_team_abbr(home_abbr) and home_score > away_score)
                     log(f"Posting {p['name']} | {p['team']} | {matchup} | score={score_value}")
-                    await post_card(channel, p, matchup, score)
+                    await post_card(channel, p, matchup, score, opponent, team_won)
                     posted.add(key)
                     posted_this_game += 1
 
