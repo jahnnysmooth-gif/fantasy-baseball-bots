@@ -1,7 +1,6 @@
 import asyncio
 import json
 import os
-import unicodedata
 from datetime import datetime, timedelta, timezone
 from zoneinfo import ZoneInfo
 
@@ -63,6 +62,44 @@ TEAM_COLORS = {
     "TOR": 0x134A8E,
     "WSH": 0xAB0003,
 }
+
+TEAM_NAME_MAP = {
+    "ARI": "Diamondbacks",
+    "ATH": "Athletics",
+    "ATL": "Braves",
+    "BAL": "Orioles",
+    "BOS": "Red Sox",
+    "CHC": "Cubs",
+    "CWS": "White Sox",
+    "CIN": "Reds",
+    "CLE": "Guardians",
+    "COL": "Rockies",
+    "DET": "Tigers",
+    "HOU": "Astros",
+    "KC": "Royals",
+    "LAA": "Angels",
+    "LAD": "Dodgers",
+    "MIA": "Marlins",
+    "MIL": "Brewers",
+    "MIN": "Twins",
+    "NYM": "Mets",
+    "NYY": "Yankees",
+    "PHI": "Phillies",
+    "PIT": "Pirates",
+    "SD": "Padres",
+    "SF": "Giants",
+    "SEA": "Mariners",
+    "STL": "Cardinals",
+    "TB": "Rays",
+    "TEX": "Rangers",
+    "TOR": "Blue Jays",
+    "WSH": "Nationals",
+}
+
+
+def team_name_from_abbr(team: str) -> str:
+    normalized = normalize_team_abbr(team)
+    return TEAM_NAME_MAP.get(normalized, normalized or "club")
 
 pitching_stats_cache = {}
 player_meta_cache = {}
@@ -134,10 +171,8 @@ def get_logo(team: str) -> str:
 def normalize_lookup_name(name: str) -> str:
     if not name:
         return ""
-    cleaned = unicodedata.normalize("NFKD", str(name))
-    cleaned = "".join(ch for ch in cleaned if not unicodedata.combining(ch))
-    cleaned = cleaned.lower()
-    for ch in [".", ",", "'", "`", "-", "_", "(", ")", "[", "]", "’", "´"]:
+    cleaned = name.lower()
+    for ch in [".", ",", "'", "`", "-", "_", "(", ")", "[", "]"]:
         cleaned = cleaned.replace(ch, " ")
     return " ".join(cleaned.split())
 
@@ -585,10 +620,6 @@ def build_starter_game_flow(feed: dict, pitcher_id: int, side: str):
         "exit_margin": 0,
         "first_inning": None,
         "last_inning": None,
-        "max_retired_in_row": 0,
-        "long_first_inning": False,
-        "homer_allowed": False,
-        "scoreless_after_homer": False,
     }
     if not feed or pitcher_id is None:
         return default
@@ -611,18 +642,6 @@ def build_starter_game_flow(feed: dict, pitcher_id: int, side: str):
         result = play.get("result", {}) if isinstance(play, dict) else {}
         return safe_int(result.get("awayScore", 0), 0), safe_int(result.get("homeScore", 0), 0)
 
-    safe_reach_events = {
-        "single", "double", "triple", "home_run", "walk", "intent_walk", "hit_by_pitch",
-        "field_error", "catcher_interf", "fielders_choice", "force_out", "sac_bunt",
-        "sac_fly", "triple_play", "double_play"
-    }
-    definite_out_events = {
-        "strikeout", "strikeout_double_play", "field_out", "grounded_into_double_play",
-        "double_play", "triple_play", "sac_fly_double_play", "sac_bunt_double_play",
-        "lineout", "flyout", "pop_out", "force_out", "fielders_choice_out",
-        "other_out", "pickoff_1b", "pickoff_2b", "pickoff_3b", "runner_double_play",
-    }
-
     first_idx = pitcher_plays[0][0]
     prev_away, prev_home = score_tuple(plays[first_idx - 1]) if first_idx > 0 else (0, 0)
 
@@ -635,10 +654,6 @@ def build_starter_game_flow(feed: dict, pitcher_id: int, side: str):
 
     innings_sequence = []
     runs_by_inning = {}
-    pitches_by_inning = {}
-    retired_in_row = 0
-    max_retired_in_row = 0
-    homer_inning = None
 
     for _, play in pitcher_plays:
         about = play.get("about", {}) if isinstance(play, dict) else {}
@@ -646,27 +661,10 @@ def build_starter_game_flow(feed: dict, pitcher_id: int, side: str):
         if inning and inning not in innings_sequence:
             innings_sequence.append(inning)
 
-        pitch_events = [evt for evt in play.get("playEvents", []) if isinstance(evt, dict) and evt.get("isPitch")]
-        if inning:
-            pitches_by_inning[inning] = pitches_by_inning.get(inning, 0) + len(pitch_events)
-
-        result = play.get("result", {}) if isinstance(play, dict) else {}
-        event_type = str(result.get("eventType") or "").lower()
-
         away_after, home_after = score_tuple(play)
         opp_runs_on_play = (away_after - prev_away) if side == "home" else (home_after - prev_home)
         if opp_runs_on_play > 0 and inning:
             runs_by_inning[inning] = runs_by_inning.get(inning, 0) + opp_runs_on_play
-
-        if event_type == "home_run" and inning:
-            homer_inning = inning
-
-        batter_reached = event_type in safe_reach_events and event_type not in definite_out_events
-        if batter_reached:
-            retired_in_row = 0
-        elif event_type:
-            retired_in_row += 1
-            max_retired_in_row = max(max_retired_in_row, retired_in_row)
 
         prev_away, prev_home = away_after, home_after
 
@@ -690,13 +688,6 @@ def build_starter_game_flow(feed: dict, pitcher_id: int, side: str):
     settled_after_rough = scored_in_first and len(inning_runs) >= 3 and all(r == 0 for r in inning_runs[1:3])
     late_damage = len(inning_runs) >= 2 and inning_runs[-1] > 0 and sum(inning_runs[:-1]) == 0
 
-    scoreless_after_homer = False
-    if homer_inning and homer_inning in innings_sequence:
-        later_innings = [inn for inn in innings_sequence if inn > homer_inning]
-        if len(later_innings) >= 2 and all(runs_by_inning.get(inn, 0) == 0 for inn in later_innings[:2]):
-            scoreless_after_homer = True
-
-    first_inning = innings_sequence[0] if innings_sequence else None
     payload = dict(default)
     payload.update({
         "innings_sequence": innings_sequence,
@@ -711,12 +702,8 @@ def build_starter_game_flow(feed: dict, pitcher_id: int, side: str):
         "opp_runs_while_in": max(exit_opp - entry_opp, 0),
         "entry_margin": entry_team - entry_opp,
         "exit_margin": exit_team - exit_opp,
-        "first_inning": first_inning,
+        "first_inning": innings_sequence[0] if innings_sequence else None,
         "last_inning": innings_sequence[-1] if innings_sequence else None,
-        "max_retired_in_row": max_retired_in_row,
-        "long_first_inning": bool(first_inning and pitches_by_inning.get(first_inning, 0) >= 25),
-        "homer_allowed": homer_inning is not None,
-        "scoreless_after_homer": scoreless_after_homer,
     })
     return payload
 
@@ -936,12 +923,10 @@ def format_percent_text(value) -> str:
 
 
 
-def build_starter_overview(name: str, label: str, stats: dict, seed: int) -> str:
+def build_starter_overview(name: str, label: str, stats: dict, seed: int, team_name: str = "club") -> str:
     ip = str(stats.get("inningsPitched", "0.0"))
     ip_text = format_starter_ip_for_summary(ip)
     outs = baseball_ip_to_outs(ip)
-    k = safe_int(stats.get("strikeOuts", 0), 0)
-    bb = safe_int(stats.get("baseOnBalls", 0), 0)
 
     if outs < 3:
         variants = {
@@ -971,79 +956,75 @@ def build_starter_overview(name: str, label: str, stats: dict, seed: int) -> str
 
     variants = {
         "GEM": [
-            f"{name} owned the game from the start and never let the lineup settle in.",
-            f"{name} gave his club a true stopper outing, controlling the pace all night.",
-            f"{name} was on top of this one from the jump and gave hitters almost nothing to work with.",
-            f"{name} put the game on his terms early and kept it there for {ip_text}.",
+            f"{name} turned in one of the cleanest starts of the day, covering {ip_text} without allowing an earned run.",
+            f"{name} set the tone early and stayed in command through {ip_text} of scoreless work.",
+            f"{name} was in control all night and gave the lineup very little to work with.",
+            f"{name} gave the {team_name} a true stopper-type outing and never let the game drift.",
         ],
         "DOMINANT": [
+            f"{name} took over this start early and stayed on top of it for {ip_text}.",
             f"{name} looked overpowering and spent most of the night dictating every at-bat.",
             f"{name} had real finish to his stuff and was clearly the one in control.",
-            f"{name} came with swing-and-miss from the outset and never gave the lineup much comfort.",
-            f"{name} pitched like the best version of himself and kept the game squarely on his terms.",
+            f"{name} looked like the best version of himself and never really let the lineup breathe.",
         ],
         "QUALITY": [
-            f"{name} gave his club a sturdy {ip_text} and limited the damage well.",
-            f"{name} turned in the kind of stable start that keeps a team in good shape.",
-            f"{name} was not perfect every inning, but the overall work gave his side exactly what it needed.",
-            f"{name} put together a strong outing and kept {team_name} in control most of the night.",
+            f"{name} gave the {team_name} a strong {ip_text} and kept the damage to a minimum.",
+            f"{name} turned in a quality outing and kept the game from getting away in any one inning.",
+            f"{name} gave the {team_name} exactly the kind of stable start it needed.",
+            f"{name} did not dominate from start to finish, but he gave the {team_name} a steady outing overall.",
         ],
         "STRIKEOUT": [
-            f"{name} brought real bat-missing to the mound, even if the outing was not spotless.",
-            f"{name} leaned on putaway stuff and kept finding strikeouts when innings got tense.",
-            f"{name} had enough swing-and-miss to overpower long stretches of this lineup.",
-            f"{name} punched his way through the toughest spots and made the strikeouts the story of the night.",
+            f"{name} missed bats all night, even if the outing was not completely clean.",
+            f"{name} leaned on putaway stuff and kept finding strikeouts when he needed them.",
+            f"{name} had enough swing-and-miss to overpower stretches of this lineup.",
+            f"{name} brought real bat-missing tonight, and that was the biggest story of the outing.",
         ],
         "SHARP": [
-            f"{name} looked sharp from the outset and kept most of the night under control.",
-            f"{name} gave a crisp outing and did not offer many clean openings to the lineup.",
-            f"{name} was steady, efficient, and rarely looked rushed over the course of the start.",
-            f"{name} kept the game in order and never let the opposition build much rhythm.",
+            f"{name} looked sharp and kept most of the night under control.",
+            f"{name} gave a crisp outing and rarely let the lineup get anything going.",
+            f"{name} was steady from the outset and did not give hitters many clean openings.",
+            f"{name} kept the pressure light for most of the night and never looked rushed.",
         ],
         "SOLID": [
-            f"{name} gave his side a useful start and kept the game on steady footing while he was in it.",
-            f"{name} turned in a workmanlike outing and kept things intact long enough to matter.",
-            f"{name} was not overpowering, but he gave his club usable length and a playable game.",
-            f"{name} did enough to bridge the game into the middle innings without letting it drift.",
+            f"{name} gave the {team_name} a useful start and kept things steady while he was on the mound.",
+            f"{name} turned in a steady outing and did the job without much extra drama.",
+            f"{name} was not overpowering, but he gave the {team_name} the kind of start it could work with.",
+            f"{name} kept this thing under control well enough to hand over a playable game.",
         ],
         "UNEVEN": [
-            f"{name} got through {ip_text}, though there was traffic on the bases for much of the night.",
-            f"{name} covered enough ground, but the outing never really settled into an easy rhythm.",
-            f"{name} had to grind through this one, even if the line never fully collapsed.",
-            f"{name} gave his club innings, but there was pressure on him from start to finish.",
+            f"{name} got through {ip_text}, working around traffic in multiple innings along the way.",
+            f"{name} covered enough ground, but there was pressure on the line for much of the night.",
+            f"{name} never looked fully comfortable, even though he kept the outing from breaking apart.",
+            f"{name} had to grind through this one more than the final line might suggest.",
         ],
         "SHORT": [
             f"{name} did not last as long as his team needed, getting through only {ip_text}.",
             f"{name} was out earlier than expected, and the outing never found much rhythm.",
             f"{name} came up short on length, which changed the shape of the game pretty quickly.",
-            f"{name} could not give his side enough innings, even if the damage stayed somewhat limited.",
+            f"{name} could not give the {team_name} enough innings, even if the damage stayed somewhat limited.",
         ],
         "ROUGH": [
-            f"{name} had a rough night and never really got the start under control.",
-            f"{name} spent too much of the outing reacting instead of dictating.",
-            f"{name} was chasing the game more than leading it, and the final line reflected that.",
+            f"{name} had a rough night and could not stop the game from leaning the wrong way.",
+            f"{name} never really got settled, and the outing kept getting heavier on him.",
+            f"{name} was chasing the start more than controlling it, and that showed in the final line.",
             f"{name} ran into trouble early and never found the reset he needed.",
         ],
         "NO_COMMAND": [
-            f"{name} fought the zone most of the night, which kept every inning from calming down.",
+            f"{name} spent too much of the night fighting the zone, which kept every inning from calming down.",
             f"{name} did not find enough strikes, and the extra traffic kept pushing the line around.",
-            f"{name} was working from behind too often and never had much margin because of it.",
-            f"{name} never consistently got ahead in counts, and that made the whole start feel uphill.",
+            f"{name} was working from behind too often, and it left him with very little margin.",
+            f"{name} never got ahead consistently enough to let the outing settle into a rhythm.",
         ],
         "HIT_HARD": [
-            f"{name} was around the zone, but too much of the contact against him came with authority.",
-            f"{name} paid for too many mistakes in hittable spots, and the lineup did real damage with them.",
-            f"{name} did not have much margin, and too many pitches left in bad places got punished.",
-            f"{name} got hit harder than the line could absorb, even when he was throwing strikes.",
+            f"{name} got hit hard, and there were too many pitches left in damage spots.",
+            f"{name} did not have much margin, and too much hittable stuff got punished.",
+            f"{name} was around the zone plenty, but too many balls were squared up.",
+            f"{name} paid for too many mistakes in hittable areas, and the lineup made him wear it.",
         ],
     }
-
-    if label == "DOMINANT" and k >= 10:
-        variants["DOMINANT"].append(f"{name} paired premium stuff with punchout volume and overpowered hitters for most of {ip_text}.")
-    if label == "NO_COMMAND" and bb >= 5:
-        variants["NO_COMMAND"].append(f"{name} never got the counts he wanted, and the walks kept every inning from breathing.")
     choices = variants.get(label, variants["SOLID"])
     return choices[seed % len(choices)]
+
 
 def build_starter_stat_sentence(stats: dict, seed: int) -> str:
     h = safe_int(stats.get("hits", 0), 0)
@@ -1098,12 +1079,12 @@ def build_starter_pressure_sentence(stats: dict, label: str, seed: int) -> str:
 
     if label in GOOD_STARTER_LABELS:
         choices = [
-            "When traffic showed up, he usually had an answer before the inning could flip on him.",
-            "The few threats against him never had enough time to become the whole story.",
-            "He kept the bigger moments under control and never let the baserunners change the feel of the game.",
-            "Even when hitters reached, he usually got the next pitch or next out he needed.",
-            "There were not many clean looks for the lineup, which kept the pressure light for most of the night.",
-            "Most of the traffic died quickly, which kept the game from getting dragged into long innings.",
+            "When hitters did get on, he usually found a way to keep the inning from turning ugly.",
+            "The few threats against him never had time to turn into a big inning.",
+            "He worked around traffic in multiple innings and kept the bigger inning off the board.",
+            "Even when the lineup pushed a little, he was usually the one who got the last word.",
+            "There were not many clean looks for the lineup, and that kept the pressure light for most of the night.",
+            "Most of the hits and baserunners stayed scattered, which kept the game from swinging against him.",
         ]
         if k >= 8:
             choices.append("When things tightened up, he still had enough putaway stuff to end the threat himself.")
@@ -1120,7 +1101,7 @@ def build_starter_pressure_sentence(stats: dict, label: str, seed: int) -> str:
             choices = [
                 "He never found the clean inning that might have slowed the game down.",
                 "Too many hitters kept reaching, which left him with almost no room to work.",
-                "Once traffic started to stack up, the outing kept moving in the wrong direction.",
+                "Once the baserunners started piling up, the outing became much tougher to control.",
                 "He spent too much of the night pitching under stress, and it finally caught up with him.",
                 "There were too many leverage pitches for this to ever feel stable.",
             ]
@@ -1129,10 +1110,10 @@ def build_starter_pressure_sentence(stats: dict, label: str, seed: int) -> str:
         elif h >= 6 and bb <= 1:
             choices.append("This was more about too much hittable contact than scattered command.")
         elif traffic >= 10:
-            choices.append("The traffic never really stopped, and that kept the outing from ever calming down.")
+            choices.append("The baserunners kept coming, and he never really found a clean stretch.")
     else:
         choices = [
-            "There was enough traffic to keep the start from feeling smooth, even if it never fully broke.",
+            "There were enough baserunners to keep the outing from ever feeling comfortable.",
             "He had to work through a few jams, which gave the line more stress than the runs alone suggest.",
             "The outing held together, but there were still a couple moments where he had to work for the escape.",
             "He was not cruising, but he did enough in the tougher spots to keep the line usable.",
@@ -1145,12 +1126,15 @@ def build_starter_pressure_sentence(stats: dict, label: str, seed: int) -> str:
 def build_starter_team_context(p: dict, stats: dict, label: str, game_context: dict, seed: int) -> str:
     away_score = safe_int(game_context.get("away_score", 0), 0)
     home_score = safe_int(game_context.get("home_score", 0), 0)
+    team_name = team_name_from_abbr(p.get("team"))
     if p.get("side") == "away":
         team_runs = away_score
         opp_runs = home_score
+        opp_name = team_name_from_abbr(game_context.get("home_abbr"))
     else:
         team_runs = home_score
         opp_runs = away_score
+        opp_name = team_name_from_abbr(game_context.get("away_abbr"))
 
     win_decision = safe_int(stats.get("wins", 0), 0) > 0
     won = team_runs > opp_runs
@@ -1158,39 +1142,39 @@ def build_starter_team_context(p: dict, stats: dict, label: str, game_context: d
 
     if won and label in POSITIVE_STARTER_LABELS:
         choices = [
-            "Those innings let his side play from in front instead of scrambling to catch up.",
-            "He handed the rest of the night over in good shape and let his club dictate the pace.",
-            "That outing helped his club settle into the game and protect the lead.",
-            "He did his part to hand the bullpen a much more manageable finish.",
-            "It helped keep the pressure off the bullpen and allowed his club to stay in front.",
+            f"Those innings let the {team_name} stay in front instead of scrambling to catch up.",
+            f"He kept the {team_name} in control for most of the night.",
+            f"He left with the {team_name} still in front and in position to close it out.",
+            f"He made sure the {opp_name} never really got the game swinging their way.",
+            f"The {team_name} were still in a good spot once he turned it over late.",
         ]
         if win_decision:
             choices.append("He wound up with the win, and the outing put him in line for it from the start.")
         elif team_runs <= 2:
-            choices.append("He did it without much offensive cushion, which made the cleaner innings matter even more.")
+            choices.append(f"He did it without much offensive cushion, which made every cleaner inning bigger for the {team_name}.")
         elif margin >= 4:
-            choices.append("Once his club gave him room to work, he mostly kept the game pointed in the right direction.")
+            choices.append(f"Once the {team_name} built some room, he kept the {opp_name} from putting together the inning that could change it.")
     elif won and label in SUBPAR_STARTER_LABELS:
         choices = [
-            "His offense gave him enough breathing room to survive the line, even if the start itself stayed shaky.",
+            f"The {team_name} scored enough to move past it, even if the start itself stayed shaky.",
             "The bats covered for it, though the outing itself was bumpier than the final margin suggests.",
-            "His side scored enough to move past it, even if the start demanded more cleanup than anyone wanted.",
+            f"He still left the {team_name} needing more cleanup than they would have liked.",
             "The final result worked out, but the outing itself was rougher than the scoreboard alone implies.",
         ]
     elif (not won) and label in POSITIVE_STARTER_LABELS:
         choices = [
-            "He kept the game close, but the support around the outing never quite matched it.",
-            "The line was good enough to keep his club hanging around, even if the result went the other way.",
-            "He gave his side a shot, even if the rest of the game never quite tilted back toward him.",
-            "He did enough to make the game winnable, even if the ending did not break his way.",
+            f"He kept the {team_name} within reach, but the support around the outing never quite matched it.",
+            f"The line was good enough to keep the {team_name} hanging around, even if the result went the other way.",
+            f"He gave the {team_name} a chance, even if the rest of the game never quite tilted back toward them.",
+            f"He did enough to keep the {opp_name} from running away with it early.",
             "It was the kind of start that usually keeps a team alive deep into the game.",
         ]
     else:
         choices = [
-            "Once the damage landed, his club spent the rest of the night trying to claw back.",
-            "The early hole changed the shape of the game from there.",
-            "It left his side playing uphill once the outing slipped.",
-            "From there, his club was chasing the game more than controlling it.",
+            f"Once the damage landed, the {team_name} spent the rest of the night trying to claw back.",
+            f"The early hole left the {team_name} playing uphill for the rest of the game.",
+            f"From there, the {team_name} were chasing more than controlling things.",
+            f"It gave the {opp_name} too much room to play from ahead.",
         ]
 
     if margin >= 5 and won and label in SUBPAR_STARTER_LABELS:
@@ -1199,6 +1183,7 @@ def build_starter_team_context(p: dict, stats: dict, label: str, game_context: d
         choices.append("In a tight game, those innings carried more weight than they might look on paper.")
     return choices[(seed // 7) % len(choices)]
 
+
 def build_starter_game_flow_sentence(p: dict, label: str, seed: int) -> str:
     flow = p.get("game_flow") or {}
     scoreless_to_start = safe_int(flow.get("scoreless_to_start", 0), 0)
@@ -1206,115 +1191,74 @@ def build_starter_game_flow_sentence(p: dict, label: str, seed: int) -> str:
     team_runs_while_in = safe_int(flow.get("team_runs_while_in", 0), 0)
     exit_margin = safe_int(flow.get("exit_margin", 0), 0)
     biggest_inning_runs = safe_int(flow.get("biggest_inning_runs", 0), 0)
-    first_inning = safe_int(flow.get("first_inning", 0), 0)
-    last_inning = safe_int(flow.get("last_inning", 0), 0)
-    max_retired_in_row = safe_int(flow.get("max_retired_in_row", 0), 0)
-
-    if flow.get("scoreless_after_homer"):
-        choices = [
-            "He gave up a homer, then settled right back in and strung together scoreless work behind it.",
-            "The homer could have changed the feel of the outing, but he answered it with cleaner innings after that.",
-            "After allowing a homer, he recovered well and kept the rest of the outing from tilting any further.",
-        ]
-        return choices[(seed // 23) % len(choices)]
+    team_name = team_name_from_abbr(p.get("team"))
 
     if flow.get("settled_after_rough"):
         choices = [
-            "After a rough first inning, he settled in and gave his club several steadier frames after that.",
-            "He had to battle through some early trouble, but the outing looked much cleaner once he found a rhythm.",
-            "The start wobbled early before he regrouped and settled into the game.",
-            "He did not have much in the opening inning, but he recovered well enough to keep the outing together.",
+            f"After a shaky opening frame, he settled down and gave the {team_name} several quieter innings behind it.",
+            "He wobbled early, then found a much better rhythm once he got deeper into the start.",
+            "The beginning was messy, but he recovered well enough to keep the outing from spiraling.",
         ]
         return choices[(seed // 23) % len(choices)]
 
     if flow.get("only_damage_in_one_inning") and opp_runs_while_in > 0:
         choices = [
-            "Almost all of the damage came in one inning, and the rest of the outing was far more controlled.",
-            "One rough stretch did most of the damage against him, but he was much steadier outside of it.",
-            "The line was hurt by one bad inning more than anything else.",
-            "Outside of one inning that got away from him, he mostly kept the game under control.",
-        ]
-        return choices[(seed // 23) % len(choices)]
-
-    if max_retired_in_row >= 7 and label in POSITIVE_STARTER_LABELS:
-        choices = [
-            f"At one point he retired {number_word(max_retired_in_row)} straight hitters and really took control of the game.",
-            f"He found a strong rhythm in the middle innings, retiring {number_word(max_retired_in_row)} in a row at one point.",
-            f"He settled in after the early traffic and retired {number_word(max_retired_in_row)} straight hitters at one point.",
-        ]
-        return choices[(seed // 23) % len(choices)]
-
-    if flow.get("long_first_inning") and label in {"SOLID", "QUALITY", "SHARP"}:
-        choices = [
-            "He had to work through a long opening inning, then settled into a much better pace after that.",
-            "The first inning made him labor a bit, but the outing got cleaner once he got past it.",
-            "It took some work early, though the tempo of the start improved once he got through the opening frame.",
+            "Most of the damage came in one inning, and the rest of the outing was much steadier.",
+            "Almost all of the trouble came in one stretch, and he was steadier outside of that pocket.",
+            "One rough inning did most of the damage against him, but the rest of the night was much calmer.",
         ]
         return choices[(seed // 23) % len(choices)]
 
     if flow.get("late_damage") and label in POSITIVE_STARTER_LABELS:
         choices = [
-            "He cruised through most of the outing before the lineup finally got to him late.",
-            "The game was mostly on his terms until some late damage changed the line a bit.",
-            "He stayed in control for several innings before things got tougher near the end.",
-            "Most of the trouble showed up late after he had been rolling for much of the night.",
+            "He kept the lineup quiet for most of the night and did not see real damage until late.",
+            "He looked in control through the middle innings before the only real trouble arrived near the end.",
+            "He was rolling for a while before the lineup finally scratched out something late.",
         ]
         return choices[(seed // 23) % len(choices)]
 
     if scoreless_to_start >= 4:
         choices = [
-            f"He opened with {number_word(scoreless_to_start)} straight scoreless innings and never let the lineup settle in early.",
-            f"He came out sharp and stacked {number_word(scoreless_to_start)} quiet innings before the opposition got anything going.",
-            f"He controlled the early part of the game, opening with {number_word(scoreless_to_start)} scoreless frames.",
-            f"The lineup had very little going early, as he rolled through {number_word(scoreless_to_start)} scoreless innings to start the night.",
+            f"He opened with {number_word(scoreless_to_start)} straight scoreless innings and set a strong tone right away.",
+            f"He stacked {number_word(scoreless_to_start)} quiet innings to begin the night before anything changed.",
+            f"He gave the opposition very little early, opening with {number_word(scoreless_to_start)} scoreless frames before anything changed.",
         ]
         return choices[(seed // 23) % len(choices)]
 
     if team_runs_while_in >= 4 and exit_margin > 0 and label in POSITIVE_STARTER_LABELS:
         choices = [
-            "His offense gave him a lead to work with, and he mostly kept the game moving in the right direction.",
-            "He pitched with a cushion for much of the night and did a good job protecting it.",
-            "With run support behind him, he was able to stay aggressive and attack the zone.",
-            "His side gave him enough breathing room to pitch with confidence for most of the outing.",
+            f"The {team_name} gave him room to work, and he mostly kept the game tilted in their direction.",
+            "With run support behind him, he stayed on the attack instead of pitching from behind.",
+            f"The {team_name} scored enough while he was in there to let him pitch with a little more freedom.",
         ]
         return choices[(seed // 23) % len(choices)]
 
     if exit_margin == 0 and label in POSITIVE_STARTER_LABELS:
         choices = [
-            "He handed the game to the bullpen with the score still tied.",
-            "When he left, the game was still hanging in the balance.",
-            "He kept things close enough to give the bullpen a real chance to decide it.",
-            "He left with the result still very much up for grabs.",
+            "He left with the game still within reach for the bullpen.",
+            "When he left, the game was still very much in the balance.",
+            "He kept the game close enough to give the bullpen a chance once he exited.",
         ]
         return choices[(seed // 23) % len(choices)]
 
     if exit_margin > 0 and label in POSITIVE_STARTER_LABELS:
         choices = [
-            "He handed the bullpen a lead and put his club in a good spot to close it out.",
-            "By the time he left, his side still had control of the game.",
-            "He left with his team in front, which is exactly what you want from a starter.",
-            "He did his part and handed things over with the lead intact.",
+            f"By the time he left, the {team_name} were still in a good spot to finish the job.",
+            "He turned it over with the game still under control for the bullpen.",
+            f"He exited with the {team_name} still out in front.",
         ]
         return choices[(seed // 23) % len(choices)]
 
     if biggest_inning_runs >= 2 and label in BAD_STARTER_LABELS | {"UNEVEN"}:
         choices = [
-            "One crooked inning changed the feel of the whole outing and left him chasing the line after that.",
-            "A multi-run inning did most of the damage, and he never really got fully back on top of it.",
-            "The start turned once one inning got away from him.",
-            "He was hurt most by one inning that snowballed in a hurry.",
-        ]
-        return choices[(seed // 23) % len(choices)]
-
-    if first_inning and last_inning and last_inning - first_inning >= 4 and label in {"SOLID", "QUALITY"}:
-        choices = [
-            "He kept the outing moving along long enough to spare the bullpen an early scramble.",
-            "He bridged the game deep enough to keep extra stress off the rest of the staff.",
-            "He covered enough of the game to leave the bullpen a manageable finish.",
+            "One crooked inning changed the feel of the whole start, and he never fully got back on top of it.",
+            "A multi-run inning did most of the damage, and it left him chasing the line after that.",
+            "The start took a hard turn once one inning got away from him.",
         ]
         return choices[(seed // 23) % len(choices)]
 
     return ""
+
 
 def build_starter_velocity_sentence(p: dict, label: str, seed: int, recent_appearances=None) -> str:
     velo = p.get("avg_fastball_velocity")
@@ -1337,37 +1281,45 @@ def build_starter_velocity_sentence(p: dict, label: str, seed: int, recent_appea
             except Exception:
                 continue
 
-    delta = round((current_v - prev_v), 1) if prev_v is not None else None
-    notable_drop = delta is not None and delta <= -1.0
-    notable_jump = delta is not None and delta >= 0.8
-    premium_velo = current_v >= 97.5 or (label in {"GEM", "DOMINANT", "STRIKEOUT"} and current_v >= 96.5)
-
-    if not (notable_drop or notable_jump or premium_velo):
+    drop = (prev_v - current_v) if prev_v is not None else None
+    mention_drop = drop is not None and drop >= 1.0
+    if current_v < 95.0 and not mention_drop:
         return ""
 
     velo_text = f"{current_v:.1f} mph"
-
-    if notable_drop:
-        drop_text = f"{abs(delta):.1f} mph"
+    if mention_drop:
+        drop_text = f"{drop:.1f} mph"
         choices = [
             f"His fastball averaged {velo_text}, down {drop_text} from his previous outing, so the dip stood out right away.",
             f"The heater checked in at {velo_text}, which was {drop_text} lighter than his last start and worth keeping an eye on.",
         ]
         return choices[(seed // 11) % len(choices)]
 
-    if notable_jump:
-        jump_text = f"{delta:.1f} mph"
+    bb = safe_int(p.get("stats", {}).get("baseOnBalls", 0), 0)
+    hits = safe_int(p.get("stats", {}).get("hits", 0), 0)
+    if label in GOOD_STARTER_LABELS:
         choices = [
-            f"His fastball averaged {velo_text}, up {jump_text} from his previous outing, and the extra life showed up in the way hitters reacted.",
-            f"The heater sat {velo_text}, which was {jump_text} firmer than his last start and matched the sharper look to the outing.",
+            f"His fastball averaged {velo_text}, and the life on it showed up whenever he needed to finish a count.",
+            f"The fastball sat {velo_text}, giving him enough finish to stay aggressive when he got ahead.",
         ]
-        return choices[(seed // 11) % len(choices)]
-
-    choices = [
-        f"His fastball averaged {velo_text}, and that kind of velocity helped explain why hitters had such a hard time getting comfortable.",
-        f"The heater sat {velo_text}, giving him more than enough life to stay aggressive when he got ahead.",
-    ]
+    elif is_bad_starter_label(label):
+        if bb <= 1 and hits >= 5:
+            choices = [
+                f"He still averaged {velo_text} on the fastball, so this was more about the contact against him than a lack of arm strength.",
+                f"The heater checked in at {velo_text}, and the trouble came more from the quality of contact than from missing with the fastball.",
+            ]
+        else:
+            choices = [
+                f"He still averaged {velo_text} on the fastball, but the outing never came together around it.",
+                f"The heater sat {velo_text}, though the raw velocity never translated into a cleaner line.",
+            ]
+    else:
+        choices = [
+            f"His fastball averaged {velo_text}, which gave the outing some carry even when the line was not fully clean.",
+            f"The heater sat {velo_text}, and there were stretches where that helped steady him.",
+        ]
     return choices[(seed // 11) % len(choices)]
+
 
 def build_starter_csw_sentence(p: dict, label: str, seed: int) -> str:
     csw = p.get("csw_percent")
@@ -1440,14 +1392,12 @@ def build_starter_pitch_count_sentence(p: dict, label: str, seed: int) -> str:
         choices.extend([
             f"He stayed efficient, needing only {pitches} pitches to do his work.",
             f"It was a clean workload, with just {pitches} pitches needed to get the job done.",
-            f"He got through his outing on a low pitch count, which helped him work deep into the game.",
         ])
 
     if ip < 5.0 and pitches >= 85:
         choices.extend([
             f"The pitch count got heavy early, and {pitches} pitches were all he could squeeze out of the outing.",
             f"He needed {pitches} pitches just to get that far, which helps explain why the start ended so soon.",
-            f"Too many long at-bats pushed the pitch count up before he could really settle in.",
         ])
 
     if outs < 9 and pitches >= 45:
@@ -1476,12 +1426,10 @@ def build_starter_pitch_count_sentence(p: dict, label: str, seed: int) -> str:
     if strikes > 0 and hits >= 7 and bb <= 1 and er >= 3:
         choices.append(f"He threw {strikes} of {pitches} pitches for strikes, but too much of that contact was loud.")
 
-    if ip >= 5.0 and pitches >= 95 and er <= 3:
-        choices.append(f"He had to labor for parts of the outing, but still found a way to push through {pitches} pitches.")
-
     if not choices:
         return ""
     return choices[(seed // 19) % len(choices)]
+
 
 def build_starter_subject_line(p: dict, label: str, game_context: dict, seed: int) -> str:
     stats = p.get("stats", {})
@@ -1495,10 +1443,9 @@ def build_starter_subject_line(p: dict, label: str, game_context: dict, seed: in
     flow = p.get("game_flow") or {}
     scoreless_to_start = safe_int(flow.get("scoreless_to_start", 0), 0)
     only_damage_in_one_inning = bool(flow.get("only_damage_in_one_inning"))
-    settled_after_rough = bool(flow.get("settled_after_rough"))
-    late_damage = bool(flow.get("late_damage"))
     team_runs = game_context.get("home_score", 0) if p.get("side") == "home" else game_context.get("away_score", 0)
     opp_runs = game_context.get("away_score", 0) if p.get("side") == "home" else game_context.get("home_score", 0)
+    team_name = team_name_from_abbr(p.get("team"))
 
     if outs < 3:
         choices = [
@@ -1512,7 +1459,6 @@ def build_starter_subject_line(p: dict, label: str, game_context: dict, seed: in
             f"🔥 {name} cruises through a gem",
             f"🔥 {name} barely gives the lineup a pulse",
             f"🔥 {name} puts a lid on the lineup all night",
-            f"🔥 {name} owns the zone from the start",
         ]
     elif label == "DOMINANT":
         choices = [
@@ -1520,7 +1466,6 @@ def build_starter_subject_line(p: dict, label: str, game_context: dict, seed: in
             f"🔥 {name} powers through a dominant start",
             f"🔥 {name} overmatches hitters all night",
             f"🔥 {name} takes over with swing-and-miss stuff",
-            f"🔥 {name} puts the game on his terms",
         ]
         if k >= 8:
             choices.extend([
@@ -1539,10 +1484,9 @@ def build_starter_subject_line(p: dict, label: str, game_context: dict, seed: in
     elif label in {"QUALITY", "SHARP"}:
         choices = [
             f"✅ {name} turns in a strong night on the mound",
-            f"✅ {name} gives his club a steady start",
+            f"✅ {name} gives the {team_name} a steady start",
             f"✅ {name} keeps the game under control",
             f"✅ {name} holds the line with a clean effort",
-            f"✅ {name} keeps his club in command of the night",
         ]
         if k >= 7:
             choices.append(f"✅ {name} pairs length with {number_word(k)} strikeouts")
@@ -1552,18 +1496,15 @@ def build_starter_subject_line(p: dict, label: str, game_context: dict, seed: in
             choices.append(f"✅ {name} opens with {number_word(scoreless_to_start)} scoreless innings and never loses the feel for it")
     elif label == "SOLID":
         choices = [
-            f"📈 {name} gives his club a useful start",
+            f"📈 {name} gives the {team_name} a useful start",
             f"📈 {name} steadies things on the mound",
             f"📈 {name} turns in a workmanlike outing",
             f"📈 {name} does enough to keep the game in order",
-            f"📈 {name} bridges the game into the middle innings",
         ]
         if k >= 7:
             choices.append(f"📈 {name} adds punchouts to a solid night")
         elif only_damage_in_one_inning and er <= 3:
             choices.append(f"📈 {name} keeps things afloat outside of one rough patch")
-        elif settled_after_rough:
-            choices.append(f"📈 {name} settles in after an early wobble")
     elif label == "HIT_HARD":
         choices = [
             f"💥 {name} gets hit hard despite some swing-and-miss",
@@ -1578,7 +1519,6 @@ def build_starter_subject_line(p: dict, label: str, game_context: dict, seed: in
             f"🎯 {name} never gets the count working for him",
             f"🎯 {name} fights the zone all night",
             f"🎯 {name} cannot get comfortable in the strike zone",
-            f"🎯 {name} falls behind too often to settle in",
         ]
     elif label == "UNEVEN":
         choices = [
@@ -1600,21 +1540,19 @@ def build_starter_subject_line(p: dict, label: str, game_context: dict, seed: in
         elif er >= 4:
             choices.append(f"⚠️ {name} cannot stop the damage from building")
 
-    if late_damage and label in {"QUALITY", "SOLID"}:
-        choices.append(f"📉 {name} cruises for a while before some late damage changes the line")
-
     if team_runs > opp_runs and label in POSITIVE_STARTER_LABELS:
-        choices.append(f"🏁 {name} helps set up a winning night for his club")
+        choices.append(f"🏁 {name} helps set up a winning night for the {team_name}")
     elif team_runs < opp_runs and label in BAD_STARTER_LABELS | {"UNEVEN"}:
-        choices.append(f"📉 {name} leaves his club chasing the game")
+        choices.append(f"📉 {name} leaves the {team_name} chasing the game")
 
     subject = choices[seed % len(choices)].strip().rstrip(".!?:;,-")
     return subject.replace("...", "").strip()
 
+
 def build_starter_summary(p: dict, label: str, game_context: dict, recent_appearances=None) -> str:
     stats = p["stats"]
     seed = build_starter_summary_seed(p["name"], stats, game_context)
-    overview = build_starter_overview(p["name"], label, stats, seed)
+    overview = build_starter_overview(p["name"], label, stats, seed, team_name=team_name_from_abbr(p.get("team")))
     stat_sentence = build_starter_stat_sentence(stats, seed)
     pressure_sentence = build_starter_pressure_sentence(stats, label, seed)
     team_sentence = build_starter_team_context(p, stats, label, game_context, seed)
@@ -1633,22 +1571,22 @@ def build_starter_summary(p: dict, label: str, game_context: dict, recent_appear
         ]
     elif label == "STRIKEOUT":
         order_options = [
-            [overview, csw_sentence, flow_sentence, stat_sentence, pressure_sentence, pitch_sentence, team_sentence, velocity_sentence],
-            [overview, flow_sentence, csw_sentence, stat_sentence, team_sentence, pitch_sentence, pressure_sentence, velocity_sentence],
-            [overview, stat_sentence, csw_sentence, flow_sentence, team_sentence, pressure_sentence, pitch_sentence, velocity_sentence],
+            [overview, csw_sentence, stat_sentence, flow_sentence, pressure_sentence, pitch_sentence, team_sentence, velocity_sentence],
+            [overview, flow_sentence, csw_sentence, stat_sentence, team_sentence, pitch_sentence, velocity_sentence, pressure_sentence],
+            [overview, stat_sentence, csw_sentence, flow_sentence, team_sentence, velocity_sentence, pressure_sentence, pitch_sentence],
         ]
     elif label in {"GEM", "DOMINANT"}:
         order_options = [
-            [overview, flow_sentence, csw_sentence, pressure_sentence, stat_sentence, team_sentence, pitch_sentence, velocity_sentence],
+            [overview, flow_sentence, csw_sentence, pressure_sentence, stat_sentence, team_sentence, velocity_sentence, pitch_sentence],
             [overview, pressure_sentence, stat_sentence, flow_sentence, csw_sentence, team_sentence, pitch_sentence, velocity_sentence],
-            [overview, csw_sentence, stat_sentence, flow_sentence, team_sentence, pressure_sentence, pitch_sentence, velocity_sentence],
+            [overview, csw_sentence, stat_sentence, flow_sentence, team_sentence, pressure_sentence, velocity_sentence, pitch_sentence],
         ]
     else:
         order_options = [
             [overview, flow_sentence, stat_sentence, pressure_sentence, team_sentence, pitch_sentence, csw_sentence, velocity_sentence],
             [overview, pitch_sentence, flow_sentence, stat_sentence, pressure_sentence, team_sentence, csw_sentence, velocity_sentence],
-            [overview, pressure_sentence, stat_sentence, flow_sentence, csw_sentence, team_sentence, pitch_sentence, velocity_sentence],
-            [overview, stat_sentence, team_sentence, flow_sentence, pressure_sentence, pitch_sentence, csw_sentence, velocity_sentence],
+            [overview, pressure_sentence, stat_sentence, flow_sentence, csw_sentence, team_sentence, velocity_sentence, pitch_sentence],
+            [overview, stat_sentence, team_sentence, flow_sentence, pressure_sentence, pitch_sentence, velocity_sentence, csw_sentence],
         ]
 
     ordered = [s for s in order_options[seed % len(order_options)] if s]
@@ -1705,7 +1643,7 @@ async def post_card(channel, p: dict, game_context: dict, score_value: str, rece
     )
     apply_player_card_chrome(embed, p["name"], p["team"])
     embed.add_field(name="", value=f"**{build_starter_subject_line(p, label, game_context, seed)}**", inline=False)
-    embed.add_field(name="", value=build_starter_summary(p, label, game_context, recent_appearances=recent_appearances), inline=False)
+    embed.add_field(name="Summary", value=build_starter_summary(p, label, game_context, recent_appearances=recent_appearances), inline=False)
     embed.add_field(name="Game Line", value=format_starter_game_line(stats), inline=False)
     embed.add_field(name="Season", value=format_starter_season_line(p.get("season_stats", {})), inline=False)
     embed.add_field(name="⚾ Score", value=score_value, inline=False)
