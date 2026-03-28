@@ -136,8 +136,17 @@ def normalize_lookup_name(name: str) -> str:
         return ""
     cleaned = unicodedata.normalize("NFKD", str(name))
     cleaned = "".join(ch for ch in cleaned if not unicodedata.combining(ch))
+    replacements = {
+        "ß": "ss",
+        "ø": "o",
+        "æ": "ae",
+        "œ": "oe",
+        "ñ": "n",
+    }
+    for old, new in replacements.items():
+        cleaned = cleaned.replace(old, new).replace(old.upper(), new)
     cleaned = cleaned.lower()
-    for ch in [".", ",", "'", "`", "-", "_", "(", ")", "[", "]", "’", "´"]:
+    for ch in [".", ",", "'", "`", "-", "_", "(", ")", "[", "]", "’", "´", "“", "”", ":", ";", "/"]:
         cleaned = cleaned.replace(ch, " ")
     return " ".join(cleaned.split())
 
@@ -1653,21 +1662,43 @@ def build_starter_summary(p: dict, label: str, game_context: dict, recent_appear
 
     ordered = [s for s in order_options[seed % len(order_options)] if s]
     final_sentences = []
+
     for sentence in ordered:
         if sentence and sentence not in final_sentences:
             final_sentences.append(sentence)
-        if len(final_sentences) >= 4:
+
+    desired_count = 4
+
+    if velocity_sentence:
+        desired_count += 1
+
+    if flow_sentence and any(
+        phrase in flow_sentence.lower()
+        for phrase in [
+            "one inning",
+            "retired",
+            "scoreless innings",
+            "settled",
+            "late",
+            "homer",
+            "rough first inning",
+        ]
+    ):
+        desired_count += 1
+
+    if label in {"GEM", "DOMINANT", "STRIKEOUT"}:
+        desired_count += 1
+
+    desired_count = max(3, min(5, desired_count))
+
+    trimmed = []
+    for sentence in final_sentences:
+        if sentence not in trimmed:
+            trimmed.append(sentence)
+        if len(trimmed) >= desired_count:
             break
 
-    if len(final_sentences) < 3:
-        fillers = [flow_sentence, stat_sentence, pressure_sentence, team_sentence, csw_sentence, pitch_sentence, velocity_sentence, positive_sentence]
-        for sentence in fillers:
-            if sentence and sentence not in final_sentences:
-                final_sentences.append(sentence)
-            if len(final_sentences) >= 4:
-                break
-
-    return " ".join(final_sentences[:4])
+    return " ".join(trimmed[:desired_count])
 
 def get_games():
     today = datetime.now(ET).date()
