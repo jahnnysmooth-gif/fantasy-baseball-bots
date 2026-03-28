@@ -25,7 +25,7 @@ SCHEDULE_URL = "https://statsapi.mlb.com/api/v1/schedule?sportId=1"
 LIVE_URL = "https://statsapi.mlb.com/api/v1.1/game/{}/feed/live"
 
 POLL_MINUTES = 10
-RESET_CLOSER_STATE = os.getenv("RESET_HITTER_STATE", "").lower() in {"1", "true", "yes"}
+RESET_HITTER_STATE = os.getenv("RESET_HITTER_STATE", "").lower() in {"1", "true", "yes"}
 DEPTH_CHART_OVERRIDE_CHANNEL_ID = int(os.getenv("DEPTH_CHART_OVERRIDE_CHANNEL_ID", "1484232761597366412"))
 TREND_STATE_FILE = "state/hitter/trend_state.json"
 
@@ -258,7 +258,7 @@ def apply_player_card_chrome(embed: discord.Embed, name: str, team: str):
 def load_state():
     base = {"posted": [], "trend_posted": {}, "trend_history": {}, "trend_last_post_at": None, "trend_next_eligible_at": None, "trend_post_count_by_hour": {}, "trend_total_by_date": {}, "trend_family_last_post_at": {}, "velocity_posted": {}}
 
-    if RESET_CLOSER_STATE:
+    if RESET_HITTER_STATE:
         return base
 
     if not os.path.exists(STATE_FILE):
@@ -2235,8 +2235,8 @@ async def loop():
     state = load_state()
     posted = set(state.get("posted", []))
 
-    if RESET_CLOSER_STATE:
-        log("RESET_CLOSER_STATE enabled — posted state cleared for this run")
+    if RESET_HITTER_STATE:
+        log("RESET_HITTER_STATE enabled — posted state cleared for this run")
 
     tracked = await refresh_tracked_pitchers()
     last_refresh_date = datetime.now(ET).date()
@@ -2384,24 +2384,7 @@ client = discord.Client(intents=intents)
 background_task = None
 
 
-@client.event
-async def on_ready():
-    global background_task
-    log(f"Logged in as {client.user}")
-
-    if background_task is None or background_task.done():
-        background_task = asyncio.create_task(loop())
-        log("Closer background task created")
-
-
-async def start_closer_bot():
-    if not TOKEN:
-        raise RuntimeError("ANALYTIC_BOT_TOKEN is not set")
-
-    await client.start(TOKEN, reconnect=True)
-
-
-# ================= HITTER BOT OVERRIDES =================
+# ================= HITTER BOT =================
 
 HITTER_GAMELOG_CACHE = {}
 MIN_HITTER_SCORE = float(os.getenv("HITTER_MIN_SCORE", "5.0"))
