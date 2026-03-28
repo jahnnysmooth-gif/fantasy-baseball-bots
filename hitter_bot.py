@@ -17,6 +17,7 @@ CHANNEL_ID = int(os.getenv("HITTER_WATCH_CHANNEL_ID", "0"))
 STATE_DIR = Path("state/hitter")
 STATE_DIR.mkdir(parents=True, exist_ok=True)
 STATE_FILE = STATE_DIR / "state.json"
+RESET_MARKER_FILE = STATE_DIR / "reset_marker.json"
 
 ET = ZoneInfo("America/New_York")
 SCHEDULE_URL = "https://statsapi.mlb.com/api/v1/schedule?sportId=1"
@@ -311,9 +312,29 @@ def apply_player_card_chrome(embed: discord.Embed, name: str, team: str) -> None
 
 # ---------------- STATE ----------------
 
+def _should_reset_posted_state_once() -> bool:
+    if not RESET_HITTER_STATE:
+        return False
+
+    marker_value = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+    try:
+        if RESET_MARKER_FILE.exists():
+            raw = json.loads(RESET_MARKER_FILE.read_text(encoding="utf-8"))
+            if isinstance(raw, dict) and raw.get("marker") == marker_value:
+                return False
+    except Exception:
+        pass
+
+    try:
+        RESET_MARKER_FILE.write_text(json.dumps({"marker": marker_value}, indent=2), encoding="utf-8")
+    except Exception:
+        pass
+    return True
+
+
 def load_state() -> dict:
     base = {"posted": []}
-    if RESET_HITTER_STATE:
+    if _should_reset_posted_state_once():
         return base
     if not STATE_FILE.exists():
         return base
@@ -864,38 +885,103 @@ def classify_hitter(stats: dict) -> str:
 # ---------------- CARD TEXT ----------------
 
 
+def _recent_trend_note(recent_games: list[dict], stats: dict) -> str:
+    if not recent_games:
+        return ""
+
+    today_hits = safe_int(stats.get("hits", 0), 0)
+    today_hr = safe_int(stats.get("homeRuns", 0), 0)
+    today_rbi = safe_int(stats.get("rbi", 0), 0)
+
+    streak_hits = 0
+    for game in recent_games:
+        if game.get("h", 0) > 0:
+            streak_hits += 1
+        else:
+            break
+    hit_streak = streak_hits + (1 if today_hits > 0 else 0)
+
+    hitless_tail = 0
+    for game in recent_games:
+        if game.get("h", 0) == 0:
+            hitless_tail += 1
+        else:
+            break
+
+    recent_slice = recent_games[:5]
+    total_hits = sum(g.get("h", 0) for g in recent_slice) + today_hits
+    total_hr = sum(g.get("hr", 0) for g in recent_slice) + today_hr
+    total_rbi = sum(g.get("rbi", 0) for g in recent_slice) + today_rbi
+    games = len(recent_slice) + 1
+
+    if hitless_tail >= 3 and today_hits >= 2:
+        return "It also looked like a possible step out of a recent slump."
+    if hit_streak >= 6:
+        return f"He has now hit safely in {hit_streak} straight games."
+    if games >= 5 and total_hr >= 3:
+        return f"He now has {total_hr} homers over his last {games} games."
+    if games >= 5 and total_hits >= 9:
+        return f"That gives him {total_hits} hits over his last {games} games."
+    if games >= 5 and total_rbi >= 9:
+        return f"He has also driven in {total_rbi} runs over his last {games} games."
+    return ""
+
+
 def build_hitter_subject(name: str, stats: dict, label: str, context: dict, recent_games: list[dict]) -> str:
     hits = safe_int(stats.get("hits", 0), 0)
     homers = safe_int(stats.get("homeRuns", 0), 0)
     rbi = safe_int(stats.get("rbi", 0), 0)
     steals = safe_int(stats.get("stolenBases", 0), 0)
     doubles = safe_int(stats.get("doubles", 0), 0)
+    triples = safe_int(stats.get("triples", 0), 0)
+
+    streak_hits = 0
+    for game in recent_games:
+        if game.get("h", 0) > 0:
+            streak_hits += 1
+        else:
+            break
+    hit_streak = streak_hits + (1 if hits > 0 else 0)
 
     if context.get("walkoff"):
-        return f"{name} delivers the walk-off for his club"
-    if context.get("go_ahead_homer"):
+        return f"{name} delivers the walk-off hit"
+    if context.get("go_ahead_homer") and rbi >= 2:
         return f"{name} hits the go-ahead homer and drives in {rbi}"
+    if context.get("go_ahead_homer"):
+        return f"{name} breaks it open with the go-ahead homer"
+    if context.get("game_tying_hit") and homers >= 1 and rbi >= 2:
+        return f"{name} ties it up with a {rbi}-run homer"
+    if context.get("go_ahead_hit") and rbi >= 2:
+        return f"{name} comes through with the go-ahead hit and {rbi} RBI"
     if context.get("go_ahead_hit"):
         return f"{name} comes through with the go-ahead hit"
-    if context.get("game_tying_hit"):
-        return f"{name} ties the game with one of the biggest swings of the night"
     if homers >= 2:
         return f"{name} homers twice in a big night at the plate"
-    if homers >= 1 and rbi >= 4:
-        return f"{name} homers and drives in {rbi} runs"
-    if homers >= 1 and doubles >= 1:
-        return f"{name} fills up the box score with extra-base hits"
+    if homers == 1 and doubles + triples >= 1:
+        return f"{name} does damage with multiple extra-base hits"
+    if homers == 1 and rbi >= 3:
+        return f"{name} goes deep and drives in {rbi}"
     if hits >= 4:
-        return f"{name} piles up four hits in a big game"
+        return f"{name} collects four hits in a standout game"
     if hits >= 3 and rbi >= 3:
-        return f"{name} collects three hits and drives in {rbi}"
+        return f"{name} piles up three hits and {rbi} RBI"
+    if hits >= 3 and doubles + triples >= 1:
+        return f"{name} strings together three hits and extra-base damage"
+    if steals >= 2 and hits >= 2:
+        return f"{name} reaches, runs, and swipes {steals} bags"
     if steals >= 2:
-        return f"{name} creates havoc on the bases with {steals} steals"
+        return f"{name} changes the game with {steals} stolen bases"
     if rbi >= 4:
-        return f"{name} drives in {rbi} runs in a productive night"
+        return f"{name} drives in {rbi} runs in a big fantasy line"
+    if hit_streak >= 6 and homers >= 1:
+        return f"{name} stays hot with another homer"
+    if hit_streak >= 6:
+        return f"{name} stays hot with another multi-hit game"
     if hits >= 3:
         return f"{name} turns in a three-hit game"
-    return f"{name} puts together a solid night at the plate"
+    if homers == 1:
+        return f"{name} leaves the yard in a productive night"
+    return f"{name} puts together a useful night at the plate"
 
 
 def format_hitter_game_line(stats: dict) -> str:
@@ -948,6 +1034,9 @@ def format_hitter_season_line(season_stats: dict) -> str:
 
 
 def build_hitter_summary(name: str, team: str, stats: dict, label: str, context: dict, opponent: str, team_won: bool, recent_games: list[dict]) -> str:
+    team_name = team_name_from_abbr(team)
+    opponent_text = opponent or "the opposing club"
+
     hits = safe_int(stats.get("hits", 0), 0)
     ab = safe_int(stats.get("atBats", 0), 0)
     runs = safe_int(stats.get("runs", 0), 0)
@@ -957,64 +1046,82 @@ def build_hitter_summary(name: str, team: str, stats: dict, label: str, context:
     triples = safe_int(stats.get("triples", 0), 0)
     walks = safe_int(stats.get("baseOnBalls", 0), 0)
     steals = safe_int(stats.get("stolenBases", 0), 0)
-    opponent_text = opponent or "the opposing club"
 
-    stat_bits = [f"{hits}-for-{ab}"]
+    stat_parts = [f"{hits}-for-{ab}"]
     if homers:
-        stat_bits.append(f"{homers} homer{'s' if homers != 1 else ''}")
+        stat_parts.append(f"{homers} HR")
     if doubles:
-        stat_bits.append(f"{doubles} double{'s' if doubles != 1 else ''}")
+        stat_parts.append(f"{doubles} 2B")
     if triples:
-        stat_bits.append(f"{triples} triple{'s' if triples != 1 else ''}")
+        stat_parts.append(f"{triples} 3B")
     if rbi:
-        stat_bits.append(f"{rbi} RBI")
+        stat_parts.append(f"{rbi} RBI")
     if runs:
-        stat_bits.append(f"{runs} run{'s' if runs != 1 else ''}")
+        stat_parts.append(f"{runs} run{'s' if runs != 1 else ''}")
     if walks:
-        stat_bits.append(f"{walks} walk{'s' if walks != 1 else ''}")
+        stat_parts.append(f"{walks} walk{'s' if walks != 1 else ''}")
     if steals:
-        stat_bits.append(f"{steals} steal{'s' if steals != 1 else ''}")
+        stat_parts.append(f"{steals} stolen base{'s' if steals != 1 else ''}")
 
-    first_sentence = f"{name} went {', '.join(stat_bits[:-1]) + ', and ' + stat_bits[-1] if len(stat_bits) > 1 else stat_bits[0]} against the {opponent_text}."
+    first_sentence = f"{name} finished {', '.join(stat_parts[:-1]) + ', and ' + stat_parts[-1] if len(stat_parts) > 1 else stat_parts[0]} against the {opponent_text}."
 
-    extra_sentences = []
+    extra_sentences: list[str] = []
 
+    homers_info = context.get("homers") or []
     if context.get("walkoff"):
-        extra_sentences.append("He delivered the walk-off swing in the final inning to end the game.")
+        extra_sentences.append(f"He ended it with the walk-off swing for the {team_name}.")
     elif context.get("go_ahead_homer"):
-        inning = context.get("homers")[0].get("inning") if context.get("homers") else None
+        inning = safe_int(homers_info[0].get("inning", 0), 0) if homers_info else 0
         if inning:
-            extra_sentences.append(f"His go-ahead homer in the { _ordinal(inning) } gave {team} the lead for good.")
+            extra_sentences.append(f"His go-ahead homer in the {_ordinal(inning)} put the {team_name} in front for good.")
         else:
-            extra_sentences.append(f"His homer gave {team} the lead for good.")
+            extra_sentences.append(f"His homer put the {team_name} in front for good.")
     elif context.get("go_ahead_hit"):
-        extra_sentences.append("He came through with the hit that put his club in front for good.")
+        extra_sentences.append(f"He came through with the hit that gave the {team_name} the lead for good.")
     elif context.get("game_tying_hit"):
-        extra_sentences.append("He also came through with the hit that tied the game.")
+        if homers_info and safe_int(homers_info[0].get("rbi", 0), 0) >= 2:
+            extra_sentences.append("His homer pulled the game back even and changed the tone of the night.")
+        else:
+            extra_sentences.append("He also delivered the hit that tied the game.")
     elif context.get("insurance_hit"):
-        extra_sentences.append(f"He later added an insurance hit that helped {team} create some breathing room.")
+        extra_sentences.append(f"He later added insurance that helped the {team_name} create some separation.")
+    elif context.get("first_run_hit"):
+        extra_sentences.append(f"He was the one who got the {team_name} on the board first.")
 
     if homers >= 2:
-        extra_sentences.append("It was one of the better power performances on the board for the day.")
+        extra_sentences.append("It was one of the louder power lines of the day for fantasy purposes.")
     elif homers == 1 and rbi >= 3:
-        extra_sentences.append("Most of his damage came on one swing.")
+        extra_sentences.append("Most of his fantasy value came on one swing, but it was a big one.")
     elif hits >= 4:
-        extra_sentences.append("He was on base all night and consistently put pressure on the pitching staff.")
+        extra_sentences.append("He was on base all night and kept pressure on the pitching staff from one trip to the next.")
+    elif hits >= 3 and doubles + triples >= 1:
+        extra_sentences.append("It was not just a volume game either, as he mixed in real extra-base damage.")
     elif hits >= 3:
-        extra_sentences.append("He consistently found good contact throughout the game.")
+        extra_sentences.append("He kept the line moving all night and turned nearly every trip into something useful.")
     elif steals >= 2:
-        extra_sentences.append("He added fantasy value with his legs as well as his bat.")
-
-    recent_blurb = build_recent_form_blurb(recent_games, stats)
-    if recent_blurb:
-        extra_sentences.append(recent_blurb)
+        extra_sentences.append("Even without a huge hit total, the speed made the line play up in fantasy." )
 
     hardest_ev = context.get("hardest_ev")
+    balls_100 = safe_int(context.get("balls_100", 0), 0)
     if hardest_ev and hardest_ev >= 108:
-        extra_sentences.append(f"He also recorded a hardest-hit ball of {hardest_ev:.1f} mph.")
+        extra_sentences.append(f"He also produced a top exit velocity of {hardest_ev:.1f} mph.")
+    elif balls_100 >= 3:
+        extra_sentences.append(f"He also put {balls_100} balls in play at 100-plus mph.")
 
-    extra_sentences = extra_sentences[:3]
-    return " ".join([first_sentence] + extra_sentences).strip()
+    trend_note = _recent_trend_note(recent_games, stats)
+    if trend_note:
+        extra_sentences.append(trend_note)
+
+    cleaned: list[str] = []
+    seen = set()
+    for sentence in extra_sentences:
+        if sentence and sentence not in seen:
+            cleaned.append(sentence)
+            seen.add(sentence)
+        if len(cleaned) >= 3:
+            break
+
+    return " ".join([first_sentence] + cleaned).strip()
 
 # ---------------- EMBED POSTING ----------------
 
@@ -1050,9 +1157,8 @@ async def hitter_loop() -> None:
 
     state = load_state()
     posted = set(state.get("posted", []))
-    if RESET_HITTER_STATE:
+    if RESET_HITTER_STATE and not posted:
         log("RESET_HITTER_STATE enabled — posted state cleared for this run")
-        posted = set()
 
     while True:
         sleep_seconds = get_random_awake_interval_seconds()
@@ -1125,7 +1231,7 @@ async def hitter_loop() -> None:
                 )
 
                 posted_this_game = 0
-                game_scan_limit = max(1, min(MAX_CARDS_PER_GAME, MAX_POSTS_PER_GAME_PER_SCAN))
+                game_scan_limit = max(1, MAX_CARDS_PER_GAME)
                 for score_value, hitter in ranked:
                     if posts_this_scan >= MAX_POSTS_PER_SCAN or posted_this_game >= game_scan_limit:
                         break
