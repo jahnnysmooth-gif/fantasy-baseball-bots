@@ -1,6 +1,7 @@
 import asyncio
 import json
 import os
+import random
 from datetime import datetime, timedelta, timezone
 from zoneinfo import ZoneInfo
 
@@ -20,7 +21,10 @@ ET = ZoneInfo("America/New_York")
 SCHEDULE_URL = "https://statsapi.mlb.com/api/v1/schedule?sportId=1"
 LIVE_URL = "https://statsapi.mlb.com/api/v1.1/game/{}/feed/live"
 
-POLL_MINUTES = 10
+SLEEP_START_HOUR_ET = 3
+SLEEP_END_HOUR_ET = 11
+AWAKE_POLL_MIN_MINUTES = 6
+AWAKE_POLL_MAX_MINUTES = 12
 RESET_STARTER_STATE = os.getenv("RESET_STARTER_STATE", "").lower() in {"1", "true", "yes"}
 
 MIN_STARTER_SCORE = float(os.getenv("STARTER_MIN_SCORE", "5.0"))
@@ -126,6 +130,24 @@ NUMBER_WORDS = {
 
 def log(msg: str):
     print(f"[STARTER] {msg}", flush=True)
+
+
+def is_sleep_window_et(now_et: datetime | None = None) -> bool:
+    now_et = now_et or datetime.now(ET)
+    return SLEEP_START_HOUR_ET <= now_et.hour < SLEEP_END_HOUR_ET
+
+
+def seconds_until_next_wake_et(now_et: datetime | None = None) -> int:
+    now_et = now_et or datetime.now(ET)
+    next_wake = now_et.replace(hour=SLEEP_END_HOUR_ET, minute=0, second=0, microsecond=0)
+    if now_et >= next_wake:
+        next_wake = (now_et + timedelta(days=1)).replace(hour=SLEEP_END_HOUR_ET, minute=0, second=0, microsecond=0)
+    return max(1, int((next_wake - now_et).total_seconds()))
+
+
+def random_awake_sleep_seconds() -> int:
+    minutes = random.randint(AWAKE_POLL_MIN_MINUTES, AWAKE_POLL_MAX_MINUTES)
+    return minutes * 60
 
 
 def normalize_team_abbr(team: str) -> str:
@@ -1654,6 +1676,16 @@ async def loop():
     await client.wait_until_ready()
     channel = await client.fetch_channel(CHANNEL_ID)
 
+    now_et = datetime.now(ET)
+    if is_sleep_window_et(now_et):
+        initial_sleep_seconds = seconds_until_next_wake_et(now_et)
+        wake_time = now_et + timedelta(seconds=initial_sleep_seconds)
+        log(
+            f"Sleep window active at startup ({SLEEP_START_HOUR_ET}:00-{SLEEP_END_HOUR_ET}:00 ET). "
+            f"Sleeping until {wake_time.strftime('%Y-%m-%d %I:%M %p ET')}"
+        )
+        await asyncio.sleep(initial_sleep_seconds)
+
     state = load_state()
     posted = set(state.get("posted", []))
 
@@ -1738,7 +1770,19 @@ async def loop():
         except Exception as e:
             log(f"Loop error: {e}")
 
-        await asyncio.sleep(POLL_MINUTES * 60)
+        now_et = datetime.now(ET)
+        if is_sleep_window_et(now_et):
+            sleep_seconds = seconds_until_next_wake_et(now_et)
+            wake_time = now_et + timedelta(seconds=sleep_seconds)
+            log(
+                f"Sleep window active ({SLEEP_START_HOUR_ET}:00-{SLEEP_END_HOUR_ET}:00 ET). "
+                f"Sleeping until {wake_time.strftime('%Y-%m-%d %I:%M %p ET')}"
+            )
+        else:
+            sleep_seconds = random_awake_sleep_seconds()
+            log(f"Awake window active. Next scan in {sleep_seconds // 60} minutes")
+
+        await asyncio.sleep(sleep_seconds)
 
 
 intents = discord.Intents.default()
