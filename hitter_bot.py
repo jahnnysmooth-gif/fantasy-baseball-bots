@@ -818,8 +818,6 @@ def format_hitter_season_line(season_stats: dict) -> str:
     parts = [f"AVG {avg}", f"OBP {obp}"]
     if hr:
         parts.append(f"{hr} HR")
-    if hr:
-        parts.append(f"{hr} HR")
     if rbi:
         parts.append(f"{rbi} RBI")
     if runs:
@@ -879,15 +877,15 @@ def build_hitter_summary(name: str, team: str, stats: dict, label: str, opponent
     pieces = [f"He finished {hits}-for-{ab}"]
     if homers:
         if homers == 1:
-        homer_phrase_options = [
-            "homered once",
-            "went deep",
-            "launched a homer",
-            "connected for a homer",
-        ]
-        pieces.append(random.choice(homer_phrase_options))
-    else:
-        pieces.append(f"homered {homers} times")
+            homer_phrase_options = [
+                "homered once",
+                "went deep",
+                "launched a homer",
+                "connected for a homer",
+            ]
+            pieces.append(random.choice(homer_phrase_options))
+        else:
+            pieces.append(f"homered {homers} times")
     elif doubles or triples:
         xbh_bits = []
         if doubles:
