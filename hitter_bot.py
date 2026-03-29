@@ -27,7 +27,7 @@ RESET_HITTER_STATE = os.getenv("RESET_HITTER_STATE", "").lower() in {"1", "true"
 MIN_HITTER_SCORE = float(os.getenv("HITTER_MIN_SCORE", "5.0"))
 MAX_CARDS_PER_GAME = int(os.getenv("HITTER_MAX_CARDS_PER_GAME", "10"))
 REQUEST_TIMEOUT = float(os.getenv("HITTER_REQUEST_TIMEOUT", "30"))
-MAX_POSTS_PER_SCAN = int(os.getenv("HITTER_MAX_POSTS_PER_SCAN", "18"))
+MAX_POSTS_PER_SCAN = int(os.getenv("HITTER_MAX_POSTS_PER_SCAN", "20"))
 MAX_POSTS_PER_GAME_PER_SCAN = int(os.getenv("HITTER_MAX_POSTS_PER_GAME_PER_SCAN", "18"))
 POST_DELAY_SECONDS = float(os.getenv("HITTER_POST_DELAY_SECONDS", "1.25"))
 AWAKE_SCAN_MIN_MINUTES = int(os.getenv("HITTER_AWAKE_SCAN_MIN_MINUTES", "10"))
@@ -368,7 +368,7 @@ def seconds_until_wake(current_dt: datetime) -> int:
 
 
 def get_random_awake_interval_seconds() -> int:
-    return max(POLL_MINUTES, 1) * 60
+    return 10 * 60
 
 
 
@@ -2539,13 +2539,6 @@ async def hitter_loop() -> None:
     while True:
         sleep_seconds = get_random_awake_interval_seconds()
         try:
-            current_dt = now_et()
-            if is_sleep_window(current_dt):
-                sleep_seconds = seconds_until_wake(current_dt)
-                wake_time = current_dt + timedelta(seconds=sleep_seconds)
-                log(f"Sleeping until {wake_time.strftime('%Y-%m-%d %I:%M %p ET')}")
-                continue
-
             games = get_games()
             log(f"Checking {len(games)} games")
             posts_this_scan = 0
@@ -2638,9 +2631,6 @@ async def hitter_loop() -> None:
             save_state(state)
         except Exception as exc:
             log(f"Loop error: {exc}")
-
-        if is_sleep_window(now_et()):
-            continue
 
         log(f"Sleeping {sleep_seconds} seconds before next scan")
         await asyncio.sleep(sleep_seconds)
