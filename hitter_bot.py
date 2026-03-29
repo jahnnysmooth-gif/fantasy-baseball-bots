@@ -1201,7 +1201,7 @@ FANTASY_CLOSING_POOL = [
     "He made every at-bat count.",
     "He was locked in all game.",
     "Complete game from top to bottom.",
-    "He gave his team everything it needed.",
+    "He gave the team everything it needed.",
     "Clean performance start to finish.",
     "The production was consistent all night.",
 ]
@@ -1437,21 +1437,47 @@ def get_mid_game_exit(feed: dict, hitter: dict) -> dict:
 
 
 def get_opposing_starter(feed: dict, hitter_side: str) -> dict:
+    """Return the actual starting pitcher by finding the first pitcher
+    to face a batter in the game via play-by-play. Falls back to pitchers[0].
+    Also returns games_started so ERA framing can be gated on sample size."""
     pitcher_side = "home" if hitter_side == "away" else "away"
     box_team = feed.get("liveData", {}).get("boxscore", {}).get("teams", {}).get(pitcher_side, {})
-    pitchers = box_team.get("pitchers", []) or []
     players = box_team.get("players", {}) or {}
-    starter_id = pitchers[0] if pitchers else None
+
+    # Find the actual starter from play-by-play (first pitcher to face a batter)
+    starter_id = None
+    plays = feed.get("liveData", {}).get("plays", {}).get("allPlays", []) or []
+    for play in plays:
+        matchup = play.get("matchup", {}) or {}
+        pitcher = matchup.get("pitcher", {}) or {}
+        pid = pitcher.get("id")
+        if pid:
+            starter_id = pid
+            break
+
+    # Fallback to pitchers array if play-by-play didn't yield a result
     if not starter_id:
-        return {"name": "", "era": ""}
+        pitchers = box_team.get("pitchers", []) or []
+        starter_id = pitchers[0] if pitchers else None
+
+    if not starter_id:
+        return {"name": "", "era": "", "games_started": 0}
 
     player_key = f"ID{starter_id}"
     player = players.get(player_key, {}) or {}
     season_stats = player.get("seasonStats", {}) or {}
     pitching = season_stats.get("pitching", season_stats) if isinstance(season_stats, dict) else {}
+
+    # Get games started to gate ERA framing on sample size
+    games_started = safe_int(pitching.get("gamesStarted", 0), 0)
+    if games_started == 0:
+        # Try gamesPlayed as fallback
+        games_started = safe_int(pitching.get("gamesPlayed", 0), 0)
+
     return {
         "name": player.get("person", {}).get("fullName", ""),
         "era": str(pitching.get("era", "") or ""),
+        "games_started": games_started,
     }
 
 
@@ -1561,11 +1587,16 @@ def _join_text(parts: list[str]) -> str:
 
 
 def _last_name(full_name: str) -> str:
-    """Return the last name, handling suffixes like Jr., Sr., III."""
+    """Return the display last name, stripping suffixes like Jr., Sr., III.
+    Luis Robert Jr. -> Robert
+    Pete Crow-Armstrong -> Crow-Armstrong
+    Bobby Witt Jr. -> Witt
+    """
     parts = (full_name or "").strip().split()
     suffixes = {"jr.", "sr.", "ii", "iii", "iv", "v"}
-    if len(parts) >= 2 and parts[-1].lower().rstrip(".") in suffixes:
-        return parts[-2] if len(parts) >= 3 else parts[0]
+    # Strip trailing suffix if present
+    while parts and parts[-1].lower().rstrip(".") in suffixes:
+        parts = parts[:-1]
     return parts[-1] if parts else full_name
 
 
@@ -1645,6 +1676,7 @@ def _starter_context_sentence(pitcher: dict | None, stats: dict, context: dict) 
         return ""
     name = pitcher["name"]
     era_raw = pitcher.get("era", "")
+    games_started = safe_int(pitcher.get("games_started", 0), 0)
     try:
         era = float(era_raw)
     except Exception:
@@ -1652,43 +1684,45 @@ def _starter_context_sentence(pitcher: dict | None, stats: dict, context: dict) 
 
     event_phrase = _event_phrase_from_stats(stats)
 
-    if era is not None and era <= 3.50:
+    # Only apply ERA-based framing if the pitcher has enough starts for the number to mean something
+    MIN_STARTS_FOR_ERA_FRAMING = 3
+
+    if era is not None and era <= 3.50 and games_started >= MIN_STARTS_FOR_ERA_FRAMING:
         return random.choice([
             f"Doing that against {name} (ERA: {era:.2f}) adds real credibility to the {event_phrase}.",
-            f"The {event_phrase} came against {name}, who has been one of the better arms in the league this year.",
+            f"The {event_phrase} came against {name}, one of the better arms in the league right now.",
             f"{name} is not an easy out, which makes the {event_phrase} that much more meaningful.",
             f"He got to {name}, who came in with a {era:.2f} ERA. That's a quality win.",
-            f"The {event_phrase} off {name} is the kind of thing that gets people's attention.",
-            f"{name} has been sharp this year, but he couldn't stop the {event_phrase}.",
-            f"Worth noting: the {event_phrase} came against {name}, one of the better starters in the game right now.",
-            f"He produced the {event_phrase} against {name}, who doesn't give those up easily.",
+            f"The {event_phrase} off {name} is the kind of thing that gets noticed.",
+            f"{name} has been one of the better starters out there, but he couldn't stop the {event_phrase}.",
             f"The matchup was a tough one with {name} on the mound, and he delivered anyway.",
             f"Going up against {name} and getting a {event_phrase} is not a small thing.",
+            f"He produced the {event_phrase} against {name}, who doesn't give those up easily.",
+            f"The quality of opponent mattered here: {name} came in with a {era:.2f} ERA.",
         ])
-    if era is not None and era >= 5.00:
+    if era is not None and era >= 5.00 and games_started >= MIN_STARTS_FOR_ERA_FRAMING:
         return random.choice([
             f"The matchup was a favorable one with {name} on the mound.",
-            f"{name} has been one of the more hittable starters out there, and it showed.",
-            f"He was facing {name}, who has had a tough go of it this season.",
-            f"The {event_phrase} came against {name}, who has been vulnerable to this kind of damage.",
-            f"{name} didn't have his best stuff, and the {event_phrase} reflected that.",
+            f"{name} has been one of the more hittable starters around, and it showed.",
+            f"The {event_phrase} came against {name}, who has been giving up damage this year.",
             f"He took advantage of a soft matchup with {name} starting.",
             f"The spot set up well with {name} on the hill.",
-            f"{name} came in with some struggles, and he made him pay.",
-            f"The opportunity was there with {name} pitching, and he cashed in.",
-            f"He got what he was looking for against {name}, who has been hittable lately.",
+            f"{name} has been hittable lately, and he made him pay.",
+            f"The opportunity was there with {name} pitching, and he took it.",
+            f"He got what he was looking for against {name}.",
         ])
+    # Neutral — either ERA not meaningful, sample too small, or ERA missing
     return random.choice([
-        f"He did the damage with {name} starting on the other side.",
+        f"He did the damage against {name}.",
         f"The {event_phrase} came against {name}.",
         f"{name} was on the mound, and he made him work.",
         f"He built the night with {name} starting opposite him.",
         f"He got to {name} for the {event_phrase}.",
-        f"{name} started for the other side, and he had a good night against him.",
+        f"{name} started for the other side, and it was a good night for him.",
         f"He found his spots against {name}.",
-        f"The {event_phrase} came with {name} pitching.",
-        f"He did his damage opposite {name}.",
         f"The production came against {name}.",
+        f"He did his damage opposite {name}.",
+        f"The damage was done with {name} pitching.",
     ])
 
 
@@ -2225,7 +2259,7 @@ FANTASY_FAMILIES = {
         "Four-hit games are rare. This one was earned.",
     ],
     "three_hit_xbh": [
-        "It wasn't just a volume game either, as he mixed in real extra-base damage.",
+        "Not just a volume game either, he mixed in extra-base damage.",
         "Hits and extra-base damage together make this one of the cleaner fantasy lines of the day.",
         "The performance played up because it mixed hit volume with impact contact.",
         "There was more than just batting average help here, thanks to the extra-base work.",
@@ -2468,11 +2502,45 @@ def _event_text_from_context(context: dict) -> tuple[str, str]:
         return "delivered the game-tying hit", f"in the {_ordinal(inning)}" if inning else ""
     if homers:
         inning = safe_int(homers[0].get("inning", 0), 0)
-        return "left the yard for his biggest swing", f"in the {_ordinal(inning)}" if inning else ""
+        rbi = safe_int(homers[0].get("rbi", 0), 0)
+        # Build a specific homer description based on RBI count
+        if rbi >= 3:
+            hr_text = random.choice([
+                f"hit a {_word_or_number(rbi)}-run homer",
+                f"went deep with a {_word_or_number(rbi)}-run shot",
+                f"cleared the bases with a {_word_or_number(rbi)}-run blast",
+            ])
+        elif rbi == 2:
+            hr_text = random.choice([
+                "hit a two-run homer",
+                "went deep with a two-run shot",
+                "launched a two-run blast",
+            ])
+        elif rbi == 1:
+            hr_text = random.choice([
+                "hit a solo homer",
+                "went deep on a solo shot",
+                "took one out on his own",
+            ])
+        else:
+            hr_text = random.choice([
+                "went deep",
+                "left the yard",
+                "hit a homer",
+            ])
+        return hr_text, f"in the {_ordinal(inning)}" if inning else ""
     if xbh:
         hit_type = "double" if xbh[0].get("type") == "double" else "triple"
         inning = safe_int(xbh[0].get("inning", 0), 0)
-        return f"drove a {hit_type} into the gap", f"in the {_ordinal(inning)}" if inning else ""
+        rbi = safe_int(xbh[0].get("rbi", 0), 0)
+        rbi_piece = f", driving in {_word_or_number(rbi)}" if rbi else ""
+        xbh_text = random.choice([
+            f"ripped a {hit_type}{rbi_piece}",
+            f"drove a {hit_type} into the gap{rbi_piece}",
+            f"lined a {hit_type}{rbi_piece}",
+            f"punched a {hit_type} the other way{rbi_piece}",
+        ])
+        return xbh_text, f"in the {_ordinal(inning)}" if inning else ""
     if context.get("first_run_hit"):
         return "got the club on the board first", ""
     if context.get("insurance_hit"):
