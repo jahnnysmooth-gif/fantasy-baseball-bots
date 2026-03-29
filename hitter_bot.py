@@ -27,7 +27,7 @@ RESET_HITTER_STATE = os.getenv("RESET_HITTER_STATE", "").lower() in {"1", "true"
 MIN_HITTER_SCORE = float(os.getenv("HITTER_MIN_SCORE", "5.0"))
 MAX_CARDS_PER_GAME = int(os.getenv("HITTER_MAX_CARDS_PER_GAME", "10"))
 REQUEST_TIMEOUT = float(os.getenv("HITTER_REQUEST_TIMEOUT", "30"))
-MAX_POSTS_PER_SCAN = int(os.getenv("HITTER_MAX_POSTS_PER_SCAN", "18"))
+MAX_POSTS_PER_SCAN = int(os.getenv("HITTER_MAX_POSTS_PER_SCAN", "20"))
 MAX_POSTS_PER_GAME_PER_SCAN = int(os.getenv("HITTER_MAX_POSTS_PER_GAME_PER_SCAN", "18"))
 POST_DELAY_SECONDS = float(os.getenv("HITTER_POST_DELAY_SECONDS", "1.25"))
 AWAKE_SCAN_MIN_MINUTES = int(os.getenv("HITTER_AWAKE_SCAN_MIN_MINUTES", "10"))
@@ -368,7 +368,7 @@ def seconds_until_wake(current_dt: datetime) -> int:
 
 
 def get_random_awake_interval_seconds() -> int:
-    return max(POLL_MINUTES, 1) * 60
+    return 10 * 60
 
 
 
@@ -1065,7 +1065,7 @@ SUBJECT_OPENING_FAMILIES = {
         "{name} combines a three-hit game with real impact",
     ],
     "middle_order": [
-        "{name} drives the offense from the 3-hole, cleanup spot, or fifth spot",
+        "{name} drives the offense from a middle-of-the-order role",
         "{name} cashes in from the heart of the order",
         "{name} makes the most of his run-producing spot",
         "{name} delivers the kind of production you want from the middle of the order",
@@ -1269,11 +1269,11 @@ LINEUP_FAMILIES = {
         "This was middle-of-the-order production, plain and simple.",
         "Working out of a run-producing role, he cashed in the chances that came his way.",
         "Hitting in the middle third, he turned traffic on the bases into real damage.",
-        "This was the kind of output a club wants from the 3-hole, cleanup spot, or fifth spot.",
+        "This was the kind of output a club wants from the heart of the order.",
         "He made his middle-of-the-order trips count in a big way.",
         "Batting third through fifth gave him chances, and he did not waste many of them.",
         "He brought real run-producing value from the middle of the order.",
-        "It was a clean example of how a 3-hole or cleanup bat can shape a game.",
+        "It was a clean example of how a middle-of-the-order bat can shape a game.",
         "The heart of the order got what it needed from him here.",
         "This was the sort of damage a club hopes for from a cleanup-type role.",
         "He did his share of the heavy lifting while hitting in the middle third.",
@@ -2539,13 +2539,6 @@ async def hitter_loop() -> None:
     while True:
         sleep_seconds = get_random_awake_interval_seconds()
         try:
-            current_dt = now_et()
-            if is_sleep_window(current_dt):
-                sleep_seconds = seconds_until_wake(current_dt)
-                wake_time = current_dt + timedelta(seconds=sleep_seconds)
-                log(f"Sleeping until {wake_time.strftime('%Y-%m-%d %I:%M %p ET')}")
-                continue
-
             games = get_games()
             log(f"Checking {len(games)} games")
             posts_this_scan = 0
@@ -2638,9 +2631,6 @@ async def hitter_loop() -> None:
             save_state(state)
         except Exception as exc:
             log(f"Loop error: {exc}")
-
-        if is_sleep_window(now_et()):
-            continue
 
         log(f"Sleeping {sleep_seconds} seconds before next scan")
         await asyncio.sleep(sleep_seconds)
