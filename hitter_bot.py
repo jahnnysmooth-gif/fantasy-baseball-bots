@@ -953,7 +953,7 @@ _MIDDLE_ORDER_SPOTS = {3, 4, 5}
 
 SUBJECT_OPENING_FAMILIES = {
     "walkoff": [
-        "{name} delivers the walk-off for his club",
+        "{name} delivers the walk-off for his team",
         "{name} ends it with the walk-off swing",
         "{name} is the difference with a walk-off finish",
         "{name} plays hero with the walk-off hit",
@@ -971,14 +971,14 @@ SUBJECT_OPENING_FAMILIES = {
     ],
     "go_ahead_homer": [
         "{name} launches the homer that decided it",
-        "{name} puts his club ahead for good with a big homer",
+        "{name} puts the club ahead for good with a big homer",
         "{name} changes the game with a go-ahead blast",
         "{name} breaks it open with the decisive homer",
         "{name} flips the game with one swing",
         "{name} delivers the swing that held up",
         "{name} swings the game with a late homer",
         "{name} provides the game-changing homer",
-        "{name} gives his club the lead for keeps with a blast",
+        "{name} gives his squad the lead for keeps with a blast",
         "{name} leaves the yard for the decisive swing",
         "{name} turns the game with a timely homer",
         "{name} provides the go-ahead power",
@@ -988,7 +988,7 @@ SUBJECT_OPENING_FAMILIES = {
     ],
     "go_ahead_hit": [
         "{name} comes through with the hit that changed the game",
-        "{name} delivers the hit that put his club ahead for good",
+        "{name} delivers the hit that put his side ahead for good",
         "{name} provides the decisive hit",
         "{name} comes up with the swing that held up",
         "{name} turns the game with one key knock",
@@ -996,29 +996,29 @@ SUBJECT_OPENING_FAMILIES = {
         "{name} changes the night with a timely hit",
         "{name} provides the late swing that mattered most",
         "{name} comes through when the game was hanging there",
-        "{name} puts his club ahead with the deciding hit",
+        "{name} puts the offense ahead with the deciding hit",
         "{name} delivers in the biggest spot",
         "{name} breaks it open with the key hit",
-        "{name} pushes his club in front with a timely knock",
+        "{name} pushes his team in front with a timely knock",
         "{name} provides the swing that became the difference",
         "{name} cashes in with the decisive knock",
     ],
     "game_tying": [
-        "{name} pulls his club even with one swing",
-        "{name} brings his club back level with a big hit",
+        "{name} pulls his team even with one swing",
+        "{name} brings the club back level with a big hit",
         "{name} ties the game with a timely blow",
         "{name} helps erase the deficit with his biggest swing",
         "{name} comes through with the equalizer",
-        "{name} drags his club back even",
+        "{name} drags his squad back even",
         "{name} supplies the game-tying damage",
         "{name} wipes out the deficit with a clutch hit",
         "{name} keeps the game alive with a timely swing",
         "{name} delivers the hit that reset the game",
         "{name} changes the tone with the tying blow",
-        "{name} gives his club new life with the equalizer",
+        "{name} gives his side new life with the equalizer",
         "{name} produces the game-tying moment",
         "{name} helps turn the game back into a coin flip",
-        "{name} pulls his club back into it",
+        "{name} pulls the offense back into it",
     ],
     "two_homer": [
         "{name} turns in a two-homer night",
@@ -1032,7 +1032,7 @@ SUBJECT_OPENING_FAMILIES = {
         "{name} blasts two homers in a big night",
         "{name} puts on a power show with two homers",
         "{name} piles up damage with a pair of homers",
-        "{name} fuels his club with two long balls",
+        "{name} fuels his team with two long balls",
         "{name} supplies the thunder with two homers",
         "{name} has his power on full display with two homers",
         "{name} launches a pair in a huge fantasy line",
@@ -1078,7 +1078,7 @@ SUBJECT_OPENING_FAMILIES = {
         "{name} delivers the kind of production you want from the middle of the order",
         "{name} comes through in a run-producing role",
         "{name} turns chances into damage from the heart of the order",
-        "{name} gives his club what it needed from a premium RBI role",
+        "{name} gives his team what it needed from a premium RBI role",
         "{name} provides middle-order thump",
         "{name} drives in damage from a key run-producing role",
         "{name} cashes in the traffic around him",
@@ -1131,19 +1131,19 @@ SUBJECT_OPENING_FAMILIES = {
         "{name} drives the ball out and turns in a strong night",
         "{name} delivers the power in a useful performance",
         "{name} turns one swing into a big line",
-        "{name} gives his club a loud moment with a homer",
+        "{name} gives the club a loud moment with a homer",
         "{name} produces a homer as part of a quality night",
         "{name} changes the box score with one long ball",
         "{name} turns the power on in a strong effort",
         "{name} makes the box score pop with a homer",
         "{name} brings the thunder in a productive performance",
-        "{name} does not need many swings to make an impact",
+        "{name} doesn't need many swings to make an impact",
     ],
     "solid": [
         "{name} puts together a useful night at the plate",
         "{name} chips in with a steady offensive game",
         "{name} turns in a productive night at the plate",
-        "{name} gives his club a solid offensive game",
+        "{name} gives his squad a solid offensive game",
         "{name} quietly builds a helpful line",
         "{name} finds a way to contribute across the board",
         "{name} pieces together a steady fantasy line",
@@ -1189,7 +1189,7 @@ CONTEXT_FAMILY_POOL = [
     "The key blow came {inning_text}: he {event_text}.",
     "He {event_text} {inning_text} for the biggest hit of his night.",
     "Things got interesting {inning_text} when he {event_text}.",
-    "He {event_text} {inning_text} to give his club a lift.",
+    "He {event_text} {inning_text} to give his side a lift.",
     "His best swing came {inning_text}, when he {event_text}.",
     "The {inning_text} was when he {event_text} and changed the game.",
 ]
@@ -1220,7 +1220,7 @@ EV_HIT_FAMILIES = [
     "The contact quality showed up on {article_hit}{inning_piece}, which came off the bat at {ev:.1f} mph.",
     "He added another layer to the box score by {verb_ing} {article_hit}{inning_piece} at {ev:.1f} mph.",
     "There was authority behind {article_hit}{inning_piece}, which registered at {ev:.1f} mph.",
-    "He did not just produce; he {verb_past} {article_hit}{inning_piece} at {ev:.1f} mph.",
+    "He didn't just produce; he {verb_past} {article_hit}{inning_piece} at {ev:.1f} mph.",
     "The hardest contact came on {article_hit}{inning_piece}, measured at {ev:.1f} mph.",
     "He also {verb_past} {article_hit}{inning_piece} that jumped off the bat at {ev:.1f} mph.",
     "A particularly loud swing came on {article_hit}{inning_piece}, which left the bat at {ev:.1f} mph.",
@@ -1241,11 +1241,11 @@ PITCHER_EVENT_FAMILIES = [
     "There is a little more substance here because the {event_phrase} came against {pitcher}.",
     "That {event_phrase} plays up a bit more given that {pitcher} was on the mound.",
     "The quality of opponent matters here too, as the {event_phrase} came against {pitcher}.",
-    "It was not just who he did it against, but what he did against {pitcher}: the {event_phrase}.",
+    "It wasn't just who he did it against, but what he did against {pitcher}: the {event_phrase}.",
     "The matchup adds some context here, since the {event_phrase} came against {pitcher}.",
     "That line looks a bit better when you remember the {event_phrase} came against {pitcher}.",
     "The opponent quality helps this stand out, with the {event_phrase} coming against {pitcher}.",
-    "This was not empty production, especially with the {event_phrase} coming against {pitcher}.",
+    "This wasn't empty production, especially with the {event_phrase} coming against {pitcher}.",
     "It is worth giving the box score a little extra credit because the {event_phrase} came off {pitcher}.",
     "There was some real matchup difficulty here, and he still got to {pitcher} for the {event_phrase}.",
     "The {event_phrase} came against one of the tougher arms he will see in {pitcher}.",
@@ -1293,7 +1293,7 @@ LINEUP_FAMILIES = {
         "He was hitting sixth or lower and still found a way to hurt them.",
         "That's the kind of night that makes a lineup deeper than it looks on paper.",
         "He wasn't expected to do that much damage from where he was hitting, but he did.",
-        "Lower-order guys aren't supposed to carry games — he didn't care.",
+        "Lower-order guys are not supposed to carry games — he didn't care.",
         "That's a nice surprise from the back end of the lineup.",
         "He came up in a low-leverage spot and delivered anyway.",
         "The bottom third of the order gave the club something extra tonight.",
@@ -1337,7 +1337,7 @@ TREND_FAMILIES = {
         "There has been some real consistency here, with hits now in {n} straight.",
         "He has turned the recent stretch into a {n}-game hitting streak.",
         "The streak keeps moving, now sitting at {n} games.",
-        "He is making a habit of finding at least one hit, and the streak is now {n}.",
+        "He's making a habit of finding at least one hit, and the streak is now {n}.",
         "The contact floor has been steady, with hits now in {n} straight games.",
         "That keeps a useful little streak alive at {n} games.",
         "He has made the recent run count, with hits now in {n} straight.",
@@ -1373,7 +1373,7 @@ TREND_FAMILIES = {
         "The recent profile has leaned toward repeat multi-hit production.",
         "This is turning into a nice little run of multi-hit games.",
         "The current stretch now includes another multi-hit effort.",
-        "He keeps giving his club more than one knock a night lately.",
+        "He keeps giving the offense more than one knock a night lately.",
         "The recent contact quality has translated into repeated multi-hit games.",
     ],
     "steal_streak": [
@@ -1395,6 +1395,53 @@ TREND_FAMILIES = {
     ],
 }
 
+def get_mid_game_exit(feed: dict, hitter: dict) -> dict:
+    """Detect if a player left the game early via substitution.
+    Returns {'exited': bool, 'inning': int, 'reason': str}"""
+    hitter_id = hitter.get("id")
+    side = hitter.get("side", "")
+    result = {"exited": False, "inning": 0, "reason": ""}
+    if not hitter_id:
+        return result
+
+    plays = feed.get("liveData", {}).get("plays", {}).get("allPlays", []) or []
+    # Find the last inning the hitter actually batted
+    last_bat_inning = 0
+    for play in plays:
+        batter = (play.get("matchup", {}) or {}).get("batter", {}) or {}
+        if batter.get("id") == hitter_id:
+            about = play.get("about", {}) or {}
+            last_bat_inning = max(last_bat_inning, safe_int(about.get("inning", 0), 0))
+
+    # Check substitution events for this player being removed
+    for play in plays:
+        for event in play.get("playEvents", []) or []:
+            if not isinstance(event, dict):
+                continue
+            if event.get("type") != "action":
+                continue
+            details = event.get("details", {}) or {}
+            event_type = str(details.get("eventType") or "").lower()
+            if "substitution" not in event_type and "ejection" not in event_type:
+                continue
+            player = details.get("player", {}) or {}
+            if player.get("id") != hitter_id:
+                continue
+            about = play.get("about", {}) or {}
+            sub_inning = safe_int(about.get("inning", 0), 0)
+            reason = "ejected" if "ejection" in event_type else "left the game"
+            result = {"exited": True, "inning": sub_inning, "reason": reason}
+            return result
+
+    # Fallback: if last at-bat was inning 5 or earlier and game went 9, flag it
+    linescore = feed.get("liveData", {}).get("linescore", {}) or {}
+    total_innings = safe_int(linescore.get("currentInning", 0), 0)
+    if last_bat_inning > 0 and total_innings >= 8 and last_bat_inning <= 5:
+        result = {"exited": True, "inning": last_bat_inning, "reason": "left the game early"}
+
+    return result
+
+
 def get_opposing_starter(feed: dict, hitter_side: str) -> dict:
     pitcher_side = "home" if hitter_side == "away" else "away"
     box_team = feed.get("liveData", {}).get("boxscore", {}).get("teams", {}).get(pitcher_side, {})
@@ -1412,6 +1459,73 @@ def get_opposing_starter(feed: dict, hitter_side: str) -> dict:
         "name": player.get("person", {}).get("fullName", ""),
         "era": str(pitching.get("era", "") or ""),
     }
+
+
+def get_game_time_of_day(feed: dict) -> str:
+    """Return 'day' or 'night' based on game start time. Empty string if unknown."""
+    game_data = feed.get("gameData", {}) or {}
+    datetime_str = game_data.get("datetime", {}).get("dateTime", "") or ""
+    if not datetime_str:
+        return ""
+    try:
+        from datetime import timezone as _tz
+        dt = datetime.fromisoformat(datetime_str.replace("Z", "+00:00"))
+        et_dt = dt.astimezone(ET)
+        hour = et_dt.hour
+        # Day game = before 5pm ET
+        return "day" if hour < 17 else "night"
+    except Exception:
+        return ""
+
+
+def get_milestone_notes(hitter: dict, stats: dict) -> list[str]:
+    """Return a list of milestone strings if the player crossed a notable threshold today."""
+    notes = []
+    season = hitter.get("season_stats", {}) or {}
+
+    season_hr = safe_int(season.get("homeRuns", 0), 0)
+    season_rbi = safe_int(season.get("rbi", 0), 0)
+    season_hits = safe_int(season.get("hits", 0), 0)
+    season_sb = safe_int(season.get("stolenBases", 0), 0)
+
+    today_hr = safe_int(stats.get("homeRuns", 0), 0)
+    today_rbi = safe_int(stats.get("rbi", 0), 0)
+    today_hits = safe_int(stats.get("hits", 0), 0)
+    today_sb = safe_int(stats.get("stolenBases", 0), 0)
+
+    # HR milestones (season_hr is AFTER today's game per boxscore)
+    prev_hr = season_hr - today_hr
+    for milestone in [5, 10, 15, 20, 25, 30, 40, 50]:
+        if prev_hr < milestone <= season_hr:
+            notes.append(f"homer No. {season_hr} on the season")
+            break
+
+    # First homer of the season
+    if today_hr >= 1 and season_hr == today_hr:
+        notes.append("first homer of the season")
+
+    # RBI milestones
+    prev_rbi = season_rbi - today_rbi
+    for milestone in [25, 50, 75, 100]:
+        if prev_rbi < milestone <= season_rbi:
+            notes.append(f"{season_rbi} RBI on the year")
+            break
+
+    # Hit milestones
+    prev_hits = season_hits - today_hits
+    for milestone in [25, 50, 75, 100, 150, 200]:
+        if prev_hits < milestone <= season_hits:
+            notes.append(f"hit No. {season_hits} on the season")
+            break
+
+    # SB milestones
+    prev_sb = season_sb - today_sb
+    for milestone in [10, 20, 30, 40, 50]:
+        if prev_sb < milestone <= season_sb:
+            notes.append(f"stolen base No. {season_sb} on the year")
+            break
+
+    return notes
 
 
 def get_batting_order_spot(feed: dict, hitter: dict) -> int:
@@ -1450,6 +1564,15 @@ def _join_text(parts: list[str]) -> str:
     if len(parts) == 2:
         return f"{parts[0]} and {parts[1]}"
     return ", ".join(parts[:-1]) + f", and {parts[-1]}"
+
+
+def _last_name(full_name: str) -> str:
+    """Return the last name, handling suffixes like Jr., Sr., III."""
+    parts = (full_name or "").strip().split()
+    suffixes = {"jr.", "sr.", "ii", "iii", "iv", "v"}
+    if len(parts) >= 2 and parts[-1].lower().rstrip(".") in suffixes:
+        return parts[-2] if len(parts) >= 3 else parts[0]
+    return parts[-1] if parts else full_name
 
 
 def _stat_phrase(stats: dict) -> str:
@@ -1553,7 +1676,7 @@ def _starter_context_sentence(pitcher: dict | None, stats: dict, context: dict) 
             f"The production came in a spot where the matchup looked workable against {name}.",
             f"He got into a favorable matchup and made it count against {name}.",
             f"The {event_phrase} came in a game where the matchup leaned in his favor against {name}.",
-            f"He was not facing an ace here, and he made the most of it against {name}.",
+            f"He wasn't facing an ace here, and he made the most of it against {name}.",
             f"There was some matchup help on the table against {name}, and he took it.",
             f"He did what he should have done in a favorable spot against {name}.",
             f"The profile of the matchup helped, though he still had to do the work against {name}.",
@@ -1605,7 +1728,7 @@ def _close_game_context(team_score: int, opp_score: int, team_won: bool, context
                 "The one-run margin only made his biggest moment look larger.",
                 "The closeness of the final score gave the performance even more importance.",
                 "That contribution held extra weight once the game finished that tight.",
-                "A one-run game leaves very little room for empty production, and this was not empty.",
+                "A one-run game leaves very little room for empty production, and this wasn't empty.",
                 "The final margin kept the focus on his most important swing.",
                 "That kind of line gets louder when the scoreboard never opens up.",
                 "With so little separation on the scoreboard, his biggest hit mattered even more.",
@@ -1620,12 +1743,12 @@ def _close_game_context(team_score: int, opp_score: int, team_won: bool, context
                 "Because the game stayed close, his full line had real weight to it.",
                 "A one-run final makes the whole line look more useful.",
                 "The scoreboard stayed tight enough that every extra run felt important.",
-                "There was not much room on the scoreboard, so his production kept its value all night.",
+                "There wasn't much room on the scoreboard, so his production kept its value all night.",
                 "The closeness of the game made the entire line play up.",
                 "In a tight finish, every bit of offense tends to matter more.",
                 "His production held up because the margin never gave the game much cushion.",
                 "Once the game stayed close, the smaller pieces of the box score mattered too.",
-                "That line did not have much room to hide in a one-run finish.",
+                "That line didn't have much room to hide in a one-run finish.",
                 "The final score made the whole box-score line more meaningful.",
                 "Tight games tend to magnify useful offense, and this was useful offense.",
             ])
@@ -1633,17 +1756,17 @@ def _close_game_context(team_score: int, opp_score: int, team_won: bool, context
             return random.choice([
                 "Even though the club came up short, he still left a mark on a close game.",
                 "The result went the wrong way, but his line still held up in a game that stayed tight.",
-                "The loss does not erase the fact that he was part of a close contest all night.",
+                "The loss doesn't erase the fact that he was part of a close contest all night.",
                 "He still managed to matter in a game that never got away.",
-                "The final result was not there, but the production still carried weight in a close game.",
+                "The final result wasn't there, but the production still carried weight in a close game.",
                 "There was still real value in the performance, even with the loss.",
                 "The production held up better because the game stayed within reach all night.",
-                "His work did not disappear just because the club finished one run short.",
-                "There was enough here to matter, even if the club could not finish it off.",
+                "His work didn't disappear just because the club finished one run short.",
+                "There was enough here to matter, even if the club couldn't finish it off.",
                 "The close score helped keep his line relevant all the way to the end.",
                 "He still made his mark in a game that remained in the balance.",
                 "The tight finish kept the value of his line intact despite the loss.",
-                "There was not much room for empty production in a game like that, and this was not empty.",
+                "There wasn't much room for empty production in a game like that, and this wasn't empty.",
                 "The scoreboard stayed tight enough that his contribution kept its meaning.",
                 "Even in defeat, there was some real weight behind the production.",
             ])
@@ -1661,7 +1784,7 @@ def _close_game_context(team_score: int, opp_score: int, team_won: bool, context
             "The production mattered in the part of the game where the lead started to grow.",
             "He had a role in widening the gap late.",
             "His work added to the breathing room on the scoreboard.",
-            "The production also helped the game tilt more firmly in his club's direction.",
+            "The production also helped the game tilt more firmly in his team's direction.",
             "He was part of the offense that turned some daylight into real separation.",
             "The final margin had his fingerprints on it too.",
         ])
@@ -1733,12 +1856,12 @@ def _recent_trend_note(recent_games: list[dict], stats: dict) -> str:
     if today_hr == 1 and today_hits >= 2:
         return random.choice([
             "This was a nice little across-the-board line, with both the power and hit columns getting attention.",
-            "The box score was not built on the homer alone, which makes it more appealing.",
+            "The box score wasn't built on the homer alone, which makes it more appealing.",
             "There was enough substance around the homer to make the performance feel complete.",
-            "It was not just about the homer, as the rest of the box score gave it better shape.",
+            "It wasn't just about the homer, as the rest of the box score gave it better shape.",
             "The homer grabbed the eye, but there was more here than just that one swing.",
             "The box score held together nicely around the power.",
-            "He did not need the homer to carry the whole line by itself.",
+            "He didn't need the homer to carry the whole line by itself.",
             "The production around the homer helped keep the night from feeling one-note.",
             "There was some healthy support around the power in the rest of the box score.",
             "The box score had enough around the homer to feel balanced.",
@@ -1764,7 +1887,7 @@ def _recent_trend_note(recent_games: list[dict], stats: dict) -> str:
             "The legs made the whole night look more fantasy-friendly.",
             "The running game added some serious value to the final line.",
             "It was the kind of speed contribution that can move a category on its own.",
-            "The steals made sure the value was not limited to the bat alone.",
+            "The steals made sure the value wasn't limited to the bat alone.",
         ])
     return ""
 
@@ -1868,7 +1991,7 @@ def build_hitter_subject(name: str, stats: dict, label: str, context: dict, rece
             f"{name} turns volume and punch into a premium-position line",
             f"{name} gets loud {pos_phrase or ''} with three hits and extra-base damage".strip(),
             f"{name} adds real impact {pos_phrase or ''} in a three-hit night".strip(),
-            f"{name} gives his club a loaded box score {pos_phrase or ''}".strip(),
+            f"{name} gives his team a loaded box score {pos_phrase or ''}".strip(),
             f"{name} stacks up three hits and quality contact {pos_phrase or ''}".strip(),
             f"{name} turns a premium lineup card into a strong fantasy night",
         ])
@@ -1891,7 +2014,7 @@ def build_hitter_subject(name: str, stats: dict, label: str, context: dict, rece
             f"{name} does serious damage with the long ball",
             f"{name} brings the thunder and the RBI",
             f"{name} supplies both the homer and the run production",
-            f"{name} does not waste the homer, piling on RBI too",
+            f"{name} doesn't waste the homer, piling on RBI too",
             f"{name} uses the long ball to drive a big line",
         ])
     if steals >= 2:
@@ -1903,17 +2026,17 @@ def build_hitter_subject(name: str, stats: dict, label: str, context: dict, rece
             f"{name} sets the tone from the leadoff spot",
             f"{name} sparks the offense from the leadoff spot",
             f"{name} gets things moving from the top of the order",
-            f"{name} gives his club early life from the leadoff spot",
+            f"{name} gives the club early life from the leadoff spot",
             f"{name} turns the leadoff role into a productive night",
             f"{name} makes the top spot in the order count",
             f"{name} brings table-setting value from the leadoff role",
             f"{name} helps the offense hum from leadoff",
             f"{name} builds a useful line from the top of the order",
-            f"{name} gives his club some energy from the first spot",
+            f"{name} gives his squad some energy from the first spot",
             f"{name} makes things happen from leadoff",
             f"{name} keeps the offense moving from the top",
             f"{name} turns the leadoff job into fantasy value",
-            f"{name} gives his club a strong table-setting line",
+            f"{name} gives his side a strong table-setting line",
             f"{name} provides some top-of-the-order spark",
         ])
     if hits >= 3:
@@ -1922,7 +2045,7 @@ def build_hitter_subject(name: str, stats: dict, label: str, context: dict, rece
             f"{name} keeps the hit column moving all night",
             f"{name} strings together three knocks in a useful line",
             f"{name} puts together a three-hit performance",
-            f"{name} delivers a steady three-hit game for his club",
+            f"{name} delivers a steady three-hit game for the offense",
             f"{name} piles up three hits in a strong effort",
             f"{name} turns contact into a productive night",
             f"{name} sprays three hits around the yard",
@@ -1942,7 +2065,7 @@ def build_hitter_subject(name: str, stats: dict, label: str, context: dict, rece
             f"{name} supplies rare power from behind the dish",
             f"{name} turns catcher production into real value",
             f"{name} brings power to the catcher spot",
-            f"{name} gives his club some catcher thump",
+            f"{name} gives his team some catcher thump",
             f"{name} turns one swing into strong catcher value",
             f"{name} makes the catcher slot matter with a homer",
             f"{name} adds a loud swing from behind the plate",
@@ -2046,7 +2169,7 @@ POSITION_POWER_FAMILIES = [
     "The positional angle made the power play up even more.",
     "The power stood out a bit more because of where it came from defensively.",
     "There was some position-scarcity value tied into the power here.",
-    "The homer played up because the position does not always offer that much thump.",
+    "The homer played up because the position doesn't always offer that much thump.",
     "The fantasy value climbed a little because of the position attached to the damage.",
     "His club got some uncommon pop from that defensive spot.",
     "The position only made the power more useful.",
@@ -2100,7 +2223,7 @@ FANTASY_FAMILIES = {
         "Four-hit games are rare. This one was earned.",
     ],
     "three_hit_xbh": [
-        "It was not just a volume game either, as he mixed in real extra-base damage.",
+        "It wasn't just a volume game either, as he mixed in real extra-base damage.",
         "Hits and extra-base damage together make this one of the cleaner fantasy lines of the day.",
         "The performance played up because it mixed hit volume with impact contact.",
         "There was more than just batting average help here, thanks to the extra-base work.",
@@ -2179,7 +2302,7 @@ QUALITY_100_FAMILIES = [
     "He paired the production with {balls_100} balls off the bat at triple-digit exit velocities.",
     "The performance came with some real authority too, as he produced {balls_100} 100-plus mph batted balls.",
     "Quality of contact was part of the story too, with {balls_100} balls leaving the bat at 100-plus mph.",
-    "He did not just produce; he hit the ball hard too, logging {balls_100} batted balls over 100 mph.",
+    "He didn't just produce; he hit the ball hard too, logging {balls_100} batted balls over 100 mph.",
     "The contact quality supported the box score, including {balls_100} triple-digit bolts.",
     "He gave the box score some extra support by hitting {balls_100} balls at 100-plus mph.",
     "The box score looked even better once the quality of contact was factored in, including {balls_100} triple-digit batted balls.",
@@ -2197,15 +2320,39 @@ SUMMARY_FILLER_POOL = [
     "His line did work in more than one category, which gives it real staying power.",
     "The performance had enough variety in it to matter in most formats.",
     "He gave his team something useful in several parts of the game.",
-    "It was not a one-trick line, which tends to age well over a full matchup.",
-    "He filled out the box score in a way that does not require any one number to stand alone.",
+    "It wasn't a one-trick line, which tends to age well over a full matchup.",
+    "He filled out the box score in a way that doesn't require any one number to stand alone.",
 ]
 
 
-def _build_summary_opening(name: str, stats: dict, context: dict, opponent_text: str, team_name: str, team_won: bool) -> str:
+def _build_summary_opening(
+    name: str,
+    stats: dict,
+    context: dict,
+    opponent_text: str,
+    team_name: str,
+    team_won: bool,
+    pitcher: dict | None = None,
+    team_score: int = -1,
+    opp_score: int = -1,
+) -> str:
     stat_phrase = _stat_phrase(stats)
     possessive = team_possessive(team_name)
     result_verb = random.choice(["beat", "topped", "downed", "took down", "handled", "got past"]) if team_won else random.choice(["fell to", "lost to", "dropped one to", "couldn't get past"])
+
+    # Build score suffix if available
+    score_suffix = ""
+    if team_score >= 0 and opp_score >= 0:
+        if team_won:
+            score_suffix = f", {team_score}-{opp_score}"
+        else:
+            score_suffix = f", {opp_score}-{team_score}"
+
+    # Build pitcher suffix — weave into opener ~60% of the time
+    pitcher_suffix = ""
+    pitcher_name = (pitcher or {}).get("name", "")
+    if pitcher_name and random.random() < 0.6:
+        pitcher_suffix = f" off {pitcher_name}"
 
     if context.get("walkoff"):
         family = "walkoff"
@@ -2218,9 +2365,9 @@ def _build_summary_opening(name: str, stats: dict, context: dict, opponent_text:
     else:
         family = "general"
 
-    result_phrase = f"in {possessive} win over the {opponent_text}" if team_won else f"in {possessive} loss to the {opponent_text}"
+    result_phrase = f"in {possessive} win over the {opponent_text}{score_suffix}" if team_won else f"in {possessive} loss to the {opponent_text}{score_suffix}"
     template = random.choice(SUMMARY_OPENING_FAMILIES[family])
-    return template.format(
+    opening = template.format(
         name=name,
         stat_phrase=stat_phrase,
         opponent_text=opponent_text,
@@ -2229,6 +2376,15 @@ def _build_summary_opening(name: str, stats: dict, context: dict, opponent_text:
         result_phrase=result_phrase,
         result_verb=result_verb,
     )
+
+    # Weave pitcher into the opening sentence if it has a homer or xbh and pitcher suffix available
+    homers = safe_int(stats.get("homeRuns", 0), 0)
+    xbh = safe_int(stats.get("doubles", 0), 0) + safe_int(stats.get("triples", 0), 0)
+    if pitcher_suffix and (homers >= 1 or xbh >= 1) and opening.endswith("."):
+        # Insert pitcher before the period
+        opening = opening[:-1] + pitcher_suffix + "."
+
+    return opening
 
 
 def _event_specific_ev_sentence(context: dict, hardest_ev: float | None) -> str:
@@ -2283,7 +2439,7 @@ def _event_text_from_context(context: dict) -> tuple[str, str]:
         return "delivered the walk-off hit", ""
     if context.get("go_ahead_homer") and homers:
         inning = safe_int(homers[0].get("inning", 0), 0)
-        return "went deep to put his club ahead for good", f"in the {_ordinal(inning)}" if inning else ""
+        return "went deep to put his team ahead for good", f"in the {_ordinal(inning)}" if inning else ""
     if context.get("go_ahead_hit"):
         hit_text = "lined the go-ahead hit" if xbh else "delivered the go-ahead hit"
         inning = 0
@@ -2307,7 +2463,7 @@ def _event_text_from_context(context: dict) -> tuple[str, str]:
         inning = safe_int(xbh[0].get("inning", 0), 0)
         return f"drove a {hit_type} into the gap", f"in the {_ordinal(inning)}" if inning else ""
     if context.get("first_run_hit"):
-        return "got his club on the board first", ""
+        return "got the club on the board first", ""
     if context.get("insurance_hit"):
         return "added a late insurance hit", ""
     if context.get("late_rbi_hit"):
@@ -2329,9 +2485,12 @@ def build_hitter_summary(
     position: str = "",
     team_score: int = -1,
     opp_score: int = -1,
+    feed: dict | None = None,
+    hitter: dict | None = None,
 ) -> str:
     team_name = team_name_from_abbr(team)
     opponent_text = opponent or "the opposing club"
+    last_name = _last_name(name)
 
     hits = safe_int(stats.get("hits", 0), 0)
     rbi = safe_int(stats.get("rbi", 0), 0)
@@ -2343,9 +2502,15 @@ def build_hitter_summary(
     hardest_ev = context.get("hardest_ev")
     balls_100 = safe_int(context.get("balls_100", 0), 0)
     pos_phrase = _position_phrase(position)
+    score = score_hitter(stats)
+
+    # --- Quiet night: one-liner only ---
+    if score < 4.0 and homers == 0 and steals == 0:
+        opener = _build_summary_opening(name, stats, context, opponent_text, team_name, team_won, pitcher=pitcher, team_score=team_score, opp_score=opp_score)
+        return opener
 
     sentences: list[str] = [
-        _build_summary_opening(name, stats, context, opponent_text, team_name, team_won)
+        _build_summary_opening(name, stats, context, opponent_text, team_name, team_won, pitcher=pitcher, team_score=team_score, opp_score=opp_score)
     ]
 
     used_signatures: set[str] = {"opening"}
@@ -2435,6 +2600,47 @@ def build_hitter_summary(
         if picked:
             sentences.append(picked)
 
+    # --- Mid-game exit note ---
+    if feed and hitter:
+        exit_info = get_mid_game_exit(feed, hitter)
+        if exit_info.get("exited"):
+            inning = exit_info.get("inning", 0)
+            reason = exit_info.get("reason", "left the game")
+            if inning:
+                sentences.append(f"{last_name} {reason} in the {_ordinal(inning)} inning — worth monitoring.")
+            else:
+                sentences.append(f"{last_name} {reason} — worth monitoring.")
+
+    # --- Day game note (subtle) ---
+    if feed:
+        time_of_day = get_game_time_of_day(feed)
+        if time_of_day == "day" and hits >= 3 and random.random() < 0.4:
+            sentences.append(random.choice([
+                f"Not bad for a day game.",
+                f"He was locked in early — a day game didn't slow him down.",
+                f"The day game didn't matter to {last_name}.",
+            ]))
+
+    # --- Milestone notes ---
+    if hitter:
+        milestones = get_milestone_notes(hitter, stats)
+        for milestone in milestones[:1]:  # Max one milestone per card
+            sentences.append(random.choice([
+                f"That gives {last_name} his {milestone}.",
+                f"The {milestone} came tonight.",
+                f"{last_name} also reached {milestone} with tonight's performance.",
+                f"Worth noting: {last_name} picked up his {milestone}.",
+            ]))
+
+    # --- Use last name to vary pronoun in later sentences ---
+    # Swap "He " at the start of sentence 2 with last name ~40% of the time
+    if len(sentences) >= 2 and random.random() < 0.4:
+        s = sentences[1]
+        if s.startswith("He "):
+            sentences[1] = last_name + " " + s[3:]
+        elif s.startswith("His "):
+            sentences[1] = f"{last_name}'s " + s[4:]
+
     standout = homers >= 2 or rbi >= 4 or hits >= 4 or steals >= 2 or (homers >= 1 and rbi >= 3)
     max_sentences = 4 if standout else 3
 
@@ -2467,6 +2673,7 @@ async def post_card(channel: discord.abc.Messageable, hitter: dict, opponent: st
         value=build_hitter_summary(
             hitter["name"], hitter["team"], stats, label, game_context, opponent, team_won, recent_games,
             pitcher=pitcher, lineup_spot=lineup_spot, position=position, team_score=team_score, opp_score=opp_score,
+            feed=feed, hitter=hitter,
         ),
         inline=False,
     )
