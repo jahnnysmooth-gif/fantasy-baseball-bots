@@ -37,6 +37,7 @@ SLEEP_END_HOUR_ET = int(os.getenv("HITTER_SLEEP_END_HOUR_ET", "13"))
 ESPN_PLAYER_IDS_PATH = os.getenv("ESPN_PLAYER_IDS_PATH", "shared/player_ids/espn_player_ids.json")
 RECAP_CHANNEL_ID = int(os.getenv("HITTER_RECAP_CHANNEL_ID", "0"))
 LEADERBOARD_CHANNEL_ID = int(os.getenv("HITTER_LEADERBOARD_CHANNEL_ID", "0"))
+ERROR_CHANNEL_ID = int(os.getenv("HITTER_ERROR_CHANNEL_ID", "0"))
 RECAP_MIN_PLAYERS = int(os.getenv("HITTER_RECAP_MIN_PLAYERS", "4"))
 LEADERBOARD_TOP_N = int(os.getenv("HITTER_LEADERBOARD_TOP_N", "10"))
 
@@ -2423,6 +2424,45 @@ def build_hitter_subject(name: str, stats: dict, label: str, context: dict, rece
     return random.choice(SUBJECT_OPENING_FAMILIES["solid"]).format(name=name)
 
 
+def _subject_emoji(stats: dict, label: str, context: dict, recent_games: list[dict]) -> str:
+    """Return an emoji prefix for the subject line based on performance type."""
+    hits = safe_int(stats.get("hits", 0), 0)
+    homers = safe_int(stats.get("homeRuns", 0), 0)
+    steals = safe_int(stats.get("stolenBases", 0), 0)
+
+    # Check for active hit streak
+    streak = 0
+    for g in (recent_games or [])[:7]:
+        if g.get("h", 0) > 0:
+            streak += 1
+        else:
+            break
+    hit_streak = streak + (1 if hits > 0 else 0)
+
+    if context.get("walkoff"):
+        return "🎯 "
+    if hit_streak >= 6:
+        return "🔥 "
+    if homers >= 2:
+        return "💣 "
+    if homers >= 1:
+        return "⚡ "
+    if steals >= 2:
+        return "💨 "
+    if hits >= 4:
+        return "🔥 "
+    return ""
+
+
+def _tier_color(score: float, team: str) -> int:
+    """Return embed color based on performance score tier."""
+    if score >= 12.0:
+        return 0xFFD700  # Gold — elite night
+    if score >= 7.0:
+        return 0x2ECC71  # Green — solid night
+    return TEAM_COLORS.get(normalize_team_abbr(team), 0x2ECC71)
+
+
 
 
 
@@ -3397,12 +3437,15 @@ async def post_card(channel: discord.abc.Messageable, hitter: dict, opponent: st
     lineup_spot = get_batting_order_spot(feed, hitter)
     pitcher = get_opposing_starter(feed, hitter.get("side", "home"))
     injury_note = get_player_injury_status(hitter.get("id", 0), hitter.get("name", ""))
+    score_value = score_hitter(stats)
+    emoji = _subject_emoji(stats, label, game_context, recent_games)
     embed = discord.Embed(
-        color=TEAM_COLORS.get(normalize_team_abbr(hitter["team"]), 0x2ECC71),
+        color=_tier_color(score_value, hitter["team"]),
         timestamp=datetime.now(timezone.utc),
     )
     apply_player_card_chrome(embed, hitter["name"], hitter["team"])
-    embed.add_field(name="", value=f"**{build_hitter_subject(hitter['name'], stats, label, game_context, recent_games, position=position, lineup_spot=lineup_spot)}**", inline=False)
+    subject_text = build_hitter_subject(hitter["name"], stats, label, game_context, recent_games, position=position, lineup_spot=lineup_spot)
+    embed.add_field(name="", value=f"**{emoji}{subject_text}**", inline=False)
     embed.add_field(
         name="Summary",
         value=build_hitter_summary(
@@ -3484,9 +3527,11 @@ async def hitter_loop() -> None:
     while True:
         sleep_seconds = get_random_awake_interval_seconds()
         try:
+            scan_start = datetime.now(timezone.utc)
             games = get_games()
             log(f"Checking {len(games)} games")
             posts_this_scan = 0
+            api_calls_this_scan = 0
 
             for game in games:
                 if posts_this_scan >= MAX_POSTS_PER_SCAN:
@@ -3501,8 +3546,24 @@ async def hitter_loop() -> None:
 
                 try:
                     feed = get_feed(game_id)
+                    api_calls_this_scan += 1
                 except Exception as exc:
                     log(f"Feed fetch error for {game_id}: {exc}")
+                    # Post to error channel if configured
+                    if ERROR_CHANNEL_ID > 0:
+                        try:
+                            err_channel = await client.fetch_channel(ERROR_CHANNEL_ID)
+                            away_t = game.get("teams", {}).get("away", {}).get("team", {}).get("name", "Away")
+                            home_t = game.get("teams", {}).get("home", {}).get("team", {}).get("name", "Home")
+                            err_embed = discord.Embed(
+                                title="⚠️ Feed Fetch Failed",
+                                description=f"Could not load game data for **{away_t} @ {home_t}** (Game ID: {game_id})\n`{exc}`",
+                                color=0xFF4444,
+                                timestamp=datetime.now(timezone.utc),
+                            )
+                            await err_channel.send(embed=err_embed)
+                        except Exception:
+                            pass
                     continue
 
                 hitters = get_hitters(feed)
@@ -3556,6 +3617,10 @@ async def hitter_loop() -> None:
                     post_key = f"{game_id}_{hitter_id}"
                     if post_key in posted:
                         continue
+                    # Double-check against persisted state to prevent duplicates on restart
+                    if post_key in set(load_state().get("posted", [])):
+                        posted.add(post_key)  # Sync in-memory set
+                        continue
 
                     player_team = normalize_team_abbr(hitter.get("team"))
                     opponent = home_name if player_team == away_abbr else away_name
@@ -3579,6 +3644,12 @@ async def hitter_loop() -> None:
                         "date": str(game_date_et),
                     })
 
+                    # Save state immediately after each post to prevent duplicates on crash
+                    # Skip during testing (RESET_HITTER_STATE) to avoid disrupting test runs
+                    if not RESET_HITTER_STATE:
+                        state["posted"] = sorted(posted)
+                        save_state(state)
+
                     if posts_this_scan < MAX_POSTS_PER_SCAN:
                         await asyncio.sleep(max(POST_DELAY_SECONDS, 0.0))
 
@@ -3592,6 +3663,8 @@ async def hitter_loop() -> None:
 
             state["posted"] = sorted(posted)
             save_state(state)
+            scan_elapsed = (datetime.now(timezone.utc) - scan_start).total_seconds()
+            log(f"Scan complete: {posts_this_scan} posts, {api_calls_this_scan} API calls, {scan_elapsed:.1f}s elapsed")
         except Exception as exc:
             log(f"Loop error: {exc}")
 
