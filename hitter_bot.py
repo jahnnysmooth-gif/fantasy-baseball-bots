@@ -353,6 +353,140 @@ OPENING_DAY = date(2025, 3, 27)
 _standings_cache: dict = {}
 _standings_cache_date: str = ""
 
+# Next game cache
+_next_game_cache: dict = {}
+_next_game_cache_date: str = ""
+
+
+def get_next_opponent(team_abbr: str) -> str:
+    """Return a plain-English next game description like 'at the Rockies tomorrow'
+    or empty string if unavailable."""
+    global _next_game_cache, _next_game_cache_date
+
+    today = now_et().date()
+    today_str = str(today)
+    cache_key = normalize_team_abbr(team_abbr)
+
+    if _next_game_cache_date == today_str and cache_key in _next_game_cache:
+        return _next_game_cache.get(cache_key, "")
+
+    # Reset cache for new day
+    if _next_game_cache_date != today_str:
+        _next_game_cache = {}
+        _next_game_cache_date = today_str
+
+    try:
+        tomorrow = today + timedelta(days=1)
+        # Check tomorrow and day after
+        for target_date in [tomorrow, today + timedelta(days=2)]:
+            url = f"https://statsapi.mlb.com/api/v1/schedule?sportId=1&gameType=R&date={target_date.isoformat()}"
+            resp = requests.get(url, timeout=REQUEST_TIMEOUT)
+            resp.raise_for_status()
+            data = resp.json()
+
+            for date_block in data.get("dates", []):
+                for game in date_block.get("games", []):
+                    teams = game.get("teams", {})
+                    away_abbr = normalize_team_abbr(
+                        teams.get("away", {}).get("team", {}).get("abbreviation", "")
+                    )
+                    home_abbr = normalize_team_abbr(
+                        teams.get("home", {}).get("team", {}).get("abbreviation", "")
+                    )
+
+                    if cache_key not in (away_abbr, home_abbr):
+                        continue
+
+                    # Found the next game
+                    is_home = cache_key == home_abbr
+                    opp_abbr = away_abbr if is_home else home_abbr
+                    opp_name = team_name_from_abbr(opp_abbr)
+                    days_away = (target_date - today).days
+
+                    when = "tomorrow" if days_away == 1 else target_date.strftime("%A")
+                    location = "vs. the" if is_home else "at the"
+                    result = f"{location} {opp_name} {when}"
+
+                    # Cache all teams from this date to avoid repeat calls
+                    for g in date_block.get("games", []):
+                        gt = g.get("teams", {})
+                        ga = normalize_team_abbr(gt.get("away", {}).get("team", {}).get("abbreviation", ""))
+                        gh = normalize_team_abbr(gt.get("home", {}).get("team", {}).get("abbreviation", ""))
+                        opp_a = team_name_from_abbr(gh)
+                        opp_h = team_name_from_abbr(ga)
+                        d = (target_date - today).days
+                        w = "tomorrow" if d == 1 else target_date.strftime("%A")
+                        if ga:
+                            _next_game_cache[ga] = f"at the {opp_a} {w}"
+                        if gh:
+                            _next_game_cache[gh] = f"vs. the {opp_h} {w}"
+
+                    return result
+    except Exception:
+        pass
+
+    _next_game_cache[cache_key] = ""
+    return ""
+
+
+# Injury/transaction cache
+_injury_cache: dict = {}
+_injury_cache_date: str = ""
+
+
+def get_player_injury_status(player_id: int, player_name: str) -> str:
+    """Return injury note if player was recently activated from IL (within 14 days).
+    Returns empty string if no recent IL stint found."""
+    global _injury_cache, _injury_cache_date
+
+    today = now_et().date()
+    today_str = str(today)
+
+    if _injury_cache_date != today_str:
+        _injury_cache = {}
+        _injury_cache_date = today_str
+
+    cache_key = str(player_id)
+    if cache_key in _injury_cache:
+        return _injury_cache[cache_key]
+
+    try:
+        # Check MLB transactions for this player
+        start_date = (today - timedelta(days=14)).isoformat()
+        url = f"https://statsapi.mlb.com/api/v1/transactions?startDate={start_date}&endDate={today.isoformat()}"
+        resp = requests.get(url, timeout=REQUEST_TIMEOUT)
+        resp.raise_for_status()
+        data = resp.json()
+
+        for txn in data.get("transactions", []):
+            p = txn.get("person", {}) or {}
+            if safe_int(p.get("id", 0), 0) != player_id:
+                continue
+            txn_type = str(txn.get("typeDesc") or "").lower()
+            if "activate" in txn_type or "reinstate" in txn_type:
+                txn_date_str = txn.get("date") or txn.get("effectiveDate") or ""
+                if txn_date_str:
+                    try:
+                        txn_date = date.fromisoformat(txn_date_str[:10])
+                        days_ago = (today - txn_date).days
+                        if days_ago == 0:
+                            note = f"{_last_name(player_name)} was activated from the IL today."
+                        elif days_ago == 1:
+                            note = f"{_last_name(player_name)} was activated from the IL yesterday."
+                        elif days_ago <= 7:
+                            note = f"{_last_name(player_name)} was activated from the IL {days_ago} days ago."
+                        else:
+                            note = f"{_last_name(player_name)} returned from the IL {days_ago} days ago — worth noting as he builds back up."
+                        _injury_cache[cache_key] = note
+                        return note
+                    except Exception:
+                        pass
+    except Exception:
+        pass
+
+    _injury_cache[cache_key] = ""
+    return ""
+
 
 def get_team_record(team_abbr: str) -> tuple[int, int]:
     """Return (wins, losses) for a team. Returns (-1, -1) if unavailable
@@ -1294,6 +1428,7 @@ SUBJECT_OPENING_FAMILIES = {
 }
 
 OPENING_FAMILY_POOL = [
+    # Name-first openers
     "{name} went {stat_phrase} {result_phrase}.",
     "{name} finished {stat_phrase} {result_phrase}.",
     "{name} was {stat_phrase} {result_phrase}.",
@@ -1307,7 +1442,12 @@ OPENING_FAMILY_POOL = [
     "{name} delivered {result_phrase}, finishing {stat_phrase}.",
     "{name} made his at-bats count {result_phrase}, going {stat_phrase}.",
     "{name} had a strong one {result_phrase}: {stat_phrase}.",
-    "{name} was one of the better bats on the field {result_phrase}, going {stat_phrase}.",
+    # Result-first openers — lead with the team/moment
+    "The {team_name} {result_verb} the {opponent_text} and {name} was a big reason why, going {stat_phrase}.",
+    "When the {team_name} needed offense, {name} delivered — {stat_phrase} {result_phrase}.",
+    "{stat_phrase} {result_phrase} for {name}, who was one of the best bats on the field.",
+    "It was a good night to be {name} — {stat_phrase} {result_phrase}.",
+    "{result_phrase} for the {team_name}, and {name} did his part: {stat_phrase}.",
 ]
 
 CONTEXT_FAMILY_POOL = [
@@ -2589,6 +2729,42 @@ SUMMARY_FILLER_POOL = [
     "He filled out the box score in a way that doesn't require any one number to stand alone.",
 ]
 
+# Short punchy sentences to vary rhythm — sprinkled in occasionally
+PUNCHY_SENTENCES = {
+    "homer": [
+        "One swing. That was the difference.",
+        "He didn't miss it.",
+        "Gone.",
+        "That one had no doubt.",
+        "He got all of it.",
+    ],
+    "multi_hit": [
+        "Just locked in.",
+        "Couldn't get him out.",
+        "Pitchers had no answers.",
+        "Every trip, a contribution.",
+        "Consistent from first to last.",
+    ],
+    "speed": [
+        "The legs were alive.",
+        "He was a nightmare on the bases.",
+        "Fast. Really fast.",
+        "They had no shot.",
+    ],
+    "clutch": [
+        "Delivered when it mattered.",
+        "Came through.",
+        "Big spot. Bigger hit.",
+        "That's what he does.",
+    ],
+    "general": [
+        "Good player. Good night.",
+        "Everything working.",
+        "Hard to stop.",
+        "Start to finish.",
+    ],
+}
+
 
 def _build_summary_opening(
     name: str,
@@ -2921,6 +3097,7 @@ def build_hitter_summary(
     feed: dict | None = None,
     hitter: dict | None = None,
     opponent_abbr: str = "",
+    injury_note: str = "",
 ) -> str:
     team_name = team_name_from_abbr(team)
     opponent_text = opponent or "the opposing club"
@@ -3073,6 +3250,10 @@ def build_hitter_summary(
         else:
             sentences.append(pitcher_sentence)
 
+    # --- Injury return note (always append if present) ---
+    if injury_note:
+        sentences.append(injury_note)
+
     # --- Mid-game exit note ---
     if feed and hitter:
         exit_info = get_mid_game_exit(feed, hitter)
@@ -3105,6 +3286,16 @@ def build_hitter_summary(
                 f"Worth noting: {last_name} picked up his {milestone}.",
             ]))
 
+    # --- Next game opponent ---
+    next_opp = get_next_opponent(team)
+    if next_opp and len(sentences) < max_sentences:
+        sentences.append(random.choice([
+            f"He's got a date {next_opp}.",
+            f"Up next for {last_name}: {next_opp}.",
+            f"The {team_name} head {next_opp}.",
+            f"Next up for him is {next_opp}.",
+        ]))
+
     # --- Use last name to vary pronoun in later sentences ---
     # Swap "He " at the start of sentence 2 with last name ~40% of the time
     if len(sentences) >= 2 and random.random() < 0.4:
@@ -3125,6 +3316,70 @@ def build_hitter_summary(
         else:
             break
 
+    # --- Deduplicate key words across sentences ---
+    KEY_SYNONYMS = {
+        "homer": ["long ball", "blast", "shot", "home run"],
+        "swing": ["cut", "at-bat", "knock", "hit"],
+        "damage": ["production", "output", "contribution", "work"],
+        "production": ["output", "contribution", "numbers", "line"],
+        "performance": ["night", "outing", "game", "effort"],
+    }
+    if len(sentences) >= 2:
+        # Find words used in opener
+        opener_lower = sentences[0].lower()
+        for word, synonyms in KEY_SYNONYMS.items():
+            if word in opener_lower:
+                # Replace word in sentences 2+ with a synonym
+                for i in range(1, len(sentences)):
+                    if word in sentences[i].lower():
+                        replacement = random.choice(synonyms)
+                        sentences[i] = sentences[i].replace(word, replacement, 1)
+                        sentences[i] = sentences[i].replace(word.capitalize(), replacement.capitalize(), 1)
+                        break
+
+    # --- Add punchy sentence occasionally (~25% of standout nights) ---
+    if standout and random.random() < 0.25 and len(sentences) < max_sentences:
+        if context.get("walkoff") or context.get("go_ahead_homer"):
+            punchy = random.choice(PUNCHY_SENTENCES["clutch"])
+        elif homers >= 1:
+            punchy = random.choice(PUNCHY_SENTENCES["homer"])
+        elif steals >= 2:
+            punchy = random.choice(PUNCHY_SENTENCES["speed"])
+        elif hits >= 3:
+            punchy = random.choice(PUNCHY_SENTENCES["multi_hit"])
+        else:
+            punchy = random.choice(PUNCHY_SENTENCES["general"])
+        sentences.append(punchy)
+
+    # --- Callback ending — reference opener theme (~30% of the time) ---
+    if len(sentences) >= 3 and random.random() < 0.3 and len(sentences) < max_sentences:
+        opener_lower = sentences[0].lower()
+        callback = ""
+        if "homer" in opener_lower or "deep" in opener_lower or "yard" in opener_lower:
+            callback = random.choice([
+                "One swing was all it took.",
+                "That's the kind of power that changes games.",
+                "When he gets one to hit, he doesn't miss.",
+            ])
+        elif "streak" in " ".join(s.lower() for s in sentences):
+            callback = random.choice([
+                "The hot stretch just keeps going.",
+                "He's been doing this night after night.",
+                "No signs of slowing down.",
+            ])
+        elif "steal" in opener_lower or "speed" in opener_lower or "swipe" in " ".join(s.lower() for s in sentences):
+            callback = random.choice([
+                "The legs make everything more dangerous.",
+                "Speed like that changes how a team plays defense.",
+            ])
+        elif hits >= 3:
+            callback = random.choice([
+                "The bat just wouldn't stop.",
+                "He made it look easy.",
+            ])
+        if callback and callback not in sentences:
+            sentences.append(callback)
+
     final = " ".join(sentences[:max_sentences]).strip()
     # Bold the first occurrence of the player's full name in the summary
     if name in final:
@@ -3141,6 +3396,7 @@ async def post_card(channel: discord.abc.Messageable, hitter: dict, opponent: st
     position = hitter.get("position", "")
     lineup_spot = get_batting_order_spot(feed, hitter)
     pitcher = get_opposing_starter(feed, hitter.get("side", "home"))
+    injury_note = get_player_injury_status(hitter.get("id", 0), hitter.get("name", ""))
     embed = discord.Embed(
         color=TEAM_COLORS.get(normalize_team_abbr(hitter["team"]), 0x2ECC71),
         timestamp=datetime.now(timezone.utc),
@@ -3152,7 +3408,7 @@ async def post_card(channel: discord.abc.Messageable, hitter: dict, opponent: st
         value=build_hitter_summary(
             hitter["name"], hitter["team"], stats, label, game_context, opponent, team_won, recent_games,
             pitcher=pitcher, lineup_spot=lineup_spot, position=position, team_score=team_score, opp_score=opp_score,
-            feed=feed, hitter=hitter, opponent_abbr=opponent_abbr,
+            feed=feed, hitter=hitter, opponent_abbr=opponent_abbr, injury_note=injury_note,
         ),
         inline=False,
     )
