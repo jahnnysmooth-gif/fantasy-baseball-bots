@@ -792,10 +792,12 @@ def _homered_phrase(homers: int, rbi: int = 0) -> str:
             "launched a homer",
             "connected for a homer",
         ]
-        if rbi == 2:
+        if rbi == 4:
+            options.extend(["hit a grand slam", "cleared the bases with a grand slam", "went deep with the bases loaded"])
+        elif rbi == 3:
+            options.extend(["launched a three-run homer", "hit a three-run shot"])
+        elif rbi == 2:
             options.extend(["launched a two-run shot", "connected for a two-run homer"])
-        elif rbi >= 3:
-            options.extend(["launched a three-run homer", "cleared the bases with a homer"])
         return random.choice(options)
     return random.choice([
         f"homered {homers} times",
@@ -1908,15 +1910,15 @@ def _stat_phrase(stats: dict) -> str:
 
     extras: list[str] = []
     if homers:
-        extras.append(_small_count_phrase(homers, "homer"))
+        extras.append(_small_count_phrase(homers, "homer", include_article=(homers == 1)))
     elif doubles:
-        extras.append(_small_count_phrase(doubles, "double"))
+        extras.append(_small_count_phrase(doubles, "double", include_article=(doubles == 1)))
     elif triples:
-        extras.append(_small_count_phrase(triples, "triple"))
+        extras.append(_small_count_phrase(triples, "triple", include_article=(triples == 1)))
     if rbi:
         extras.append(f"{_word_or_number(rbi)} RBI")
     if steals:
-        extras.append(_small_count_phrase(steals, "stolen base"))
+        extras.append(_small_count_phrase(steals, "stolen base", include_article=(steals == 1)))
 
     # Use PA if meaningfully different from AB (i.e. walks present)
     if walks >= 2 and pa > ab:
@@ -2561,11 +2563,23 @@ def _build_position_power_sentence(pos_phrase: str, stats: dict, hitter: dict | 
     homer_streak = hr_streak + (1 if homers > 0 else 0)
 
     # Build the second clause based on available context
-    if rbi >= 3:
+    if rbi == 4:
         second_clause = random.choice([
-            f"and he did it with {_word_or_number(rbi)} RBI on that swing.",
-            f"and it came with runners on base.",
-            f"and he made it count with {_word_or_number(rbi)} runs driven in.",
+            "and he hit a grand slam to do it.",
+            "and he did it with the bases loaded.",
+            "and it was a grand slam.",
+        ])
+    elif rbi == 3:
+        second_clause = random.choice([
+            "and he did it with a three-run shot.",
+            "and it came with runners on base.",
+            "and he drove in three on that swing.",
+        ])
+    elif rbi >= 2:
+        second_clause = random.choice([
+            "and it came with a runner on base.",
+            "and he drove in two on that swing.",
+            "and the two-run shot made it count.",
         ])
     elif rbi == 2:
         second_clause = random.choice([
@@ -2866,8 +2880,10 @@ def _event_specific_ev_sentence(context: dict, hardest_ev: float | None) -> str:
         inning_piece = f" in the {_ordinal(inning)}" if inning else ""
 
         # Build a rich result phrase
-        if rbi >= 3:
-            result_phrase = f"a {rbi}-run homer{inning_piece}"
+        if rbi == 4:
+            result_phrase = f"a grand slam{inning_piece}"
+        elif rbi == 3:
+            result_phrase = f"a three-run homer{inning_piece}"
         elif rbi == 2:
             result_phrase = f"a two-run homer{inning_piece}"
         elif rbi == 1:
@@ -3017,11 +3033,17 @@ def _event_text_from_context(context: dict) -> tuple[str, str]:
         loc_phrase = _hit_location_phrase(location, trajectory)
 
         # Build RBI description
-        if rbi >= 3:
+        if rbi == 4:
             rbi_desc = random.choice([
-                f"hit a {_word_or_number(rbi)}-run homer",
-                f"went deep with a {_word_or_number(rbi)}-run shot",
-                f"cleared the bases with a {_word_or_number(rbi)}-run blast",
+                "hit a grand slam",
+                "cleared the bases with a grand slam",
+                "went deep with the bases loaded",
+            ])
+        elif rbi == 3:
+            rbi_desc = random.choice([
+                "hit a three-run homer",
+                "went deep with a three-run shot",
+                "launched a three-run blast",
             ])
         elif rbi == 2:
             rbi_desc = random.choice([
