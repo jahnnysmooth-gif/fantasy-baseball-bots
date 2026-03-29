@@ -35,6 +35,10 @@ AWAKE_SCAN_MAX_MINUTES = int(os.getenv("HITTER_AWAKE_SCAN_MAX_MINUTES", "10"))
 SLEEP_START_HOUR_ET = int(os.getenv("HITTER_SLEEP_START_HOUR_ET", "3"))
 SLEEP_END_HOUR_ET = int(os.getenv("HITTER_SLEEP_END_HOUR_ET", "13"))
 ESPN_PLAYER_IDS_PATH = os.getenv("ESPN_PLAYER_IDS_PATH", "shared/player_ids/espn_player_ids.json")
+RECAP_CHANNEL_ID = int(os.getenv("HITTER_RECAP_CHANNEL_ID", "0"))
+LEADERBOARD_CHANNEL_ID = int(os.getenv("HITTER_LEADERBOARD_CHANNEL_ID", "0"))
+RECAP_MIN_PLAYERS = int(os.getenv("HITTER_RECAP_MIN_PLAYERS", "4"))
+LEADERBOARD_TOP_N = int(os.getenv("HITTER_LEADERBOARD_TOP_N", "10"))
 
 intents = discord.Intents.default()
 client: discord.Client | None = None
@@ -919,6 +923,7 @@ def classify_hitter(stats: dict) -> str:
     steals = safe_int(stats.get("stolenBases", 0), 0)
     doubles = safe_int(stats.get("doubles", 0), 0)
     triples = safe_int(stats.get("triples", 0), 0)
+    walks = safe_int(stats.get("baseOnBalls", 0), 0)
     xbh = homers + doubles + triples
 
     if homers >= 2:
@@ -2621,8 +2626,25 @@ async def hitter_loop() -> None:
                     posted_this_game += 1
                     posts_this_scan += 1
 
+                    # Track for leaderboard
+                    state.setdefault("leaderboard", []).append({
+                        "name": hitter["name"],
+                        "team": hitter["team"],
+                        "score": score_value,
+                        "game_line": format_hitter_game_line(hitter["stats"]),
+                        "date": str(game_date_et),
+                    })
+
                     if posts_this_scan < MAX_POSTS_PER_SCAN:
                         await asyncio.sleep(max(POST_DELAY_SECONDS, 0.0))
+
+                # Post game recap if enough players earned cards
+                if posted_this_game >= RECAP_MIN_PLAYERS and RECAP_CHANNEL_ID > 0:
+                    try:
+                        recap_channel = await client.fetch_channel(RECAP_CHANNEL_ID)
+                        await post_game_recap(recap_channel, ranked[:posted_this_game], matchup, away_score, home_score, away_name, home_name)
+                    except Exception as exc:
+                        log(f"Recap post error: {exc}")
 
             state["posted"] = sorted(posted)
             save_state(state)
@@ -2631,6 +2653,63 @@ async def hitter_loop() -> None:
 
         log(f"Sleeping {sleep_seconds} seconds before next scan")
         await asyncio.sleep(sleep_seconds)
+
+
+# ---------------- RECAP & LEADERBOARD ----------------
+
+async def post_game_recap(channel: discord.abc.Messageable, ranked_posted: list, matchup: str, away_score: int, home_score: int, away_name: str, home_name: str) -> None:
+    """Post a summary embed when 4+ players from the same game earned cards."""
+    total_hr   = sum(safe_int(h["stats"].get("homeRuns", 0), 0) for _, h in ranked_posted)
+    total_rbi  = sum(safe_int(h["stats"].get("rbi", 0), 0) for _, h in ranked_posted)
+    total_hits = sum(safe_int(h["stats"].get("hits", 0), 0) for _, h in ranked_posted)
+
+    lines = []
+    for _, h in ranked_posted:
+        line = format_hitter_game_line(h["stats"])
+        lines.append(f"**{h['name']}** ({h['team']}) — {line}")
+
+    embed = discord.Embed(
+        title=f"🔥 {matchup} — Offensive Explosion",
+        description="\n".join(lines),
+        color=0xF4C542,
+        timestamp=datetime.now(timezone.utc),
+    )
+    embed.add_field(name="Final", value=f"{away_name} {away_score} — {home_name} {home_score}", inline=True)
+    embed.add_field(name="Combined", value=f"{total_hits} H • {total_hr} HR • {total_rbi} RBI", inline=True)
+    embed.set_footer(text=f"{len(ranked_posted)} players earned cards from this game")
+    await channel.send(embed=embed)
+
+
+async def post_leaderboard(channel: discord.abc.Messageable, state: dict) -> None:
+    """Post today's top-N hitters by fantasy score."""
+    today = str(now_et().date())
+    entries = [e for e in state.get("leaderboard", []) if e.get("date") == today]
+    if not entries:
+        await channel.send("No hitter cards posted today yet.")
+        return
+
+    # Deduplicate by name, keep highest score
+    seen: dict[str, dict] = {}
+    for e in entries:
+        key = e["name"]
+        if key not in seen or e["score"] > seen[key]["score"]:
+            seen[key] = e
+
+    top = sorted(seen.values(), key=lambda x: x["score"], reverse=True)[:LEADERBOARD_TOP_N]
+    medals = ["🥇", "🥈", "🥉"]
+    lines = []
+    for i, entry in enumerate(top):
+        medal = medals[i] if i < 3 else f"**{i + 1}.**"
+        lines.append(f"{medal} **{entry['name']}** ({entry['team']}) — {entry['game_line']} *(score: {entry['score']:.1f})*")
+
+    embed = discord.Embed(
+        title=f"📊 Top {len(top)} Hitters — {today}",
+        description="\n".join(lines),
+        color=0x2ECC71,
+        timestamp=datetime.now(timezone.utc),
+    )
+    embed.set_footer(text="Score = fantasy point formula • Updates as games finish")
+    await channel.send(embed=embed)
 
 
 # ---------------- DISCORD LIFECYCLE ----------------
@@ -2644,6 +2723,22 @@ async def on_ready() -> None:
         log("Hitter background task created")
 
 
+async def on_message(message: discord.Message) -> None:
+    if message.author.bot:
+        return
+    if message.content.strip().lower() != "!top":
+        return
+    lb_channel_id = LEADERBOARD_CHANNEL_ID or CHANNEL_ID
+    if lb_channel_id <= 0:
+        return
+    try:
+        lb_channel = await client.fetch_channel(lb_channel_id)
+        state = load_state()
+        await post_leaderboard(lb_channel, state)
+    except Exception as exc:
+        log(f"Leaderboard command error: {exc}")
+
+
 async def start_hitter_bot() -> None:
     global client, background_task
     if not TOKEN:
@@ -2652,8 +2747,10 @@ async def start_hitter_bot() -> None:
         raise RuntimeError("HITTER_WATCH_CHANNEL_ID is not set")
 
     background_task = None
+    intents.message_content = True
     client = discord.Client(intents=intents)
     client.event(on_ready)
+    client.event(on_message)
 
     # Let main.py own the restart loop. reconnect=False avoids the discord.py
     # resume path that has been crashing with self.ws=None after connect timeouts.
