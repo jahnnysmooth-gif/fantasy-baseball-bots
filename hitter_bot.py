@@ -1072,7 +1072,7 @@ SUBJECT_OPENING_FAMILIES = {
         "{name} combines a three-hit game with real impact",
     ],
     "middle_order": [
-        "{name} drives the offense from a middle-of-the-order role",
+        "{name} drives the offense from a middle of the order role",
         "{name} cashes in from the heart of the order",
         "{name} makes the most of his run-producing spot",
         "{name} delivers the kind of production you want from the middle of the order",
@@ -1084,7 +1084,7 @@ SUBJECT_OPENING_FAMILIES = {
         "{name} cashes in the traffic around him",
         "{name} anchors the offense with a productive game",
         "{name} turns his place in the heart of the order into real fantasy value",
-        "{name} makes his heart-of-the-order at-bats count",
+        "{name} makes his heart of the order at-bats count",
         "{name} does middle-order work all night",
         "{name} turns opportunity into production from the heart of the order",
     ],
@@ -1262,7 +1262,7 @@ LINEUP_FAMILIES = {
         "He made the top of the order work in his favor.",
         "That is a strong showing for a leadoff man, especially with how often he pressured the defense.",
         "He gave the offense a steady push from the leadoff spot.",
-        "There was some real top-of-the-order value in the way he built this game.",
+        "There was some real top of the order value in the way he built this game.",
         "He made life easier on the bats behind him while hitting first.",
         "The offense got real momentum from the leadoff spot here.",
         "He looked comfortable doing table-setting work from the top of the order.",
@@ -1273,7 +1273,7 @@ LINEUP_FAMILIES = {
     ],
     "middle": [
         "He batted in the heart of the order and delivered.",
-        "That's exactly what you want from a middle-of-the-order bat.",
+        "That's exactly what you want from a middle of the order bat.",
         "He hit where the damage is supposed to happen and did damage.",
         "Cleanup type production — he cashed in with runners on.",
         "The offense ran through him tonight.",
@@ -1282,7 +1282,7 @@ LINEUP_FAMILIES = {
         "He did what the middle of the order is supposed to do.",
         "The run-producing role fit him perfectly tonight.",
         "He turned chances into runs — that's the job.",
-        "Middle-of-the-order bats live for nights like this.",
+        "Middle of the order bats live for nights like this.",
         "He was the engine of the offense hitting where he hit.",
         "That slot in the lineup exists for guys who can do what he did tonight.",
         "He was productive in the spots that matter most.",
@@ -2037,7 +2037,7 @@ def build_hitter_subject(name: str, stats: dict, label: str, context: dict, rece
             f"{name} keeps the offense moving from the top",
             f"{name} turns the leadoff job into fantasy value",
             f"{name} gives his side a strong table-setting line",
-            f"{name} provides some top-of-the-order spark",
+            f"{name} provides some top of the order spark",
         ])
     if hits >= 3:
         return random.choice([
@@ -2340,19 +2340,12 @@ def _build_summary_opening(
     possessive = team_possessive(team_name)
     result_verb = random.choice(["beat", "topped", "downed", "took down", "handled", "got past"]) if team_won else random.choice(["fell to", "lost to", "dropped one to", "couldn't get past"])
 
-    # Build score suffix if available
+    # Score suffix removed — keep opener clean
     score_suffix = ""
-    if team_score >= 0 and opp_score >= 0:
-        if team_won:
-            score_suffix = f", {team_score}-{opp_score}"
-        else:
-            score_suffix = f", {opp_score}-{team_score}"
 
-    # Build pitcher suffix — weave into opener ~60% of the time
+    # Pitcher handled as body sentence — keep opener clean
     pitcher_suffix = ""
     pitcher_name = (pitcher or {}).get("name", "")
-    if pitcher_name and random.random() < 0.6:
-        pitcher_suffix = f" off {pitcher_name}"
 
     if context.get("walkoff"):
         family = "walkoff"
@@ -2365,7 +2358,7 @@ def _build_summary_opening(
     else:
         family = "general"
 
-    result_phrase = f"in {possessive} win over the {opponent_text}{score_suffix}" if team_won else f"in {possessive} loss to the {opponent_text}{score_suffix}"
+    result_phrase = f"in the {possessive} win over the {opponent_text}" if team_won else f"in the {possessive} loss to the {opponent_text}"
     template = random.choice(SUMMARY_OPENING_FAMILIES[family])
     opening = template.format(
         name=name,
@@ -2377,56 +2370,72 @@ def _build_summary_opening(
         result_verb=result_verb,
     )
 
-    # Weave pitcher into the opening sentence if it has a homer or xbh and pitcher suffix available
-    homers = safe_int(stats.get("homeRuns", 0), 0)
-    xbh = safe_int(stats.get("doubles", 0), 0) + safe_int(stats.get("triples", 0), 0)
-    if pitcher_suffix and (homers >= 1 or xbh >= 1) and opening.endswith("."):
-        # Insert pitcher before the period
-        opening = opening[:-1] + pitcher_suffix + "."
-
     return opening
 
 
 def _event_specific_ev_sentence(context: dict, hardest_ev: float | None) -> str:
+    """Build an EV sentence with full in-game context: hit type, inning, RBI result."""
     if not hardest_ev:
         return ""
     homers = context.get("homers") or []
     xbh = context.get("extra_base_hits") or []
+
     if homers:
-        inning = safe_int(homers[0].get("inning", 0), 0)
+        first = homers[0]
+        inning = safe_int(first.get("inning", 0), 0)
+        rbi = safe_int(first.get("rbi", 0), 0)
         inning_piece = f" in the {_ordinal(inning)}" if inning else ""
-        data = {
-            "article_hit": f"a homer{inning_piece}",
-            "inning_piece": inning_piece,
-            "ev": hardest_ev,
-            "verb": random.choice(["crushed", "hammered", "launched", "blasted", "drove"]),
-            "verb_past": random.choice(["crushed", "hammered", "launched", "blasted", "drove"]),
-            "verb_ing": random.choice(["crushing", "hammering", "launching", "blasting", "driving"]),
-        }
-        return random.choice(EV_HIT_FAMILIES).format(**data)
+
+        # Build a rich result phrase
+        if rbi >= 3:
+            result_phrase = f"a {rbi}-run homer{inning_piece}"
+        elif rbi == 2:
+            result_phrase = f"a two-run homer{inning_piece}"
+        elif rbi == 1:
+            result_phrase = f"a solo shot{inning_piece}"
+        else:
+            result_phrase = f"a homer{inning_piece}"
+
+        options = [
+            f"His hardest-hit ball was {result_phrase}, which left the bat at {hardest_ev:.1f} mph.",
+            f"The loudest contact of his night was {result_phrase} at {hardest_ev:.1f} mph.",
+            f"He squared up {result_phrase} at {hardest_ev:.1f} mph — that one had some serious carry.",
+            f"The {result_phrase} came off the bat at {hardest_ev:.1f} mph.",
+            f"That {result_phrase} registered {hardest_ev:.1f} mph off the bat.",
+            f"He put his best swing on {result_phrase} — {hardest_ev:.1f} mph exit velo.",
+            f"The {result_phrase} was the hardest ball he hit all night at {hardest_ev:.1f} mph.",
+            f"His top exit velocity came on {result_phrase}: {hardest_ev:.1f} mph.",
+        ]
+        return random.choice(options)
+
     if xbh:
         first = xbh[0]
         hit_type = "double" if first.get("type") == "double" else "triple"
         inning = safe_int(first.get("inning", 0), 0)
+        rbi = safe_int(first.get("rbi", 0), 0)
         inning_piece = f" in the {_ordinal(inning)}" if inning else ""
-        data = {
-            "article_hit": f"a {hit_type}{inning_piece}",
-            "inning_piece": inning_piece,
-            "ev": hardest_ev,
-            "verb": random.choice(["ripped", "smoked", "drilled", "lined", "hammered"]),
-            "verb_past": random.choice(["ripped", "smoked", "drilled", "lined", "hammered"]),
-            "verb_ing": random.choice(["ripping", "smoking", "drilling", "lining", "hammering"]),
-        }
-        return random.choice(EV_HIT_FAMILIES).format(**data)
-    data = {
-        "article_hit": "his hardest-hit ball",
-        "inning_piece": "",
-        "ev": hardest_ev,
-        "verb": random.choice(["barreled", "smoked", "drove", "lined", "hammered"]),
-        "verb_past": random.choice(["barreled", "smoked", "drove", "lined", "hammered"]),
-        "verb_ing": random.choice(["barreling", "smoking", "driving", "lining", "hammering"]),
-    }
-    return random.choice(EV_HIT_FAMILIES).format(**data)
+        rbi_piece = f", driving in {_word_or_number(rbi)}" if rbi else ""
+
+        options = [
+            f"His hardest-hit ball was a {hit_type}{inning_piece}{rbi_piece}, leaving the bat at {hardest_ev:.1f} mph.",
+            f"The loudest swing of his night was a {hit_type}{inning_piece} at {hardest_ev:.1f} mph{rbi_piece}.",
+            f"He ripped a {hit_type}{inning_piece} at {hardest_ev:.1f} mph{rbi_piece} — his best contact of the game.",
+            f"That {hit_type}{inning_piece} came off the bat at {hardest_ev:.1f} mph{rbi_piece}.",
+            f"His top exit velo came on a {hit_type}{inning_piece}: {hardest_ev:.1f} mph{rbi_piece}.",
+            f"The {hit_type}{inning_piece} was his hardest ball all night at {hardest_ev:.1f} mph{rbi_piece}.",
+        ]
+        return random.choice(options)
+
+    # Fallback — no homer or XBH context, just report the number
+    options = [
+        f"He also barreled one at {hardest_ev:.1f} mph — his hardest contact of the night.",
+        f"The contact quality was there too, with his hardest ball checking in at {hardest_ev:.1f} mph.",
+        f"He hit one {hardest_ev:.1f} mph that showed off the raw power.",
+        f"His loudest contact came at {hardest_ev:.1f} mph.",
+        f"He had at least one at-bat where the bat really sang — {hardest_ev:.1f} mph off the barrel.",
+        f"The exit velo peaked at {hardest_ev:.1f} mph, which gets anyone's attention.",
+    ]
+    return random.choice(options)
 
 
 def _event_text_from_context(context: dict) -> tuple[str, str]:
@@ -2505,7 +2514,7 @@ def build_hitter_summary(
     score = score_hitter(stats)
 
     # --- Quiet night: one-liner only ---
-    if score < 4.0 and homers == 0 and steals == 0:
+    if score < 3.5 and homers == 0 and steals == 0:
         opener = _build_summary_opening(name, stats, context, opponent_text, team_name, team_won, pitcher=pitcher, team_score=team_score, opp_score=opp_score)
         return opener
 
@@ -2541,17 +2550,19 @@ def build_hitter_summary(
     if pos_phrase and homers >= 1:
         fantasy_pool = [s.format(pos_phrase=pos_phrase) for s in POSITION_POWER_FAMILIES] + fantasy_pool
 
+    # --- Pitcher sentence (always included when available) ---
+    pitcher_sentence = _starter_context_sentence(pitcher, stats, context)
+
+    # --- Other meta sentences ---
     meta_pool: list[str] = []
     lineup_sentence = _lineup_context_sentence(lineup_spot, stats)
     if lineup_sentence:
         meta_pool.append(lineup_sentence)
-    starter_sentence = _starter_context_sentence(pitcher, stats, context)
-    if starter_sentence:
-        meta_pool.append(starter_sentence)
     close_game_sentence = _close_game_context(team_score, opp_score, team_won, context, rbi)
     if close_game_sentence:
         meta_pool.append(close_game_sentence)
 
+    # --- Quality pool (EV / hard contact) ---
     quality_pool: list[str] = []
     if hardest_ev and hardest_ev >= 108:
         quality_pool.append(_event_specific_ev_sentence(context, hardest_ev))
@@ -2568,7 +2579,7 @@ def build_hitter_summary(
             return "decisive"
         if "walk-off" in lowered:
             return "walkoff"
-        if "mph" in lowered or "exit velocity" in lowered or "100-plus" in lowered or "triple-digit" in lowered:
+        if "mph" in lowered or "exit velocity" in lowered or "100-plus" in lowered or "triple-digit" in lowered or "exit velo" in lowered:
             return "ev"
         if "leadoff" in lowered or "middle of the order" in lowered or "heart of the order" in lowered or "bottom third" in lowered or "lineup" in lowered:
             return "lineup"
@@ -2576,7 +2587,7 @@ def build_hitter_summary(
             return "trend"
         if "fantasy" in lowered or "category" in lowered or "matchup" in lowered or "season-long" in lowered or "daily leagues" in lowered:
             return "fantasy"
-        if "against " in lowered or "on the mound" in lowered or "facing " in lowered:
+        if "against " in lowered or "on the mound" in lowered or "facing " in lowered or " off " in lowered:
             return "pitcher"
         if "inning" in lowered or "swing" in lowered or "gap" in lowered or "equalizer" in lowered:
             return "context"
@@ -2590,15 +2601,34 @@ def build_hitter_summary(
                 return sentence
         return ""
 
-    for pool, forced_sig in [
+    # Build the ordered pool list — randomize where EV lands relative to fantasy/meta
+    # so the hard-hit sentence doesn't always appear last
+    ordered_pools: list[tuple[list[str], str | None]] = [
         (context_pool, "context"),
         (fantasy_pool, "fantasy"),
+    ]
+
+    # Insert quality (EV/trend) and meta (lineup/close game) in random order
+    extra_pools = [
         (meta_pool, None),
         (quality_pool, None),
-    ]:
+    ]
+    random.shuffle(extra_pools)
+    ordered_pools.extend(extra_pools)
+
+    for pool, forced_sig in ordered_pools:
         picked = _pick_unique(pool, forced_sig)
         if picked:
             sentences.append(picked)
+
+    # --- Inject pitcher sentence at a natural position (not always last) ---
+    if pitcher_sentence and "pitcher" not in used_signatures:
+        used_signatures.add("pitcher")
+        # Insert after sentence 1 (opener) ~50% of the time, otherwise append
+        if len(sentences) >= 2 and random.random() < 0.5:
+            sentences.insert(2, pitcher_sentence)
+        else:
+            sentences.append(pitcher_sentence)
 
     # --- Mid-game exit note ---
     if feed and hitter:
@@ -2642,13 +2672,15 @@ def build_hitter_summary(
             sentences[1] = f"{last_name}'s " + s[4:]
 
     standout = homers >= 2 or rbi >= 4 or hits >= 4 or steals >= 2 or (homers >= 1 and rbi >= 3)
-    max_sentences = 4 if standout else 3
+    max_sentences = 5 if standout else 4
 
-    # Only pad to minimum 2 — don't force filler if the story is already told
-    if len(sentences) < 2:
+    # Pad to minimum 3 sentences for non-quiet nights
+    while len(sentences) < 3:
         filler = _pick_unique(SUMMARY_FILLER_POOL, "filler")
         if filler:
             sentences.append(filler)
+        else:
+            break
 
     return " ".join(sentences[:max_sentences]).strip()
 
