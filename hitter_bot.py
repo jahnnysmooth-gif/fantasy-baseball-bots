@@ -2017,14 +2017,19 @@ def _starter_context_sentence(pitcher: dict | None, stats: dict, context: dict) 
     return random.choice([
         f"He did the damage against {name}.",
         f"The {event_phrase} came against {name}.",
-        f"{name} was on the mound, and he made him work.",
-        f"He built the night with {name} starting opposite him.",
+        f"{name} was on the mound, and he had a good night against him.",
         f"He got to {name} for the {event_phrase}.",
-        f"{name} started for the other side, and it was a good night for him.",
         f"He found his spots against {name}.",
-        f"The production came against {name}.",
-        f"He did his damage opposite {name}.",
-        f"The damage was done with {name} pitching.",
+        f"The production came with {name} pitching.",
+        f"He handled {name} well tonight.",
+        f"{name} couldn't slow him down.",
+        f"He made {name} pay for any mistake.",
+        f"The {event_phrase} came in a good at-bat against {name}.",
+        f"He was locked in against {name} tonight.",
+        f"{name} had no answer for him in the key spot.",
+        f"He put together a strong game with {name} on the other side.",
+        f"The matchup with {name} went in his favor tonight.",
+        f"He took {name} deep and never looked back.",
     ])
 
 
@@ -2617,6 +2622,19 @@ def _build_position_power_sentence(pos_phrase: str, stats: dict, hitter: dict | 
         f"You don't find that kind of thump {pos_phrase} very often",
         f"The homer carried extra weight because it came {pos_phrase}",
         f"Power {pos_phrase} is something teams pay a premium for",
+        f"That's a legitimately impressive swing {pos_phrase}",
+        f"The long ball {pos_phrase} is always going to stand out",
+        f"He's one of the few guys who can do that {pos_phrase}",
+        f"That kind of home run production {pos_phrase} is genuinely uncommon",
+        f"Clubs covet that kind of power {pos_phrase}",
+        f"Not a lot of lineups have someone who can do that {pos_phrase}",
+        f"The position makes the homer even more interesting",
+        f"That's a different kind of value when the power comes {pos_phrase}",
+        f"The damage {pos_phrase} is what separates him from most at that spot",
+        f"Finding that kind of pop {pos_phrase} is a real challenge for front offices",
+        f"The bat speed {pos_phrase} is elite",
+        f"That swing {pos_phrase} is the kind scouts remember",
+        f"He's built differently for that spot in the field",
     ])
 
     # Connect them naturally — always lowercase the second clause after a comma
@@ -3740,6 +3758,13 @@ def build_slump_summary(
         f"A hitter of his caliber will find a way out of this.",
     ]))
 
+    # Enforce minimum 2 sentences
+    if len(sentences) < 2:
+        sentences.append(random.choice([
+            f"He'll be worth monitoring closely over the next few games.",
+            f"A hitter of his caliber will find a way out of this.",
+            f"Slumps happen. The question is how long this one runs.",
+        ]))
     return " ".join(sentences[:4]).strip()
 
 
