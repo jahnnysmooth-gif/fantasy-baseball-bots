@@ -766,6 +766,13 @@ def build_hitter_game_context(feed: dict, hitter: dict) -> dict:
         if event_type in {"double", "triple"}:
             context["extra_base_hits"].append({"type": event_type, "inning": inning, "rbi": rbi})
 
+    decisive_play = _get_decisive_event(feed)
+    decisive_batter_id = ((decisive_play.get("matchup", {}) or {}).get("batter", {}) or {}).get("id") if decisive_play else None
+    if decisive_batter_id != hitter_id:
+        context["walkoff"] = False
+        context["go_ahead_hit"] = False
+        context["go_ahead_homer"] = False
+
     if context["hardest_ev"] is not None:
         context["hardest_ev"] = round(float(context["hardest_ev"]), 1)
     return context
@@ -1038,7 +1045,7 @@ def _position_phrase(position: str) -> str:
     return ""
 
 
-def _starter_context_sentence(pitcher: dict | None, homers: int, hits: int) -> str:
+def _starter_context_sentence(pitcher: dict | None, stats: dict, context: dict) -> str:
     if not pitcher or not pitcher.get("name"):
         return ""
     name = pitcher["name"]
@@ -1048,27 +1055,50 @@ def _starter_context_sentence(pitcher: dict | None, homers: int, hits: int) -> s
     except Exception:
         era = None
 
+    homers = safe_int(stats.get("homeRuns", 0), 0)
+    hits = safe_int(stats.get("hits", 0), 0)
+    doubles = safe_int(stats.get("doubles", 0), 0)
+    triples = safe_int(stats.get("triples", 0), 0)
+    rbi = safe_int(stats.get("rbi", 0), 0)
+
+    if homers >= 2:
+        event_phrase = "two-homer game"
+    elif homers == 1:
+        event_phrase = "homer"
+    elif triples >= 1:
+        event_phrase = "triple"
+    elif doubles >= 1 and rbi >= 2:
+        event_phrase = "run-scoring double"
+    elif doubles >= 1:
+        event_phrase = "double"
+    elif hits >= 3:
+        event_phrase = "three-hit game"
+    elif hits >= 2 and rbi >= 2:
+        event_phrase = "multi-hit game"
+    elif rbi >= 2:
+        event_phrase = "run-producing night"
+    else:
+        event_phrase = "line"
+
     if era is not None and era <= 3.50:
-        if homers:
-            return random.choice([
-                f"He did that damage against {name}, which adds a little more weight to the homer.",
-                f"It is worth noting the power came against {name}, not exactly a soft matchup.",
-            ])
-        if hits >= 3:
-            return random.choice([
-                f"That line looks a little better considering it came against {name}.",
-                f"He was not exactly picking on an easy matchup, as {name} was on the mound.",
-            ])
+        return random.choice([
+            f"Doing that against {name} adds a little more weight to the {event_phrase}.",
+            f"The {event_phrase} came against {name}, which is not exactly a soft matchup.",
+            f"There is a little more substance here because the {event_phrase} came against {name}.",
+            f"That {event_phrase} plays up a bit more given that {name} was on the mound.",
+            f"The quality of opponent matters here too, as the {event_phrase} came against {name}.",
+        ])
     if era is not None and era >= 5.00:
         return random.choice([
-            f"The matchup helped, as {name} has been hittable so far.",
-            f"It came against {name}, who has had a hard time keeping hitters quiet lately.",
+            f"The matchup helped a bit, as the {event_phrase} came against {name}.",
+            f"It came against {name}, who has been more hittable than most so far.",
+            f"The {event_phrase} came in a matchup that looked favorable on paper against {name}.",
         ])
     return random.choice([
+        f"The {event_phrase} came against {name}.",
         f"He did that work with {name} on the other side.",
-        f"The damage came against {name}.",
+        f"That production came facing {name}.",
     ])
-
 
 def _lineup_context_sentence(lineup_spot: int, stats: dict) -> str:
     runs = safe_int(stats.get("runs", 0), 0)
@@ -1138,7 +1168,6 @@ def _recent_trend_note(recent_games: list[dict], stats: dict) -> str:
 
     today_hits = safe_int(stats.get("hits", 0), 0)
     today_hr = safe_int(stats.get("homeRuns", 0), 0)
-    today_rbi = safe_int(stats.get("rbi", 0), 0)
     today_sb = safe_int(stats.get("stolenBases", 0), 0)
 
     streak_hits = 0
@@ -1149,6 +1178,30 @@ def _recent_trend_note(recent_games: list[dict], stats: dict) -> str:
             break
     hit_streak = streak_hits + (1 if today_hits > 0 else 0)
 
+    hr_streak = 0
+    for game in recent_games:
+        if game.get("hr", 0) > 0:
+            hr_streak += 1
+        else:
+            break
+    homer_streak = hr_streak + (1 if today_hr > 0 else 0)
+
+    sb_streak = 0
+    for game in recent_games:
+        if game.get("sb", 0) > 0:
+            sb_streak += 1
+        else:
+            break
+    steal_streak = sb_streak + (1 if today_sb > 0 else 0)
+
+    multi_hit_tail = 0
+    for game in recent_games:
+        if game.get("h", 0) >= 2:
+            multi_hit_tail += 1
+        else:
+            break
+    multi_hit_streak = multi_hit_tail + (1 if today_hits >= 2 else 0)
+
     hitless_tail = 0
     for game in recent_games:
         if game.get("h", 0) == 0:
@@ -1156,50 +1209,59 @@ def _recent_trend_note(recent_games: list[dict], stats: dict) -> str:
         else:
             break
 
-    recent_slice = recent_games[:5]
-    total_hits = sum(g.get("h", 0) for g in recent_slice) + today_hits
-    total_hr = sum(g.get("hr", 0) for g in recent_slice) + today_hr
-    total_rbi = sum(g.get("rbi", 0) for g in recent_slice) + today_rbi
-    total_sb = sum(g.get("sb", 0) for g in recent_slice) + today_sb
-    games = len(recent_slice) + 1
-
     if hitless_tail >= 3 and today_hits >= 2:
         return random.choice([
             "It looked like the kind of game that can pull a hitter out of a quiet stretch.",
             "After a few quieter games, this looked more like the hitter fantasy managers were hoping to see.",
+            "It had some bounce-back feel to it after a quieter run.",
+            "This looked like a step back in the right direction after a slower patch.",
+            "There was a little get-right energy to the line after a modest skid.",
         ])
-    if hit_streak >= 7 and today_hr >= 1:
+    if homer_streak >= 2:
         return random.choice([
-            f"He has now hit safely in {hit_streak} straight games and the power has come along for the ride.",
-            f"The streak is up to {hit_streak} games now, and this was one of the louder lines in the run.",
+            f"He has now homered in {homer_streak} straight games.",
+            f"The power has shown up in consecutive games now, with homers in {homer_streak} straight.",
+            f"He has taken the homer into another game, making it {homer_streak} in a row.",
+            f"The home-run swing has now traveled across {homer_streak} straight games.",
+            f"It is another homer, and that makes {homer_streak} straight games with one.",
         ])
-    if hit_streak >= 7:
+    if hit_streak >= 4:
         return random.choice([
             f"He has now hit safely in {hit_streak} straight games.",
             f"That pushes his hitting streak to {hit_streak} games.",
+            f"The steady contact has now produced a {hit_streak}-game hitting streak.",
+            f"Another game, another hit, and the streak is now {hit_streak} long.",
+            f"He continues to stack games with a hit, and the streak is now {hit_streak}.",
         ])
-    if games >= 5 and total_hr >= 3:
+    if multi_hit_streak >= 2:
         return random.choice([
-            f"He now has {total_hr} homers over his last {games} games.",
-            f"The power has shown up lately, with {total_hr} homers across his last {games} games.",
+            "This gives him back-to-back multi-hit efforts." if multi_hit_streak == 2 else f"He now has multi-hit games in {multi_hit_streak} straight contests.",
+            f"The multi-hit production has now carried into {multi_hit_streak} straight games.",
+            f"He has put together another multi-hit effort, making it {multi_hit_streak} in a row.",
+            f"There is some consistency building here, with multi-hit efforts in {multi_hit_streak} straight games.",
+            f"The recent form has produced another multi-hit line.",
         ])
-    if games >= 5 and total_sb >= 3:
+    if steal_streak >= 2:
         return random.choice([
-            f"He has also swiped {total_sb} bags over his last {games} games.",
-            f"The speed has shown up lately too, with {total_sb} steals over his last {games} games.",
+            f"He has now swiped a bag in {steal_streak} straight games.",
+            "The running game has shown up in consecutive contests now.",
+            f"He has taken a steal into another game, making it {steal_streak} straight with one.",
+            f"The speed has traveled from game to game here, with steals in {steal_streak} straight.",
+            f"Another game, another steal, and the streak is now {steal_streak}.",
         ])
-    if games >= 5 and total_hits >= 9:
+    if today_hr == 1 and today_hits >= 2:
         return random.choice([
-            f"That gives him {total_hits} hits over his last {games} games.",
-            f"He has been swinging it well lately, piling up {total_hits} hits over his last {games} games.",
+            "This was a nice little across-the-board line, with both the power and hit columns getting attention.",
+            "The line was not built on the homer alone, which makes it more appealing.",
+            "There was enough substance around the homer to make the line feel complete.",
         ])
-    if games >= 5 and total_rbi >= 9:
+    if today_sb >= 2:
         return random.choice([
-            f"He has also driven in {total_rbi} runs over his last {games} games.",
-            f"The run production has been there too, with {total_rbi} RBI over his last {games} games.",
+            "The speed element gave the line a lot of extra fantasy appeal.",
+            "Multiple steals can change the shape of a fantasy line in a hurry.",
+            "The legs added a lot of value on top of whatever he did with the bat.",
         ])
     return ""
-
 
 def build_hitter_subject(name: str, stats: dict, label: str, context: dict, recent_games: list[dict], position: str = "", lineup_spot: int = 0) -> str:
     hits = safe_int(stats.get("hits", 0), 0)
@@ -1367,6 +1429,41 @@ def _build_summary_opening(name: str, stats: dict, context: dict, opponent_text:
 
 
 
+def _event_specific_ev_sentence(context: dict, hardest_ev: float | None) -> str:
+    if not hardest_ev:
+        return ""
+    homers = context.get("homers") or []
+    xbh = context.get("extra_base_hits") or []
+    if homers:
+        inning = safe_int(homers[0].get("inning", 0), 0)
+        inning_text = f" in the {_ordinal(inning)}" if inning else ""
+        return random.choice([
+            f"He also crushed a homer{inning_text} at {hardest_ev:.1f} mph off the bat.",
+            f"The loudest swing of the night was his {hardest_ev:.1f} mph homer{inning_text}.",
+            f"His hardest-hit ball was a homer{inning_text} that left the bat at {hardest_ev:.1f} mph.",
+            f"He backed up the line with a {hardest_ev:.1f} mph homer{inning_text}.",
+            f"The power showed up on a homer{inning_text} struck at {hardest_ev:.1f} mph.",
+        ])
+    if xbh:
+        first = xbh[0]
+        hit_type = "double" if first.get("type") == "double" else "triple"
+        inning = safe_int(first.get("inning", 0), 0)
+        inning_text = f" in the {_ordinal(inning)}" if inning else ""
+        return random.choice([
+            f"He also ripped a {hit_type}{inning_text} with an exit velocity of {hardest_ev:.1f} mph.",
+            f"The hardest contact came on a {hit_type}{inning_text} struck at {hardest_ev:.1f} mph.",
+            f"He drilled a {hit_type}{inning_text} that left the bat at {hardest_ev:.1f} mph.",
+            f"The loudest swing of his night was a {hardest_ev:.1f} mph {hit_type}{inning_text}.",
+            f"He smoked a {hit_type}{inning_text} at {hardest_ev:.1f} mph.",
+        ])
+    return random.choice([
+        f"He also produced a top exit velocity of {hardest_ev:.1f} mph.",
+        f"One of his loudest swings left the bat at {hardest_ev:.1f} mph.",
+        f"He backed up the production with a hardest-hit ball of {hardest_ev:.1f} mph.",
+        f"The contact quality stood out too, highlighted by a {hardest_ev:.1f} mph rocket.",
+    ])
+
+
 def build_hitter_summary(
     name: str,
     team: str,
@@ -1487,15 +1584,18 @@ def build_hitter_summary(
         ])
     else:
         fantasy_options.extend([
-            "It was a useful fantasy line, even if it was not the loudest performance on the board.",
-            "There was enough across the line here to make it a worthwhile fantasy performance.",
+            "There was enough across the board here to make it a meaningful fantasy performance.",
+            "Even without being the biggest stat line of the night, there was still useful category juice here.",
+            "The overall production still played in fantasy leagues, especially in deeper formats.",
+            "It may not have been the loudest game of the night, but it still helped in several categories.",
+            "It was still the kind of line that can help in multiple fantasy categories.",
         ])
 
     meta_options: list[str] = []
     lineup_sentence = _lineup_context_sentence(lineup_spot, stats)
     if lineup_sentence:
         meta_options.append(lineup_sentence)
-    starter_sentence = _starter_context_sentence(pitcher, homers, hits)
+    starter_sentence = _starter_context_sentence(pitcher, stats, context)
     if starter_sentence:
         meta_options.append(starter_sentence)
     close_game_sentence = _close_game_context(team_score, opp_score, team_won, context, rbi)
@@ -1504,27 +1604,59 @@ def build_hitter_summary(
 
     quality_options: list[str] = []
     if hardest_ev and hardest_ev >= 108:
-        quality_options.extend([
-            f"He also produced a top exit velocity of {hardest_ev:.1f} mph.",
-            f"The contact quality was there too, as his hardest-hit ball left the bat at {hardest_ev:.1f} mph.",
-        ])
+        quality_options.append(_event_specific_ev_sentence(context, hardest_ev))
     elif balls_100 >= 3:
         quality_options.extend([
             f"He also put {balls_100} balls in play at 100-plus mph.",
             f"The quality of contact stood out as well, with {balls_100} batted balls at 100-plus mph.",
+            f"He backed up the line by producing {balls_100} balls at 100-plus mph.",
+            f"There was some real quality of contact here too, including {balls_100} batted balls over 100 mph.",
         ])
 
     trend_note = _recent_trend_note(recent_games, stats)
     if trend_note:
         quality_options.append(trend_note)
 
+    used_signatures: set[str] = set()
+
+    def _sig(sentence: str) -> str:
+        lowered = sentence.lower()
+        if "lead for good" in lowered or "ultimately decided" in lowered or "proved to be the difference" in lowered:
+            return "decisive"
+        if "walk-off" in lowered:
+            return "walkoff"
+        if "mph" in lowered or "exit velocity" in lowered:
+            return "ev"
+        if "leadoff" in lowered or "middle of the order" in lowered or "heart of the order" in lowered or "bottom third" in lowered:
+            return "lineup"
+        if "streak" in lowered or "quiet stretch" in lowered or "swiped" in lowered:
+            return "trend"
+        if "fantasy" in lowered or "category" in lowered:
+            return "fantasy"
+        return lowered
+
     for pool in [context_options, fantasy_options, meta_options, quality_options]:
         for sentence in pool:
-            if sentence and sentence not in sentences:
+            if sentence and sentence not in sentences and _sig(sentence) not in used_signatures:
                 sentences.append(sentence)
+                used_signatures.add(_sig(sentence))
                 break
 
-    return " ".join(sentences[:4]).strip()
+    standout = homers >= 2 or rbi >= 4 or hits >= 4 or steals >= 2 or (homers >= 1 and rbi >= 3)
+    max_sentences = 5 if standout else 4
+    filler_pool = [
+        "The line had enough real-game and fantasy value to stand up on its own.",
+        "There was enough substance here that the production did not feel empty.",
+        "This was a line with both baseball and fantasy weight behind it.",
+        "There was enough here for the line to hold up both in real-game terms and in fantasy leagues.",
+    ]
+    while len(sentences) < 4:
+        for filler in filler_pool:
+            if filler not in sentences:
+                sentences.append(filler)
+                break
+
+    return " ".join(sentences[:max_sentences]).strip()
 
 # ---------------- EMBED POSTING ----------------
 
