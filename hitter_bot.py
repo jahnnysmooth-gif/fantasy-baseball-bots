@@ -1661,12 +1661,13 @@ def _close_game_context(team_score: int, opp_score: int, team_won: bool, context
     return ""
 
 
+
 def _recent_trend_note(recent_games: list[dict], stats: dict) -> str:
     if not recent_games:
         return ""
 
     recent_slice = recent_games[:5]
-    if len(recent_slice) < 2:
+    if len(recent_slice) < 3:
         return ""
 
     today_hits = safe_int(stats.get("hits", 0), 0)
@@ -1719,10 +1720,7 @@ def _recent_trend_note(recent_games: list[dict], stats: dict) -> str:
     if hit_streak >= 4:
         return random.choice(TREND_FAMILIES["hit_streak"]).format(n=hit_streak)
     if multi_hit_streak >= 2:
-        n = multi_hit_streak
-        pool = TREND_FAMILIES["multi_hit_streak"]
-        templates = [t for t in pool if "{n}" in t or "back-to-back" in t or "another multi-hit" in t]
-        return random.choice(templates).format(n=n)
+        return random.choice(TREND_FAMILIES["multi_hit_streak"]).format(n=multi_hit_streak)
     if steal_streak >= 2:
         return random.choice(TREND_FAMILIES["steal_streak"]).format(n=steal_streak)
     if today_hr == 1 and today_hits >= 2:
@@ -1953,85 +1951,280 @@ def build_hitter_subject(name: str, stats: dict, label: str, context: dict, rece
 
 
 
+
+
+SUMMARY_OPENING_FAMILIES = {
+    "walkoff": [
+        "{name} went {stat_phrase} in {possessive} win over the {opponent_text}, ending the game with the walk-off swing.",
+        "{name} finished {stat_phrase} as the {team_name} beat the {opponent_text}, and his final swing ended it.",
+        "{name} turned in a {stat_phrase} line in {possessive} win over the {opponent_text}, then put the game away in the final at-bat.",
+        "{name} delivered a {stat_phrase} line in {possessive} win over the {opponent_text}, with the last swing serving as the game-winner.",
+        "{name} went {stat_phrase} in {possessive} win over the {opponent_text}, then ended it himself in the final frame.",
+        "{name} built a {stat_phrase} line in {possessive} win over the {opponent_text}, and the last swing was the one everyone remembered.",
+        "{name} finished {stat_phrase} in {possessive} win over the {opponent_text}, punctuating the night with the walk-off hit.",
+        "{name} turned in a {stat_phrase} line as the {team_name} beat the {opponent_text}, and he handled the final swing too.",
+        "{name} put together a {stat_phrase} line in {possessive} win over the {opponent_text}, then delivered the game-ending moment.",
+        "{name} went {stat_phrase} in {possessive} win over the {opponent_text}, with the walk-off swing serving as the finishing touch.",
+        "{name} finished {stat_phrase} in {possessive} win over the {opponent_text}, and he made sure the final at-bat belonged to him.",
+        "{name} built a {stat_phrase} line in {possessive} win over the {opponent_text}, then closed the book with the walk-off swing.",
+        "{name} turned in a {stat_phrase} line as the {team_name} beat the {opponent_text}, capping it with the final blow.",
+        "{name} went {stat_phrase} in {possessive} win over the {opponent_text}, and his last swing was the difference.",
+        "{name} gave the {team_name} a {stat_phrase} line in the win over the {opponent_text}, then ended it himself.",
+    ],
+    "go_ahead_homer": [
+        "{name} went {stat_phrase} in {possessive} win over the {opponent_text}, with his homer providing the swing that decided the game.",
+        "{name} finished {stat_phrase} as the {team_name} beat the {opponent_text}, and his homer changed the shape of the night.",
+        "{name} turned in a {stat_phrase} line in {possessive} win over the {opponent_text}, with his biggest damage coming on the decisive swing.",
+        "{name} built a {stat_phrase} line in {possessive} win over the {opponent_text}, and the homer proved to be the turning point.",
+        "{name} went {stat_phrase} in {possessive} win over the {opponent_text}, with the long ball standing up as the key swing.",
+        "{name} finished {stat_phrase} in {possessive} win over the {opponent_text}, and the homer ended up carrying the most weight.",
+        "{name} turned in a {stat_phrase} line as the {team_name} beat the {opponent_text}, with the homer serving as the difference-maker.",
+        "{name} gave the {team_name} a {stat_phrase} line in the win over the {opponent_text}, and his homer was the loudest moment.",
+        "{name} posted a {stat_phrase} line in {possessive} win over the {opponent_text}, with the homer proving to be enough.",
+        "{name} built a {stat_phrase} line in {possessive} win over the {opponent_text}, and the game turned on his homer.",
+        "{name} went {stat_phrase} in {possessive} win over the {opponent_text}, and the long ball tilted the game for good.",
+        "{name} finished {stat_phrase} as the {team_name} beat the {opponent_text}, with the homer putting a permanent swing into the scoreboard.",
+        "{name} came away with a {stat_phrase} line in {possessive} win over the {opponent_text}, and his homer ended up being the one that held.",
+        "{name} built a {stat_phrase} line in the win over the {opponent_text}, with the homer carrying decisive weight.",
+        "{name} turned in a {stat_phrase} performance in {possessive} win over the {opponent_text}, and the homer was the lasting swing.",
+    ],
+    "go_ahead_hit": [
+        "{name} went {stat_phrase} in {possessive} win over the {opponent_text}, and he came through with the hit that ultimately decided it.",
+        "{name} finished {stat_phrase} as the {team_name} beat the {opponent_text}, with his biggest contribution arriving in a key late spot.",
+        "{name} turned in a {stat_phrase} line in {possessive} win over the {opponent_text}, and his go-ahead hit proved to be the difference.",
+        "{name} built a {stat_phrase} line in {possessive} win over the {opponent_text}, with the deciding hit standing out above the rest.",
+        "{name} went {stat_phrase} in {possessive} win over the {opponent_text}, and his key hit ended up holding all the way through.",
+        "{name} finished {stat_phrase} in {possessive} win over the {opponent_text}, with his most important swing coming in the biggest spot.",
+        "{name} turned in a {stat_phrase} line as the {team_name} beat the {opponent_text}, and the go-ahead knock gave the box score its shape.",
+        "{name} gave the {team_name} a {stat_phrase} line in the win over the {opponent_text}, and his biggest hit came when the game was still hanging there.",
+        "{name} posted a {stat_phrase} line in {possessive} win over the {opponent_text}, and his timely hit ended up being the one that stood.",
+        "{name} built a {stat_phrase} line in the win over the {opponent_text}, with the most valuable piece coming on the go-ahead hit.",
+        "{name} went {stat_phrase} in {possessive} win over the {opponent_text}, and his key knock turned into the deciding moment.",
+        "{name} finished {stat_phrase} as the {team_name} beat the {opponent_text}, with the biggest hit coming exactly when it needed to.",
+        "{name} turned in a {stat_phrase} performance in the win over the {opponent_text}, and his biggest swing came in the deciding spot.",
+        "{name} came away with a {stat_phrase} line in {possessive} win over the {opponent_text}, and his key hit pushed the game in the right direction for good.",
+        "{name} built a {stat_phrase} line in the victory over the {opponent_text}, and the go-ahead hit gave the line real weight.",
+    ],
+    "game_tying": [
+        "{name} went {stat_phrase} against the {opponent_text}, helping the {team_name} stay in the game with a key equalizer.",
+        "{name} finished {stat_phrase} against the {opponent_text}, and one of his biggest swings pulled the {team_name} back even.",
+        "{name} turned in a {stat_phrase} line against the {opponent_text}, and his biggest hit came when the {team_name} needed to claw back.",
+        "{name} built a {stat_phrase} line against the {opponent_text}, with the game-tying hit standing out the most.",
+        "{name} went {stat_phrase} against the {opponent_text}, and his biggest swing brought the {team_name} back to level footing.",
+        "{name} finished {stat_phrase} against the {opponent_text}, with the equalizer becoming the most important part of the line.",
+        "{name} turned in a {stat_phrase} line against the {opponent_text}, and the tying hit changed the feel of the night.",
+        "{name} gave the {team_name} a {stat_phrase} line against the {opponent_text}, and his biggest swing erased the deficit.",
+        "{name} posted a {stat_phrase} line against the {opponent_text}, with the most important moment coming when he tied it.",
+        "{name} built a {stat_phrase} line against the {opponent_text}, and the equalizer put the game back on even terms.",
+        "{name} went {stat_phrase} against the {opponent_text}, and his best swing arrived when the game needed to be reset.",
+        "{name} finished {stat_phrase} against the {opponent_text}, with the tying moment giving the line some real leverage.",
+        "{name} turned in a {stat_phrase} performance against the {opponent_text}, and his most meaningful hit wiped out the gap.",
+        "{name} came away with a {stat_phrase} line against the {opponent_text}, and his key swing gave the {team_name} another breath.",
+        "{name} built a {stat_phrase} line against the {opponent_text}, with the tying hit giving the night a lot of its shape.",
+    ],
+    "general": OPENING_FAMILY_POOL,
+}
+
+SUMMARY_CONTEXT_FAMILIES = CONTEXT_FAMILY_POOL
+
+POSITION_POWER_FAMILIES = [
+    "That kind of pop {pos_phrase} will get noticed in fantasy leagues.",
+    "Power {pos_phrase} is not something fantasy managers ignore for long.",
+    "There is extra fantasy value when that kind of damage comes {pos_phrase}.",
+    "That is a useful kind of power to see {pos_phrase}.",
+    "The homer carried some extra weight because it came {pos_phrase}.",
+    "Fantasy managers always notice when power shows up {pos_phrase}.",
+    "It is not every day you get that kind of thump {pos_phrase}.",
+    "There is some added fantasy appeal when the damage comes {pos_phrase}.",
+    "The positional angle made the power play up even more.",
+    "The power stood out a bit more because of where it came from defensively.",
+    "There was some position-scarcity value tied into the power here.",
+    "The homer played up because the position does not always offer that much thump.",
+    "The fantasy value climbed a little because of the position attached to the damage.",
+    "The lineup got some uncommon pop from that defensive spot.",
+    "The position only made the power more useful.",
+]
+
+FANTASY_FAMILIES = {
+    "two_homer": FANTASY_CLOSING_POOL + [
+        "Two-homer games like this will always stand out on a fantasy slate.",
+        "That kind of power output is going to move the needle in any format.",
+        "A multi-homer game does a lot of category work in one shot.",
+        "This was the sort of power game that can win a fantasy matchup by itself.",
+        "There is no such thing as a quiet two-homer line in fantasy leagues.",
+        "A pair of homers is enough to make this one of the louder fantasy lines of the day.",
+        "The power alone was enough to make this line matter in a big way.",
+        "This is exactly the kind of power spike that swings categories.",
+        "A game with this much thump tends to carry itself in fantasy terms.",
+        "The home-run output put a lot of weight behind the rest of the line.",
+    ],
+    "impact_homer": [
+        "Most of his fantasy value came on one swing, but it was a massive one.",
+        "It was the sort of line that can move the needle quickly in fantasy leagues.",
+        "A homer with that kind of RBI support tends to do a lot of work in the box score.",
+        "The long ball did plenty of lifting here, especially with the RBI attached.",
+        "That is the kind of swing that can make an entire fantasy line look different.",
+        "The homer gave the whole box score some real category punch.",
+        "One swing did a lot of the heavy lifting for the fantasy value here.",
+        "The power and RBI pairing gave the line plenty of fantasy weight.",
+        "That much damage on one swing tends to play in any format.",
+        "The line picked up real fantasy force once the homer came with runners on.",
+        "The RBI attached to the homer made the whole line play up a level.",
+        "The big swing turned a good line into a highly useful one.",
+        "There was enough impact behind the homer to make the line matter everywhere.",
+        "The power came with enough run production to make it a real fantasy result.",
+        "That one swing carried enough damage to define the night.",
+    ],
+    "four_hit": [
+        "He was on base all night, which is exactly the kind of volume fantasy managers want to see.",
+        "A four-hit game is going to matter in any format, even without multiple homers attached.",
+        "That kind of hit volume can carry a fantasy line all by itself.",
+        "There is a lot of category value packed into a four-hit game.",
+        "A line built on that much contact tends to play everywhere.",
+        "Four hits is enough to put real pressure on multiple categories.",
+        "The volume of contact gave this line a lot of fantasy utility.",
+        "This was the kind of hit total that can quietly swing a week.",
+        "There was a lot of category help packed into the hit count alone.",
+        "A four-hit game usually takes care of itself in fantasy terms.",
+        "The line had plenty of value simply because he kept stacking hits.",
+        "That level of hit volume gave the line a strong fantasy floor.",
+        "There was no shortage of category help once the fourth hit showed up.",
+        "The box score got very fantasy-friendly once the hit total kept climbing.",
+        "It is hard for a four-hit game not to matter in a fantasy matchup.",
+    ],
+    "three_hit_xbh": [
+        "It was not just a volume game either, as he mixed in real extra-base damage.",
+        "Hits and extra-base damage together make this one of the cleaner fantasy lines of the day.",
+        "The line played up because it mixed hit volume with impact contact.",
+        "There was more than just batting average help here, thanks to the extra-base work.",
+        "Three hits with some thump behind them will usually play in fantasy leagues.",
+        "The extra-base damage kept the line from feeling one-dimensional.",
+        "There was enough impact in the quality of contact to go with the hit total.",
+        "A multi-hit line gets more interesting fast when the extra-base work shows up too.",
+        "The line had both quantity and punch, which is a good fantasy combination.",
+        "That blend of contact and damage gave the line a strong overall shape.",
+        "The extra-base component made this more useful than a basic multi-hit game.",
+        "The line carried a little more fantasy force because the hits were not all singles.",
+        "That is a strong mix of hit volume and impact for fantasy purposes.",
+        "There was enough damage behind the hits to make the line stand out.",
+        "The overall shape of the line was stronger because the contact came with some authority.",
+    ],
+    "three_hit": [
+        "Multi-hit games like this still matter, especially for managers chasing average and runs.",
+        "He kept the line moving all night and gave fantasy managers a little of everything.",
+        "Three-hit games still carry a lot of value, even without a huge power spike.",
+        "There was a steady kind of fantasy usefulness to the way he built this line.",
+        "It was a strong batting-average line with enough around it to matter elsewhere.",
+        "The contact volume did most of the fantasy work here, and that is fine.",
+        "This was the kind of simple, useful multi-hit game that holds up well.",
+        "Three hits tend to take care of a lot of fantasy business on their own.",
+        "There was enough hit volume here to make the line matter in a lot of places.",
+        "The line gave a steady push to several categories without needing a huge swing.",
+        "A clean multi-hit game like this still carries useful fantasy weight.",
+        "The line did not need a homer to hold up because the contact was steady enough.",
+        "There was some real value in the hit total even before looking at the rest.",
+        "A lot of the fantasy appeal came from the simple fact that he kept hitting.",
+        "The line leaned on contact more than thunder, but it still played.",
+    ],
+    "speed": [
+        "Even without a huge hit total, the speed made the line play up in fantasy.",
+        "His legs did a lot of the fantasy heavy lifting here.",
+        "Two steals can change the shape of a fantasy line in a hurry.",
+        "The speed element did a lot to elevate the overall value of the line.",
+        "The running game gave this one some real category juice.",
+        "The steals alone added a lot of fantasy force to the box score.",
+        "There was a lot of added value once the speed showed up more than once.",
+        "A multi-steal game tends to matter fast in fantasy leagues.",
+        "The legs gave the whole line more category impact.",
+        "That much speed can do serious work for a fantasy matchup.",
+        "The steals turned a decent line into a much more useful one.",
+        "There was extra fantasy life in the line because of the running game.",
+        "The line picked up a lot of value once the steals stacked up.",
+        "Multiple steals gave the box score a lot more fantasy appeal.",
+        "The speed transformed the line into something much more useful.",
+    ],
+    "walks": [
+        "The hit total was light, but the on-base work still gave the line some fantasy usefulness.",
+        "There is sneaky value in a line like this when the walks pile up.",
+        "The on-base work did a fair amount of the lifting here.",
+        "Even without a lot of hits, the plate discipline kept the line usable.",
+        "Walks like that can quietly make a fantasy line hold up.",
+        "There was some useful value in simply reaching base that often.",
+        "The line did not need a lot of hits to stay fantasy-relevant.",
+        "The patience helped keep the floor of the line intact.",
+        "There was a little more fantasy value here than the hit total alone would suggest.",
+        "The on-base component gave the line some quiet usefulness.",
+        "That much traffic on the bases can still matter in fantasy terms.",
+        "The box score held together because of the plate discipline.",
+        "The line found a way to stay useful through on-base volume.",
+        "There was some subtle fantasy help here because of the walks.",
+        "The hit total did not tell the whole story once the walks were added in.",
+    ],
+    "general": FANTASY_CLOSING_POOL,
+}
+
+QUALITY_100_FAMILIES = [
+    "He also put {balls_100} balls in play at 100-plus mph.",
+    "The quality of contact stood out as well, with {balls_100} batted balls at 100-plus mph.",
+    "He backed up the line by producing {balls_100} balls at 100-plus mph.",
+    "There was some real quality of contact here too, including {balls_100} batted balls over 100 mph.",
+    "The contact quality was there in a big way, with {balls_100} balls struck at 100-plus mph.",
+    "He paired the production with {balls_100} balls off the bat at triple-digit exit velocities.",
+    "The line came with some real authority too, as he produced {balls_100} 100-plus mph batted balls.",
+    "Quality of contact was part of the story too, with {balls_100} balls leaving the bat at 100-plus mph.",
+    "He did not just produce; he hit the ball hard too, logging {balls_100} batted balls over 100 mph.",
+    "The contact quality supported the box score, including {balls_100} triple-digit bolts.",
+    "He gave the line some extra support by hitting {balls_100} balls at 100-plus mph.",
+    "The line looked even better once the quality of contact was factored in, including {balls_100} triple-digit batted balls.",
+    "He added some hard-contact backing with {balls_100} balls at 100-plus mph.",
+    "The batted-ball quality kept pace with the box score, including {balls_100} balls over 100 mph.",
+    "He paired the final line with {balls_100} examples of triple-digit contact.",
+]
+
+SUMMARY_FILLER_POOL = [
+    "The line had enough real-game and fantasy value to stand up on its own.",
+    "There was enough substance here that the production did not feel empty.",
+    "This was a line with both baseball and fantasy weight behind it.",
+    "There was enough here for the line to hold up both in real-game terms and in fantasy leagues.",
+    "The overall line carried more than just surface-level fantasy value.",
+    "There was enough shape to the box score for it to matter in several places.",
+    "The line brought more than just one isolated category to the table.",
+    "This was not just noise in the box score; there was some real weight to it.",
+    "The production came with enough substance to hold up under a closer look.",
+    "The final line felt useful for more than one reason.",
+    "There was enough underneath the box score to make the line feel legitimate.",
+    "It was a line with some real structure behind it.",
+    "The production did not need much help to look useful in fantasy terms.",
+    "This was the kind of line that can hold up beyond the headline stat.",
+    "The line brought a little more to the table than a simple box-score glance might suggest.",
+]
+
+
 def _build_summary_opening(name: str, stats: dict, context: dict, opponent_text: str, team_name: str, team_won: bool) -> str:
     stat_phrase = _stat_phrase(stats)
     possessive = team_possessive(team_name)
 
     if context.get("walkoff"):
-        return random.choice([
-            f"{name} went {stat_phrase} in {possessive} win over the {opponent_text}, ending the game with the walk-off swing.",
-            f"{name} finished {stat_phrase} as the {team_name} beat the {opponent_text}, and his final swing ended it.",
-            f"{name} turned in a {stat_phrase} line in {possessive} win over the {opponent_text}, then put the game away in the final at-bat.",
-            f"{name} delivered a {stat_phrase} line in {possessive} win over the {opponent_text}, with the last swing serving as the game-winner.",
-            f"{name} went {stat_phrase} in {possessive} win over the {opponent_text}, then ended it himself in the final frame.",
-            f"{name} built a {stat_phrase} line in {possessive} win over the {opponent_text}, and the last swing was the one everyone remembered.",
-            f"{name} finished {stat_phrase} in {possessive} win over the {opponent_text}, punctuating the night with the walk-off hit.",
-            f"{name} turned in a {stat_phrase} line as the {team_name} beat the {opponent_text}, and he handled the final swing too.",
-            f"{name} put together a {stat_phrase} line in {possessive} win over the {opponent_text}, then delivered the game-ending moment.",
-            f"{name} went {stat_phrase} in {possessive} win over the {opponent_text}, with the walk-off swing serving as the finishing touch.",
-            f"{name} finished {stat_phrase} in {possessive} win over the {opponent_text}, and he made sure the final at-bat belonged to him.",
-            f"{name} built a {stat_phrase} line in {possessive} win over the {opponent_text}, then closed the book with the walk-off swing.",
-            f"{name} turned in a {stat_phrase} line as the {team_name} beat the {opponent_text}, capping it with the final blow.",
-            f"{name} went {stat_phrase} in {possessive} win over the {opponent_text}, and his last swing was the difference.",
-            f"{name} gave the {team_name} a {stat_phrase} line in the win over the {opponent_text}, then ended it himself.",
-        ])
-    if context.get("go_ahead_homer"):
-        return random.choice([
-            f"{name} went {stat_phrase} in {possessive} win over the {opponent_text}, with his homer providing the swing that decided the game.",
-            f"{name} finished {stat_phrase} as the {team_name} beat the {opponent_text}, and his homer changed the shape of the night.",
-            f"{name} turned in a {stat_phrase} line in {possessive} win over the {opponent_text}, with his biggest damage coming on the decisive swing.",
-            f"{name} built a {stat_phrase} line in {possessive} win over the {opponent_text}, and the homer proved to be the turning point.",
-            f"{name} went {stat_phrase} in {possessive} win over the {opponent_text}, with the long ball standing up as the key swing.",
-            f"{name} finished {stat_phrase} in {possessive} win over the {opponent_text}, and the homer ended up carrying the most weight.",
-            f"{name} turned in a {stat_phrase} line as the {team_name} beat the {opponent_text}, with the homer serving as the difference-maker.",
-            f"{name} gave the {team_name} a {stat_phrase} line in the win over the {opponent_text}, and his homer was the loudest moment.",
-            f"{name} posted a {stat_phrase} line in {possessive} win over the {opponent_text}, with the homer proving to be enough.",
-            f"{name} built a {stat_phrase} line in {possessive} win over the {opponent_text}, and the game turned on his homer.",
-            f"{name} went {stat_phrase} in {possessive} win over the {opponent_text}, and the long ball tilted the game for good.",
-            f"{name} finished {stat_phrase} as the {team_name} beat the {opponent_text}, with the homer putting a permanent swing into the scoreboard.",
-            f"{name} came away with a {stat_phrase} line in {possessive} win over the {opponent_text}, and his homer ended up being the one that held.",
-            f"{name} built a {stat_phrase} line in the win over the {opponent_text}, with the homer carrying decisive weight.",
-            f"{name} turned in a {stat_phrase} performance in {possessive} win over the {opponent_text}, and the homer was the lasting swing.",
-        ])
-    if context.get("go_ahead_hit"):
-        return random.choice([
-            f"{name} went {stat_phrase} in {possessive} win over the {opponent_text}, and he came through with the hit that ultimately decided it.",
-            f"{name} finished {stat_phrase} as the {team_name} beat the {opponent_text}, with his biggest contribution arriving in a key late spot.",
-            f"{name} turned in a {stat_phrase} line in {possessive} win over the {opponent_text}, and his go-ahead hit proved to be the difference.",
-            f"{name} built a {stat_phrase} line in {possessive} win over the {opponent_text}, with the deciding hit standing out above the rest.",
-            f"{name} went {stat_phrase} in {possessive} win over the {opponent_text}, and his key hit ended up holding all the way through.",
-            f"{name} finished {stat_phrase} in {possessive} win over the {opponent_text}, with his most important swing coming in the biggest spot.",
-            f"{name} turned in a {stat_phrase} line as the {team_name} beat the {opponent_text}, and the go-ahead knock gave the box score its shape.",
-            f"{name} gave the {team_name} a {stat_phrase} line in the win over the {opponent_text}, and his biggest hit came when the game was still hanging there.",
-            f"{name} posted a {stat_phrase} line in {possessive} win over the {opponent_text}, and his timely hit ended up being the one that stood.",
-            f"{name} built a {stat_phrase} line in the win over the {opponent_text}, with the most valuable piece coming on the go-ahead hit.",
-            f"{name} went {stat_phrase} in {possessive} win over the {opponent_text}, and his key knock turned into the deciding moment.",
-            f"{name} finished {stat_phrase} as the {team_name} beat the {opponent_text}, with the biggest hit coming exactly when it needed to.",
-            f"{name} turned in a {stat_phrase} performance in the win over the {opponent_text}, and his biggest swing came in the deciding spot.",
-            f"{name} came away with a {stat_phrase} line in {possessive} win over the {opponent_text}, and his key hit pushed the game in the right direction for good.",
-            f"{name} built a {stat_phrase} line in the victory over the {opponent_text}, and the go-ahead hit gave the line real weight.",
-        ])
-    if context.get("game_tying_hit"):
-        return random.choice([
-            f"{name} went {stat_phrase} against the {opponent_text}, helping the {team_name} stay in the game with a key equalizer.",
-            f"{name} finished {stat_phrase} against the {opponent_text}, and one of his biggest swings pulled the {team_name} back even.",
-            f"{name} turned in a {stat_phrase} line against the {opponent_text}, and his biggest hit came when the {team_name} needed to claw back.",
-            f"{name} built a {stat_phrase} line against the {opponent_text}, with the game-tying hit standing out the most.",
-            f"{name} went {stat_phrase} against the {opponent_text}, and his biggest swing brought the {team_name} back to level footing.",
-            f"{name} finished {stat_phrase} against the {opponent_text}, with the equalizer becoming the most important part of the line.",
-            f"{name} turned in a {stat_phrase} line against the {opponent_text}, and the tying hit changed the feel of the night.",
-            f"{name} gave the {team_name} a {stat_phrase} line against the {opponent_text}, and his biggest swing erased the deficit.",
-            f"{name} posted a {stat_phrase} line against the {opponent_text}, with the most important moment coming when he tied it.",
-            f"{name} built a {stat_phrase} line against the {opponent_text}, and the equalizer put the game back on even terms.",
-            f"{name} went {stat_phrase} against the {opponent_text}, and his best swing arrived when the game needed to be reset.",
-            f"{name} finished {stat_phrase} against the {opponent_text}, with the tying moment giving the line some real leverage.",
-            f"{name} turned in a {stat_phrase} performance against the {opponent_text}, and his most meaningful hit wiped out the gap.",
-            f"{name} came away with a {stat_phrase} line against the {opponent_text}, and his key swing gave the {team_name} another breath.",
-            f"{name} built a {stat_phrase} line against the {opponent_text}, with the tying hit giving the night a lot of its shape.",
-        ])
+        family = "walkoff"
+    elif context.get("go_ahead_homer"):
+        family = "go_ahead_homer"
+    elif context.get("go_ahead_hit"):
+        family = "go_ahead_hit"
+    elif context.get("game_tying_hit"):
+        family = "game_tying"
+    else:
+        family = "general"
 
     result_phrase = f"in {possessive} win over the {opponent_text}" if team_won else f"in {possessive} loss to the {opponent_text}"
-    return random.choice(OPENING_FAMILY_POOL).format(name=name, stat_phrase=stat_phrase, result_phrase=result_phrase)
+    template = random.choice(SUMMARY_OPENING_FAMILIES[family])
+    return template.format(
+        name=name,
+        stat_phrase=stat_phrase,
+        opponent_text=opponent_text,
+        team_name=team_name,
+        possessive=possessive,
+        result_phrase=result_phrase,
+    )
 
 
 def _event_specific_ev_sentence(context: dict, hardest_ev: float | None) -> str:
@@ -2151,195 +2344,54 @@ def build_hitter_summary(
         _build_summary_opening(name, stats, context, opponent_text, team_name, team_won)
     ]
 
-    context_options: list[str] = []
+    used_signatures: set[str] = {"opening"}
+
     event_text, inning_text = _event_text_from_context(context)
+    context_pool: list[str] = []
     if event_text:
-        for template in CONTEXT_FAMILY_POOL:
-            context_options.append(template.format(event_text=event_text, inning_text=inning_text or ""))
+        for template in SUMMARY_CONTEXT_FAMILIES:
+            context_pool.append(template.format(event_text=event_text, inning_text=inning_text or ""))
 
-    if pos_phrase and homers >= 1:
-        context_options.extend([
-            f"That kind of pop {pos_phrase} will get noticed in fantasy leagues.",
-            f"Power {pos_phrase} is not something fantasy managers ignore for long.",
-            f"There is extra fantasy value when that kind of damage comes {pos_phrase}.",
-            f"That is a useful kind of power to see {pos_phrase}.",
-            f"The homer carried some extra weight because it came {pos_phrase}.",
-            f"Fantasy managers always notice when power shows up {pos_phrase}.",
-            f"It is not every day you get that kind of thump {pos_phrase}.",
-            f"There is some added fantasy appeal when the damage comes {pos_phrase}.",
-            f"The positional angle made the power play up even more.",
-            f"The power stood out a bit more because of where it came from defensively.",
-            f"There was some position-scarcity value tied into the power here.",
-            f"The homer played up because the position does not always offer that much thump.",
-            f"The fantasy value climbed a little because of the position attached to the damage.",
-            f"The lineup got some uncommon pop from that defensive spot.",
-            f"The position only made the power more useful.",
-        ])
-
-    fantasy_options: list[str] = []
+    fantasy_key = "general"
     if homers >= 2:
-        fantasy_options.extend(FANTASY_CLOSING_POOL)
-        fantasy_options += [
-            "Two-homer games like this will always stand out on a fantasy slate.",
-            "That kind of power output is going to move the needle in any format.",
-            "A multi-homer game does a lot of category work in one shot.",
-            "This was the sort of power game that can win a fantasy matchup by itself.",
-            "There is no such thing as a quiet two-homer line in fantasy leagues.",
-            "A pair of homers is enough to make this one of the louder fantasy lines of the day.",
-            "The power alone was enough to make this line matter in a big way.",
-            "This is exactly the kind of power spike that swings categories.",
-            "A game with this much thump tends to carry itself in fantasy terms.",
-            "The home-run output put a lot of weight behind the rest of the line.",
-        ]
+        fantasy_key = "two_homer"
     elif homers == 1 and rbi >= 3:
-        fantasy_options.extend([
-            "Most of his fantasy value came on one swing, but it was a massive one.",
-            "It was the sort of line that can move the needle quickly in fantasy leagues.",
-            "A homer with that kind of RBI support tends to do a lot of work in the box score.",
-            "The long ball did plenty of lifting here, especially with the RBI attached.",
-            "That is the kind of swing that can make an entire fantasy line look different.",
-            "The homer gave the whole box score some real category punch.",
-            "One swing did a lot of the heavy lifting for the fantasy value here.",
-            "The power and RBI pairing gave the line plenty of fantasy weight.",
-            "That much damage on one swing tends to play in any format.",
-            "The line picked up real fantasy force once the homer came with runners on.",
-            "The RBI attached to the homer made the whole line play up a level.",
-            "The big swing turned a good line into a highly useful one.",
-            "There was enough impact behind the homer to make the line matter everywhere.",
-            "The power came with enough run production to make it a real fantasy result.",
-            "That one swing carried enough damage to define the night.",
-        ])
+        fantasy_key = "impact_homer"
     elif hits >= 4:
-        fantasy_options.extend([
-            "He was on base all night, which is exactly the kind of volume fantasy managers want to see.",
-            "A four-hit game is going to matter in any format, even without multiple homers attached.",
-            "That kind of hit volume can carry a fantasy line all by itself.",
-            "There is a lot of category value packed into a four-hit game.",
-            "A line built on that much contact tends to play everywhere.",
-            "Four hits is enough to put real pressure on multiple categories.",
-            "The volume of contact gave this line a lot of fantasy utility.",
-            "This was the kind of hit total that can quietly swing a week.",
-            "There was a lot of category help packed into the hit count alone.",
-            "A four-hit game usually takes care of itself in fantasy terms.",
-            "The line had plenty of value simply because he kept stacking hits.",
-            "That level of hit volume gave the line a strong fantasy floor.",
-            "There was no shortage of category help once the fourth hit showed up.",
-            "The box score got very fantasy-friendly once the hit total kept climbing.",
-            "It is hard for a four-hit game not to matter in a fantasy matchup.",
-        ])
-    elif hits >= 3 and doubles + triples >= 1:
-        fantasy_options.extend([
-            "It was not just a volume game either, as he mixed in real extra-base damage.",
-            "Hits and extra-base damage together make this one of the cleaner fantasy lines of the day.",
-            "The line played up because it mixed hit volume with impact contact.",
-            "There was more than just batting average help here, thanks to the extra-base work.",
-            "Three hits with some thump behind them will usually play in fantasy leagues.",
-            "The extra-base damage kept the line from feeling one-dimensional.",
-            "There was enough impact in the quality of contact to go with the hit total.",
-            "A multi-hit line gets more interesting fast when the extra-base work shows up too.",
-            "The line had both quantity and punch, which is a good fantasy combination.",
-            "That blend of contact and damage gave the line a strong overall shape.",
-            "The extra-base component made this more useful than a basic multi-hit game.",
-            "The line carried a little more fantasy force because the hits were not all singles.",
-            "That is a strong mix of hit volume and impact for fantasy purposes.",
-            "There was enough damage behind the hits to make the line stand out.",
-            "The overall shape of the line was stronger because the contact came with some authority.",
-        ])
+        fantasy_key = "four_hit"
+    elif hits >= 3 and (doubles + triples) >= 1:
+        fantasy_key = "three_hit_xbh"
     elif hits >= 3:
-        fantasy_options.extend([
-            "Multi-hit games like this still matter, especially for managers chasing average and runs.",
-            "He kept the line moving all night and gave fantasy managers a little of everything.",
-            "Three-hit games still carry a lot of value, even without a huge power spike.",
-            "There was a steady kind of fantasy usefulness to the way he built this line.",
-            "It was a strong batting-average line with enough around it to matter elsewhere.",
-            "The contact volume did most of the fantasy work here, and that is fine.",
-            "This was the kind of simple, useful multi-hit game that holds up well.",
-            "Three hits tend to take care of a lot of fantasy business on their own.",
-            "There was enough hit volume here to make the line matter in a lot of places.",
-            "The line gave a steady push to several categories without needing a huge swing.",
-            "A clean multi-hit game like this still carries useful fantasy weight.",
-            "The line did not need a homer to hold up because the contact was steady enough.",
-            "There was some real value in the hit total even before looking at the rest.",
-            "A lot of the fantasy appeal came from the simple fact that he kept hitting.",
-            "The line leaned on contact more than thunder, but it still played.",
-        ])
+        fantasy_key = "three_hit"
     elif steals >= 2:
-        fantasy_options.extend([
-            "Even without a huge hit total, the speed made the line play up in fantasy.",
-            "His legs did a lot of the fantasy heavy lifting here.",
-            "Two steals can change the shape of a fantasy line in a hurry.",
-            "The speed element did a lot to elevate the overall value of the line.",
-            "The running game gave this one some real category juice.",
-            "The steals alone added a lot of fantasy force to the box score.",
-            "There was a lot of added value once the speed showed up more than once.",
-            "A multi-steal game tends to matter fast in fantasy leagues.",
-            "The legs gave the whole line more category impact.",
-            "That much speed can do serious work for a fantasy matchup.",
-            "The steals turned a decent line into a much more useful one.",
-            "There was extra fantasy life in the line because of the running game.",
-            "The line picked up a lot of value once the steals stacked up.",
-            "Multiple steals gave the box score a lot more fantasy appeal.",
-            "The speed transformed the line into something much more useful.",
-        ])
+        fantasy_key = "speed"
     elif walks >= 2 and hits <= 1:
-        fantasy_options.extend([
-            "The hit total was light, but the on-base work still gave the line some fantasy usefulness.",
-            "There is sneaky value in a line like this when the walks pile up.",
-            "The on-base work did a fair amount of the lifting here.",
-            "Even without a lot of hits, the plate discipline kept the line usable.",
-            "Walks like that can quietly make a fantasy line hold up.",
-            "There was some useful value in simply reaching base that often.",
-            "The line did not need a lot of hits to stay fantasy-relevant.",
-            "The patience helped keep the floor of the line intact.",
-            "There was a little more fantasy value here than the hit total alone would suggest.",
-            "The on-base component gave the line some quiet usefulness.",
-            "That much traffic on the bases can still matter in fantasy terms.",
-            "The box score held together because of the plate discipline.",
-            "The line found a way to stay useful through on-base volume.",
-            "There was some subtle fantasy help here because of the walks.",
-            "The hit total did not tell the whole story once the walks were added in.",
-        ])
-    else:
-        fantasy_options.extend(FANTASY_CLOSING_POOL)
+        fantasy_key = "walks"
 
-    meta_options: list[str] = []
+    fantasy_pool = list(FANTASY_FAMILIES[fantasy_key])
+    if pos_phrase and homers >= 1:
+        fantasy_pool = [s.format(pos_phrase=pos_phrase) for s in POSITION_POWER_FAMILIES] + fantasy_pool
+
+    meta_pool: list[str] = []
     lineup_sentence = _lineup_context_sentence(lineup_spot, stats)
     if lineup_sentence:
-        meta_options.append(lineup_sentence)
+        meta_pool.append(lineup_sentence)
     starter_sentence = _starter_context_sentence(pitcher, stats, context)
     if starter_sentence:
-        meta_options.append(starter_sentence)
+        meta_pool.append(starter_sentence)
     close_game_sentence = _close_game_context(team_score, opp_score, team_won, context, rbi)
     if close_game_sentence:
-        meta_options.append(close_game_sentence)
+        meta_pool.append(close_game_sentence)
 
-    quality_options: list[str] = []
+    quality_pool: list[str] = []
     if hardest_ev and hardest_ev >= 108:
-        quality_options.append(_event_specific_ev_sentence(context, hardest_ev))
+        quality_pool.append(_event_specific_ev_sentence(context, hardest_ev))
     elif balls_100 >= 3:
-        quality_options.extend([
-            f"He also put {balls_100} balls in play at 100-plus mph.",
-            f"The quality of contact stood out as well, with {balls_100} batted balls at 100-plus mph.",
-            f"He backed up the line by producing {balls_100} balls at 100-plus mph.",
-            f"There was some real quality of contact here too, including {balls_100} batted balls over 100 mph.",
-            f"The contact quality was there in a big way, with {balls_100} balls struck at 100-plus mph.",
-            f"He paired the production with {balls_100} balls off the bat at triple-digit exit velocities.",
-            f"The line came with some real authority too, as he produced {balls_100} 100-plus mph batted balls.",
-            f"Quality of contact was part of the story too, with {balls_100} balls leaving the bat at 100-plus mph.",
-            f"He did not just produce; he hit the ball hard too, logging {balls_100} batted balls over 100 mph.",
-            f"The contact quality supported the box score, including {balls_100} triple-digit batted balls.",
-            f"He gave the line some extra support by hitting {balls_100} balls at 100-plus mph.",
-            f"The line looked even better once the quality of contact was factored in, including {balls_100} triple-digit bolts.",
-            f"He added some hard-contact backing with {balls_100} balls at 100-plus mph.",
-            f"The batted-ball quality kept pace with the box score, including {balls_100} balls over 100 mph.",
-            f"He paired the final line with {balls_100} examples of triple-digit contact.",
-        ])
+        quality_pool.extend([s.format(balls_100=balls_100) for s in QUALITY_100_FAMILIES])
 
     trend_note = _recent_trend_note(recent_games, stats)
     if trend_note:
-        quality_options.append(trend_note)
-
-    used_signatures: set[str] = set()
+        quality_pool.append(trend_note)
 
     def _sig(sentence: str) -> str:
         lowered = sentence.lower()
@@ -2347,50 +2399,47 @@ def build_hitter_summary(
             return "decisive"
         if "walk-off" in lowered:
             return "walkoff"
-        if "mph" in lowered or "exit velocity" in lowered or "100-plus" in lowered:
+        if "mph" in lowered or "exit velocity" in lowered or "100-plus" in lowered or "triple-digit" in lowered:
             return "ev"
         if "leadoff" in lowered or "middle of the order" in lowered or "heart of the order" in lowered or "bottom third" in lowered or "lineup" in lowered:
             return "lineup"
-        if "streak" in lowered or "quiet stretch" in lowered or "swiped" in lowered or "bounce-back" in lowered or "straight games" in lowered:
+        if "streak" in lowered or "quiet stretch" in lowered or "straight games" in lowered or "bounce-back" in lowered:
             return "trend"
-        if "fantasy" in lowered or "category" in lowered or "matchup" in lowered:
+        if "fantasy" in lowered or "category" in lowered or "matchup" in lowered or "season-long" in lowered or "daily leagues" in lowered:
             return "fantasy"
-        if "against " in lowered or "on the mound" in lowered:
+        if "against " in lowered or "on the mound" in lowered or "facing " in lowered:
             return "pitcher"
+        if "inning" in lowered or "swing" in lowered or "gap" in lowered or "equalizer" in lowered:
+            return "context"
         return lowered
 
-    for pool in [context_options, fantasy_options, meta_options, quality_options]:
+    def _pick_unique(pool: list[str], fallback_sig: str | None = None) -> str:
         for sentence in pool:
-            signature = _sig(sentence)
+            signature = _sig(sentence) if fallback_sig is None else fallback_sig
             if sentence and sentence not in sentences and signature not in used_signatures:
-                sentences.append(sentence)
                 used_signatures.add(signature)
-                break
+                return sentence
+        return ""
+
+    for pool, forced_sig in [
+        (context_pool, "context"),
+        (fantasy_pool, "fantasy"),
+        (meta_pool, None),
+        (quality_pool, None),
+    ]:
+        picked = _pick_unique(pool, forced_sig)
+        if picked:
+            sentences.append(picked)
 
     standout = homers >= 2 or rbi >= 4 or hits >= 4 or steals >= 2 or (homers >= 1 and rbi >= 3)
     max_sentences = 5 if standout else 4
-    filler_pool = [
-        "The line had enough real-game and fantasy value to stand up on its own.",
-        "There was enough substance here that the production did not feel empty.",
-        "This was a line with both baseball and fantasy weight behind it.",
-        "There was enough here for the line to hold up both in real-game terms and in fantasy leagues.",
-        "The overall line carried more than just surface-level fantasy value.",
-        "There was enough shape to the box score for it to matter in several places.",
-        "The line brought more than just one isolated category to the table.",
-        "This was not just noise in the box score; there was some real weight to it.",
-        "The production came with enough substance to hold up under a closer look.",
-        "The final line felt useful for more than one reason.",
-        "There was enough underneath the box score to make the line feel legitimate.",
-        "It was a line with some real structure behind it.",
-        "The production did not need much help to look useful in fantasy terms.",
-        "This was the kind of line that can hold up beyond the headline stat.",
-        "The line brought a little more to the table than a simple box-score glance might suggest.",
-    ]
+
     while len(sentences) < 4:
-        for filler in filler_pool:
-            if filler not in sentences:
-                sentences.append(filler)
-                break
+        filler = _pick_unique(SUMMARY_FILLER_POOL, "filler")
+        if filler:
+            sentences.append(filler)
+        else:
+            break
 
     return " ".join(sentences[:max_sentences]).strip()
 
