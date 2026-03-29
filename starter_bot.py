@@ -23,6 +23,7 @@ SCHEDULE_URL = "https://statsapi.mlb.com/api/v1/schedule?sportId=1"
 LIVE_URL = "https://statsapi.mlb.com/api/v1.1/game/{}/feed/live"
 TEAM_STATS_URL = "https://statsapi.mlb.com/api/v1/teams/{}/stats?stats=season&group=hitting&season={}"
 TEAM_ID_URL = "https://statsapi.mlb.com/api/v1/teams?sportId=1&season={}"
+PROBABLE_URL = "https://statsapi.mlb.com/api/v1/schedule?sportId=1&date={}&hydrate=probablePitchers"
 
 API_RETRY_ATTEMPTS = 3
 API_RETRY_BACKOFF_SECONDS = 2
@@ -2525,55 +2526,38 @@ def build_starter_trend_sentence(p: dict, label: str, seed: int, recent_appearan
     if not recent_appearances or len(recent_appearances) < 1:
         return ""
 
-    # Classify each recent start
     def is_quality(app):
         ip = safe_float(app.get("ip", "0.0"), 0.0)
         er = safe_int(app.get("er", 0), 0)
         return ip >= 6.0 and er <= 3
 
     def is_rough(app):
-        lbl = app.get("label", "")
-        return lbl in BAD_STARTER_LABELS
+        return app.get("label", "") in BAD_STARTER_LABELS
 
-    recent = recent_appearances  # most recent first
-
-    # Count consecutive quality starts going back
-    consec_quality = 0
-    for app in recent:
-        if is_quality(app):
-            consec_quality += 1
-        else:
-            break
-
-    # Count consecutive rough starts going back
-    consec_rough = 0
-    for app in recent:
-        if is_rough(app):
-            consec_rough += 1
-        else:
-            break
+    recent = recent_appearances
 
     # Bounceback: today is good, previous 1-2 were rough
     prev_were_rough = sum(1 for a in recent[:2] if is_rough(a))
     is_bounceback = label in GOOD_STARTER_LABELS and prev_were_rough >= 1
 
-    # Season debut: season_stats gamesStarted == 1
-    season_stats = p.get("season_stats", {})
-    gs = safe_int(season_stats.get("gamesStarted", 0), 0) or safe_int(season_stats.get("gamesPitched", 0), 0)
-
-    # Long gap between starts (possible IL return): no appearances in last 18+ days
-    # We can approximate by checking if recent_appearances is empty despite searching 45 days
-    # That logic is handled by debut check above — skip gap detection here to avoid false positives
-
-    # Simplify: just check against recent list directly
-    this_is_quality = is_quality({"ip": p.get("stats", {}).get("inningsPitched", "0.0"), "er": safe_int(p.get("stats", {}).get("earnedRuns", 0), 0)})
-    full_streak = ([this_is_quality] + [is_quality(a) for a in recent])
+    # Build full streak list: today + recent (most-recent-first)
+    this_is_quality = is_quality({
+        "ip": p.get("stats", {}).get("inningsPitched", "0.0"),
+        "er": safe_int(p.get("stats", {}).get("earnedRuns", 0), 0),
+    })
+    full_streak = [this_is_quality] + [is_quality(a) for a in recent]
     streak_len = 0
     for v in full_streak:
         if v:
             streak_len += 1
         else:
             break
+
+    # Compute ERA/K context over the prior starts in the streak
+    streak_apps = recent[:streak_len - 1] if streak_len > 1 else []
+    streak_stats = compute_streak_stats(streak_apps) if streak_apps else {}
+    era_stretch  = streak_stats.get("era_stretch")
+    k_trend      = streak_stats.get("k_trend")
 
     if streak_len >= 3 and label in GOOD_STARTER_LABELS:
         streak_text = number_word(streak_len)
@@ -2583,7 +2567,24 @@ def build_starter_trend_sentence(p: dict, label: str, seed: int, recent_appearan
             f"Going back {streak_text} starts, the line has been clean every single time — this is a pitcher in a really good stretch.",
             f"That run of {streak_text} consecutive quality starts makes him one of the harder starters in the league to plan around right now.",
             f"He is on a {streak_text}-start quality run, and the sustained sharpness is not an accident.",
+            f"Back-to-back-to-back quality outings — {streak_text} straight now — and this looks less like a hot stretch and more like the real level.",
         ]
+        if era_stretch is not None and era_stretch <= 2.50:
+            era_str = f"{era_stretch:.2f}"
+            choices.extend([
+                f"He has posted quality starts in {streak_text} straight outings with a {era_str} ERA over that stretch — that kind of run is hard to ignore.",
+                f"Over his last {streak_text} starts he has been almost untouchable, carrying a {era_str} ERA into tonight.",
+            ])
+        elif era_stretch is not None and era_stretch <= 3.50:
+            era_str = f"{era_stretch:.2f}"
+            choices.append(
+                f"He has been steady in {streak_text} consecutive quality starts, putting up a {era_str} ERA over that run."
+            )
+        if k_trend == "rising":
+            choices.extend([
+                f"Not only is he in the middle of a {streak_text}-start quality run, but the strikeout numbers have been climbing — the stuff is trending up.",
+                f"The quality starts are piling up and the swing-and-miss is getting sharper — the whole package is moving in the right direction.",
+            ])
         return choices[(seed // 89) % len(choices)]
 
     if streak_len == 2 and label in GOOD_STARTER_LABELS:
@@ -2591,7 +2592,10 @@ def build_starter_trend_sentence(p: dict, label: str, seed: int, recent_appearan
             "Back-to-back quality starts — he is in the middle of a real run of good form.",
             "Two straight quality outings now, and the recent momentum is worth noting.",
             "He backed up his last start with another strong one — that kind of consistency matters in a rotation.",
+            "Two in a row, and tonight looked like a pitcher who knows exactly what he is doing right now.",
         ]
+        if k_trend == "rising":
+            choices.append("He has turned in back-to-back quality starts and the strikeout rate is climbing — the arrow is pointing up.")
         return choices[(seed // 89) % len(choices)]
 
     # Bounceback
@@ -2602,12 +2606,13 @@ def build_starter_trend_sentence(p: dict, label: str, seed: int, recent_appearan
             "He bounced back in a big way after his last start, and the line tonight shows what he is capable of.",
             "His last outing was a tough one, but he did not let it carry over — this was a clean reset.",
             "The bounceback was real. Whatever he was working on between starts showed up tonight.",
+            "He came back sharp after a rough outing and looked like a completely different pitcher.",
         ]
         return choices[(seed // 89) % len(choices)]
 
     # Rough skid context
     this_is_rough = label in BAD_STARTER_LABELS
-    full_rough = ([this_is_rough] + [is_rough(a) for a in recent])
+    full_rough = [this_is_rough] + [is_rough(a) for a in recent]
     rough_streak = 0
     for v in full_rough:
         if v:
@@ -2620,6 +2625,7 @@ def build_starter_trend_sentence(p: dict, label: str, seed: int, recent_appearan
             f"This is the {number_word(rough_streak)} straight rough outing now — there is a pattern developing that will need to get addressed.",
             f"He has been in a tough stretch, and {number_word(rough_streak)} consecutive poor starts is a real concern for the rotation.",
             f"Three straight difficult outings tells you something is off — this is not just a one-night problem.",
+            f"The skid is at {number_word(rough_streak)} starts now, and at some point a difficult stretch becomes a trend.",
         ]
         return choices[(seed // 89) % len(choices)]
 
@@ -2627,6 +2633,7 @@ def build_starter_trend_sentence(p: dict, label: str, seed: int, recent_appearan
         choices = [
             "Two rough starts back to back — the skid is real and something is not clicking right now.",
             "Back-to-back poor outings puts him in a tough spot heading into his next turn.",
+            "He could not stop the slide tonight — two straight poor starts and still searching for answers.",
         ]
         return choices[(seed // 89) % len(choices)]
 
@@ -2833,6 +2840,8 @@ def build_starter_summary(
     game_context: dict,
     recent_appearances=None,
     opp_hitting: dict | None = None,
+    next_start: dict | None = None,
+    season: int = 0,
 ) -> str:
     stats = p["stats"]
     seed = build_starter_summary_seed(p["name"], stats, game_context)
@@ -2867,34 +2876,35 @@ def build_starter_summary(
     rivalry_sentence   = build_starter_rivalry_sentence(p, label, game_context, seed)
     trend_sentence     = build_starter_trend_sentence(p, label, seed, recent_appearances)
     debut_sentence     = build_starter_debut_sentence(p, label, seed, recent_appearances)
+    next_start_sentence = build_starter_next_start_sentence(p, label, seed, next_start, season)
 
     cap = 5 if label in {"GEM", "DOMINANT"} else 4
 
     if is_bad_starter_label(label):
         order_options = [
-            [overview, flow_sentence, contact_sentence, stat_sentence, positive_sentence, pressure_sentence, leverage_sentence, kbb_sentence, pitch_sentence, team_sentence, support_sentence, velocity_sentence, csw_sentence, opp_sentence, inherited_sentence, rivalry_sentence, trend_sentence],
-            [overview, pressure_sentence, stat_sentence, positive_sentence, flow_sentence, contact_sentence, kbb_sentence, leverage_sentence, pitch_sentence, team_sentence, velocity_sentence, csw_sentence, opp_sentence, season_sentence, trend_sentence, rivalry_sentence],
-            [overview, stat_sentence, flow_sentence, contact_sentence, positive_sentence, leverage_sentence, csw_sentence, pitch_sentence, team_sentence, support_sentence, velocity_sentence, opp_sentence, kbb_sentence, inherited_sentence, debut_sentence],
-            [overview, stat_sentence, pitch_sentence, flow_sentence, contact_sentence, pressure_sentence, positive_sentence, kbb_sentence, team_sentence, velocity_sentence, opp_sentence, leverage_sentence, rivalry_sentence, trend_sentence],
+            [overview, flow_sentence, contact_sentence, stat_sentence, positive_sentence, pressure_sentence, leverage_sentence, kbb_sentence, pitch_sentence, team_sentence, support_sentence, velocity_sentence, csw_sentence, opp_sentence, inherited_sentence, rivalry_sentence, trend_sentence, next_start_sentence],
+            [overview, pressure_sentence, stat_sentence, positive_sentence, flow_sentence, contact_sentence, kbb_sentence, leverage_sentence, pitch_sentence, team_sentence, velocity_sentence, csw_sentence, opp_sentence, season_sentence, trend_sentence, rivalry_sentence, next_start_sentence],
+            [overview, stat_sentence, flow_sentence, contact_sentence, positive_sentence, leverage_sentence, csw_sentence, pitch_sentence, team_sentence, support_sentence, velocity_sentence, opp_sentence, kbb_sentence, inherited_sentence, debut_sentence, next_start_sentence],
+            [overview, stat_sentence, pitch_sentence, flow_sentence, contact_sentence, pressure_sentence, positive_sentence, kbb_sentence, team_sentence, velocity_sentence, opp_sentence, leverage_sentence, rivalry_sentence, trend_sentence, next_start_sentence],
         ]
     elif label == "STRIKEOUT":
         order_options = [
-            [overview, csw_sentence, kbb_sentence, stat_sentence, flow_sentence, contact_sentence, pressure_sentence, fp_sentence, pitch_sentence, team_sentence, velocity_sentence, season_sentence, nd_sentence, opp_sentence, trend_sentence, rivalry_sentence],
-            [overview, flow_sentence, csw_sentence, kbb_sentence, stat_sentence, team_sentence, contact_sentence, fp_sentence, pitch_sentence, velocity_sentence, pressure_sentence, season_sentence, opp_sentence, trend_sentence],
-            [overview, stat_sentence, csw_sentence, flow_sentence, kbb_sentence, contact_sentence, team_sentence, velocity_sentence, pressure_sentence, fp_sentence, pitch_sentence, nd_sentence, opp_sentence, trend_sentence, debut_sentence],
+            [overview, csw_sentence, kbb_sentence, stat_sentence, flow_sentence, contact_sentence, pressure_sentence, fp_sentence, pitch_sentence, team_sentence, velocity_sentence, season_sentence, nd_sentence, opp_sentence, trend_sentence, rivalry_sentence, next_start_sentence],
+            [overview, flow_sentence, csw_sentence, kbb_sentence, stat_sentence, team_sentence, contact_sentence, fp_sentence, pitch_sentence, velocity_sentence, pressure_sentence, season_sentence, opp_sentence, trend_sentence, next_start_sentence],
+            [overview, stat_sentence, csw_sentence, flow_sentence, kbb_sentence, contact_sentence, team_sentence, velocity_sentence, pressure_sentence, fp_sentence, pitch_sentence, nd_sentence, opp_sentence, trend_sentence, debut_sentence, next_start_sentence],
         ]
     elif label in {"GEM", "DOMINANT"}:
         order_options = [
-            [overview, flow_sentence, streak_sentence, csw_sentence, kbb_sentence, contact_sentence, pressure_sentence, stat_sentence, stranded_sentence, support_sentence, team_sentence, velocity_sentence, fp_sentence, pitch_sentence, season_sentence, nd_sentence, opp_sentence, rivalry_sentence, trend_sentence, debut_sentence],
-            [overview, pressure_sentence, kbb_sentence, stat_sentence, flow_sentence, streak_sentence, contact_sentence, csw_sentence, stranded_sentence, team_sentence, fp_sentence, support_sentence, pitch_sentence, velocity_sentence, season_sentence, opp_sentence, trend_sentence, rivalry_sentence],
-            [overview, csw_sentence, kbb_sentence, stat_sentence, contact_sentence, flow_sentence, streak_sentence, team_sentence, pressure_sentence, stranded_sentence, velocity_sentence, fp_sentence, support_sentence, pitch_sentence, nd_sentence, opp_sentence, trend_sentence, debut_sentence],
+            [overview, flow_sentence, streak_sentence, csw_sentence, kbb_sentence, contact_sentence, pressure_sentence, stat_sentence, stranded_sentence, support_sentence, team_sentence, velocity_sentence, fp_sentence, pitch_sentence, season_sentence, nd_sentence, opp_sentence, rivalry_sentence, trend_sentence, debut_sentence, next_start_sentence],
+            [overview, pressure_sentence, kbb_sentence, stat_sentence, flow_sentence, streak_sentence, contact_sentence, csw_sentence, stranded_sentence, team_sentence, fp_sentence, support_sentence, pitch_sentence, velocity_sentence, season_sentence, opp_sentence, trend_sentence, rivalry_sentence, next_start_sentence],
+            [overview, csw_sentence, kbb_sentence, stat_sentence, contact_sentence, flow_sentence, streak_sentence, team_sentence, pressure_sentence, stranded_sentence, velocity_sentence, fp_sentence, support_sentence, pitch_sentence, nd_sentence, opp_sentence, trend_sentence, debut_sentence, next_start_sentence],
         ]
     else:
         order_options = [
-            [overview, flow_sentence, streak_sentence, stat_sentence, pressure_sentence, kbb_sentence, contact_sentence, team_sentence, pitch_sentence, csw_sentence, fp_sentence, stranded_sentence, support_sentence, velocity_sentence, season_sentence, nd_sentence, opp_sentence, pitch_mix_sentence, rivalry_sentence, trend_sentence, debut_sentence],
-            [overview, pitch_sentence, flow_sentence, kbb_sentence, stat_sentence, contact_sentence, pressure_sentence, team_sentence, csw_sentence, fp_sentence, streak_sentence, support_sentence, velocity_sentence, season_sentence, opp_sentence, trend_sentence, rivalry_sentence],
-            [overview, pressure_sentence, stat_sentence, flow_sentence, kbb_sentence, contact_sentence, csw_sentence, team_sentence, velocity_sentence, pitch_sentence, stranded_sentence, nd_sentence, opp_sentence, streak_sentence, pitch_mix_sentence, support_sentence, debut_sentence, trend_sentence],
-            [overview, stat_sentence, team_sentence, flow_sentence, kbb_sentence, contact_sentence, pressure_sentence, pitch_sentence, fp_sentence, velocity_sentence, csw_sentence, stranded_sentence, support_sentence, season_sentence, opp_sentence, rivalry_sentence, trend_sentence],
+            [overview, flow_sentence, streak_sentence, stat_sentence, pressure_sentence, kbb_sentence, contact_sentence, team_sentence, pitch_sentence, csw_sentence, fp_sentence, stranded_sentence, support_sentence, velocity_sentence, season_sentence, nd_sentence, opp_sentence, pitch_mix_sentence, rivalry_sentence, trend_sentence, debut_sentence, next_start_sentence],
+            [overview, pitch_sentence, flow_sentence, kbb_sentence, stat_sentence, contact_sentence, pressure_sentence, team_sentence, csw_sentence, fp_sentence, streak_sentence, support_sentence, velocity_sentence, season_sentence, opp_sentence, trend_sentence, rivalry_sentence, next_start_sentence],
+            [overview, pressure_sentence, stat_sentence, flow_sentence, kbb_sentence, contact_sentence, csw_sentence, team_sentence, velocity_sentence, pitch_sentence, stranded_sentence, nd_sentence, opp_sentence, streak_sentence, pitch_mix_sentence, support_sentence, debut_sentence, trend_sentence, next_start_sentence],
+            [overview, stat_sentence, team_sentence, flow_sentence, kbb_sentence, contact_sentence, pressure_sentence, pitch_sentence, fp_sentence, velocity_sentence, csw_sentence, stranded_sentence, support_sentence, season_sentence, opp_sentence, rivalry_sentence, trend_sentence, next_start_sentence],
         ]
 
     ordered = [s for s in order_options[seed % len(order_options)] if s]
@@ -2919,7 +2929,7 @@ def build_starter_summary(
             pitch_mix_sentence, season_sentence, nd_sentence, opp_sentence,
             kbb_sentence, fp_sentence, leverage_sentence, stranded_sentence,
             inherited_sentence, streak_sentence, contact_sentence, support_sentence,
-            trend_sentence, rivalry_sentence, debut_sentence,
+            trend_sentence, rivalry_sentence, debut_sentence, next_start_sentence,
         ]
         for sentence in fillers:
             if not sentence or sentence in final_sentences:
@@ -2933,7 +2943,178 @@ def build_starter_summary(
     return " ".join(final_sentences[:cap])
 
 
-# ---------------- API FETCHERS ----------------
+def compute_streak_stats(recent_appearances: list) -> dict:
+    """
+    Given a list of recent appearance dicts (most recent first), compute:
+    - era_stretch: ERA over the stretch
+    - k_trend: 'rising', 'falling', or None
+    - avg_k_per_start: average Ks over the stretch
+    """
+    if not recent_appearances:
+        return {}
+
+    total_er = 0
+    total_ip_outs = 0
+    k_values = []
+
+    for app in recent_appearances:
+        total_er += safe_int(app.get("er", 0), 0)
+        total_ip_outs += baseball_ip_to_outs(str(app.get("ip", "0.0")))
+        k_values.append(safe_int(app.get("k", 0), 0))
+
+    era_stretch = None
+    if total_ip_outs > 0:
+        era_stretch = round((total_er / total_ip_outs) * 27, 2)  # 27 outs = 9 innings
+
+    avg_k = round(sum(k_values) / len(k_values), 1) if k_values else None
+
+    k_trend = None
+    if len(k_values) >= 3:
+        # Compare first half vs second half (second half = older starts)
+        mid = len(k_values) // 2
+        recent_avg = sum(k_values[:mid]) / mid if mid else 0
+        older_avg  = sum(k_values[mid:]) / (len(k_values) - mid) if len(k_values) - mid else 0
+        if recent_avg >= older_avg * 1.25:
+            k_trend = "rising"
+        elif older_avg >= recent_avg * 1.25:
+            k_trend = "falling"
+
+    return {
+        "era_stretch": era_stretch,
+        "avg_k_per_start": avg_k,
+        "k_trend": k_trend,
+        "num_starts": len(recent_appearances),
+    }
+
+
+def get_next_start(pitcher_id: int, pitcher_team_abbr: str, after_date) -> dict | None:
+    """
+    Scan the next 7 days of schedule for a game where this pitcher is listed
+    as a confirmed probable. Returns a dict with game info or None.
+    """
+    if pitcher_id is None or after_date is None:
+        return None
+
+    # Check session cache
+    if pitcher_id in next_start_cache:
+        return next_start_cache[pitcher_id]
+
+    team_abbr = normalize_team_abbr(pitcher_team_abbr)
+
+    for days_ahead in range(1, 8):
+        check_date = after_date + timedelta(days=days_ahead)
+        data = fetch_with_retry(PROBABLE_URL.format(check_date.isoformat()))
+        if not data:
+            continue
+
+        for date_block in data.get("dates", []):
+            for game in date_block.get("games", []):
+                game_teams = game.get("teams", {})
+                for side in ("home", "away"):
+                    t = game_teams.get(side, {})
+                    t_abbr = normalize_team_abbr(
+                        t.get("team", {}).get("abbreviation") or
+                        t.get("team", {}).get("name", "")
+                    )
+                    if t_abbr != team_abbr:
+                        continue
+
+                    probable = t.get("probablePitcher") or {}
+                    if not isinstance(probable, dict):
+                        continue
+                    if probable.get("id") != pitcher_id:
+                        continue
+
+                    # Found the next start
+                    opp_side = "home" if side == "away" else "away"
+                    opp = game_teams.get(opp_side, {})
+                    opp_abbr = normalize_team_abbr(
+                        opp.get("team", {}).get("abbreviation") or
+                        opp.get("team", {}).get("name", "")
+                    )
+                    result = {
+                        "date": check_date,
+                        "side": side,          # "home" or "away"
+                        "opp_abbr": opp_abbr,
+                        "opp_name": team_name_from_abbr(opp_abbr),
+                        "game_pk": game.get("gamePk"),
+                    }
+                    next_start_cache[pitcher_id] = result
+                    return result
+
+    next_start_cache[pitcher_id] = None
+    return None
+
+
+def build_starter_next_start_sentence(p: dict, label: str, seed: int, next_start: dict | None, season: int) -> str:
+    """
+    Look-ahead sentence woven into the summary.
+    Only fires when next start is confirmed (probable pitcher set).
+    """
+    if not next_start:
+        return ""
+
+    opp_name  = next_start.get("opp_name", "opponent")
+    opp_abbr  = next_start.get("opp_abbr", "")
+    side      = next_start.get("side", "home")
+    date      = next_start.get("date")
+
+    at_vs = "against" if side == "home" else "on the road against"
+
+    # Date phrasing
+    if date:
+        days_away = (date - datetime.now(ET).date()).days
+        if days_away == 1:
+            when = "tomorrow"
+        elif days_away <= 6:
+            when = date.strftime("%A")          # "Friday"
+        else:
+            when = date.strftime("%A, %b %-d")  # "Saturday, Apr 12"
+    else:
+        when = "next time out"
+
+    # Opponent quality context
+    opp_hitting = get_team_hitting_stats(opp_abbr, season) if opp_abbr else None
+    tier = classify_offense(opp_hitting.get("ops", 0.0)) if opp_hitting else None
+
+    tier_phrases = {
+        "elite":         "one of the tougher offenses in the league",
+        "above_average": "an above-average offense",
+        "below_average": "one of the weaker lineups in the league",
+        "weak":          "a struggling offense",
+    }
+    opp_quality = tier_phrases.get(tier, "") if tier and tier != "average" else ""
+
+    if label in GOOD_STARTER_LABELS:
+        if opp_quality:
+            choices = [
+                f"He will look to carry this into {when}, when he faces {opp_quality} in the {opp_name}.",
+                f"Next up is {when} {at_vs} the {opp_name} — {opp_quality} awaits.",
+                f"He gets {when} {at_vs} the {opp_name}, who have been {opp_quality} this season.",
+                f"The next test comes {when} {at_vs} the {opp_name}, and they have been {opp_quality}.",
+            ]
+        else:
+            choices = [
+                f"He will look to carry this form into his next start, which comes {when} {at_vs} the {opp_name}.",
+                f"Next up for him is {when} {at_vs} the {opp_name}.",
+                f"He gets another crack at it {when} — this time {at_vs} the {opp_name}.",
+                f"The {opp_name} are on deck for {when}, and he will be looking to build on this.",
+            ]
+    else:
+        if opp_quality:
+            choices = [
+                f"He will need to regroup before {when}, when he draws {opp_quality} in the {opp_name}.",
+                f"The next chance to reset comes {when} {at_vs} the {opp_name} — {opp_quality}.",
+                f"He gets {when} {at_vs} the {opp_name}, who have been {opp_quality}, so the turnaround will not be easy.",
+            ]
+        else:
+            choices = [
+                f"He will get another chance {when} {at_vs} the {opp_name}.",
+                f"The next start comes {when} {at_vs} the {opp_name} — a chance to reset.",
+                f"He draws the {opp_name} {when}, and will be looking to bounce back from this one.",
+            ]
+
+    return choices[(seed // 101) % len(choices)]
 
 def get_games():
     today = datetime.now(ET).date()
@@ -2989,6 +3170,8 @@ async def post_card(
     score_value: str,
     recent_appearances=None,
     opp_hitting: dict | None = None,
+    next_start: dict | None = None,
+    season: int = 0,
 ):
     stats = p["stats"]
     label = classify_starter(stats)
@@ -3000,7 +3183,7 @@ async def post_card(
     )
     apply_player_card_chrome(embed, p["name"], p["team"])
     embed.add_field(name="", value=f"**{build_starter_subject_line(p, label, game_context, seed)}**", inline=False)
-    embed.add_field(name="Summary", value=build_starter_summary(p, label, game_context, recent_appearances=recent_appearances, opp_hitting=opp_hitting), inline=False)
+    embed.add_field(name="Summary", value=build_starter_summary(p, label, game_context, recent_appearances=recent_appearances, opp_hitting=opp_hitting, next_start=next_start, season=season), inline=False)
     embed.add_field(name="Game Line", value=format_starter_game_line(stats), inline=False)
     embed.add_field(name="Season", value=format_starter_season_line(p.get("season_stats", {})), inline=False)
     embed.add_field(name=f"{score_field_emoji(game_context)} Score", value=score_value, inline=False)
@@ -3116,11 +3299,16 @@ async def loop():
                     recent_appearances = await asyncio.to_thread(
                         get_recent_appearances, pid, game_date_et, limit=5, max_days=45
                     )
+                    next_start = await asyncio.to_thread(
+                        get_next_start, pid, p.get("team", ""), game_date_et
+                    )
                     log(f"Posting {p['name']} | {p['team']} | {score_value} | score={score}")
                     await post_card(
                         channel, p, game_context, score_value,
                         recent_appearances=recent_appearances,
                         opp_hitting=opp_hitting,
+                        next_start=next_start,
+                        season=season,
                     )
                     posted.add(key)
                     posted_this_game += 1
