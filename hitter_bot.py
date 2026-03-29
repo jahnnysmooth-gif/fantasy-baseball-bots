@@ -861,6 +861,49 @@ def classify_hitter(stats: dict) -> str:
 
 # ---------------- CARD TEXT ----------------
 
+_PREMIUM_POSITIONS = {"C", "SS", "2B", "3B"}
+_MIDDLE_ORDER_SPOTS = {3, 4, 5}
+
+
+def get_opposing_starter(feed: dict, hitter_side: str) -> dict:
+    pitcher_side = "home" if hitter_side == "away" else "away"
+    box_team = feed.get("liveData", {}).get("boxscore", {}).get("teams", {}).get(pitcher_side, {})
+    pitchers = box_team.get("pitchers", []) or []
+    players = box_team.get("players", {}) or {}
+    starter_id = pitchers[0] if pitchers else None
+    if not starter_id:
+        return {"name": "", "era": ""}
+
+    player_key = f"ID{starter_id}"
+    player = players.get(player_key, {}) or {}
+    season_stats = player.get("seasonStats", {}) or {}
+    pitching = season_stats.get("pitching", season_stats) if isinstance(season_stats, dict) else {}
+    return {
+        "name": player.get("person", {}).get("fullName", ""),
+        "era": str(pitching.get("era", "") or ""),
+    }
+
+
+def get_batting_order_spot(feed: dict, hitter: dict) -> int:
+    side = hitter.get("side")
+    hitter_id = hitter.get("id")
+    if not side or hitter_id is None:
+        return 0
+
+    players = (
+        feed.get("liveData", {})
+        .get("boxscore", {})
+        .get("teams", {})
+        .get(side, {})
+        .get("players", {})
+    )
+    for player in players.values():
+        if player.get("person", {}).get("id") == hitter_id:
+            order = safe_int(player.get("battingOrder", 0), 0)
+            return order // 100 if order else 0
+    return 0
+
+
 def _word_or_number(value: int) -> str:
     value = int(value)
     if 0 <= value <= 10:
@@ -910,6 +953,113 @@ def _stat_phrase(stats: dict) -> str:
     return f"{base} with {_join_text(extras)}" if extras else base
 
 
+def _position_phrase(position: str) -> str:
+    pos = (position or "").upper()
+    if pos == "C":
+        return "from the catcher spot"
+    if pos == "SS":
+        return "from shortstop"
+    if pos == "2B":
+        return "from second base"
+    if pos == "3B":
+        return "from third base"
+    return ""
+
+
+def _starter_context_sentence(pitcher: dict | None, homers: int, hits: int) -> str:
+    if not pitcher or not pitcher.get("name"):
+        return ""
+    name = pitcher["name"]
+    era_raw = pitcher.get("era", "")
+    try:
+        era = float(era_raw)
+    except Exception:
+        era = None
+
+    if era is not None and era <= 3.50:
+        if homers:
+            return random.choice([
+                f"He did that damage against {name}, which adds a little more weight to the homer.",
+                f"It is worth noting the power came against {name}, not exactly a soft matchup.",
+            ])
+        if hits >= 3:
+            return random.choice([
+                f"That line looks a little better considering it came against {name}.",
+                f"He was not exactly picking on an easy matchup, as {name} was on the mound.",
+            ])
+    if era is not None and era >= 5.00:
+        return random.choice([
+            f"The matchup helped, as {name} has been hittable so far.",
+            f"It came against {name}, who has had a hard time keeping hitters quiet lately.",
+        ])
+    return random.choice([
+        f"He did that work with {name} on the other side.",
+        f"The damage came against {name}.",
+    ])
+
+
+def _lineup_context_sentence(lineup_spot: int, stats: dict) -> str:
+    runs = safe_int(stats.get("runs", 0), 0)
+    rbi = safe_int(stats.get("rbi", 0), 0)
+    steals = safe_int(stats.get("stolenBases", 0), 0)
+    if lineup_spot == 1:
+        choices = [
+            "Hitting at the top of the order, he did a good job setting the tone.",
+            "From the leadoff spot, he gave the lineup the kind of table-setting it needed.",
+        ]
+        if runs >= 2 or steals >= 1:
+            choices += [
+                "That is the kind of line you want from a leadoff man, with traffic on the bases and pressure once he got there.",
+                "Batting first, he kept finding ways to get on and make things happen.",
+            ]
+        return random.choice(choices)
+    if lineup_spot in _MIDDLE_ORDER_SPOTS:
+        choices = [
+            "Batting in the heart of the order, he did exactly what the club needed from that spot.",
+            "This was middle-of-the-order production, plain and simple.",
+        ]
+        if rbi >= 3:
+            choices += [
+                "From a run-producing spot in the lineup, he cashed in the chances that came his way.",
+                "Batting in the middle of the order, he turned traffic on the bases into real damage.",
+            ]
+        return random.choice(choices)
+    if lineup_spot >= 7:
+        return random.choice([
+            "Production like that from the bottom third of the order is a bonus in any lineup.",
+            "Coming from the lower part of the lineup, this line carried a little extra weight.",
+        ])
+    return ""
+
+
+def _close_game_context(team_score: int, opp_score: int, team_won: bool, context: dict, rbi: int) -> str:
+    if team_score < 0 or opp_score < 0:
+        return ""
+    margin = abs(team_score - opp_score)
+    if margin == 1:
+        if team_won and (context.get("go_ahead_hit") or context.get("go_ahead_homer") or context.get("walkoff")):
+            return random.choice([
+                "In a one-run game, that swing was the difference.",
+                "With the margin that tight, his biggest hit carried real weight.",
+            ])
+        if team_won and rbi >= 2:
+            return random.choice([
+                "It turned out to be a one-run game, so every bit of that production mattered.",
+                "The final margin stayed tight enough that his line mattered all the way through.",
+            ])
+        if not team_won and rbi >= 2:
+            return random.choice([
+                "Even though the club came up short, he still left a mark on a close game.",
+                "The result went the wrong way, but his line still held up in a game that stayed tight.",
+            ])
+    if margin >= 5 and team_won and (context.get("insurance_hit") or rbi >= 3):
+        return random.choice([
+            "Once the game opened up, he kept piling on.",
+            "He also helped turn a competitive game into a more comfortable finish.",
+        ])
+    return ""
+
+
 def _recent_trend_note(recent_games: list[dict], stats: dict) -> str:
     if not recent_games:
         return ""
@@ -917,6 +1067,7 @@ def _recent_trend_note(recent_games: list[dict], stats: dict) -> str:
     today_hits = safe_int(stats.get("hits", 0), 0)
     today_hr = safe_int(stats.get("homeRuns", 0), 0)
     today_rbi = safe_int(stats.get("rbi", 0), 0)
+    today_sb = safe_int(stats.get("stolenBases", 0), 0)
 
     streak_hits = 0
     for game in recent_games:
@@ -937,12 +1088,18 @@ def _recent_trend_note(recent_games: list[dict], stats: dict) -> str:
     total_hits = sum(g.get("h", 0) for g in recent_slice) + today_hits
     total_hr = sum(g.get("hr", 0) for g in recent_slice) + today_hr
     total_rbi = sum(g.get("rbi", 0) for g in recent_slice) + today_rbi
+    total_sb = sum(g.get("sb", 0) for g in recent_slice) + today_sb
     games = len(recent_slice) + 1
 
     if hitless_tail >= 3 and today_hits >= 2:
         return random.choice([
             "It looked like the kind of game that can pull a hitter out of a quiet stretch.",
             "After a few quieter games, this looked more like the hitter fantasy managers were hoping to see.",
+        ])
+    if hit_streak >= 7 and today_hr >= 1:
+        return random.choice([
+            f"He has now hit safely in {hit_streak} straight games and the power has come along for the ride.",
+            f"The streak is up to {hit_streak} games now, and this was one of the louder lines in the run.",
         ])
     if hit_streak >= 7:
         return random.choice([
@@ -953,6 +1110,11 @@ def _recent_trend_note(recent_games: list[dict], stats: dict) -> str:
         return random.choice([
             f"He now has {total_hr} homers over his last {games} games.",
             f"The power has shown up lately, with {total_hr} homers across his last {games} games.",
+        ])
+    if games >= 5 and total_sb >= 3:
+        return random.choice([
+            f"He has also swiped {total_sb} bags over his last {games} games.",
+            f"The speed has shown up lately too, with {total_sb} steals over his last {games} games.",
         ])
     if games >= 5 and total_hits >= 9:
         return random.choice([
@@ -967,13 +1129,15 @@ def _recent_trend_note(recent_games: list[dict], stats: dict) -> str:
     return ""
 
 
-def build_hitter_subject(name: str, stats: dict, label: str, context: dict, recent_games: list[dict]) -> str:
+def build_hitter_subject(name: str, stats: dict, label: str, context: dict, recent_games: list[dict], position: str = "", lineup_spot: int = 0) -> str:
     hits = safe_int(stats.get("hits", 0), 0)
     homers = safe_int(stats.get("homeRuns", 0), 0)
     rbi = safe_int(stats.get("rbi", 0), 0)
     steals = safe_int(stats.get("stolenBases", 0), 0)
     doubles = safe_int(stats.get("doubles", 0), 0)
     triples = safe_int(stats.get("triples", 0), 0)
+    pos = (position or "").upper()
+    pos_phrase = _position_phrase(pos)
 
     streak_hits = 0
     for game in recent_games:
@@ -1003,6 +1167,21 @@ def build_hitter_subject(name: str, stats: dict, label: str, context: dict, rece
             f"{name} ties it up with a multi-run homer",
             f"{name} pulls his club even with one swing",
         ])
+    if hit_streak >= 10 and homers >= 1:
+        return random.choice([
+            f"{name} keeps a {hit_streak}-game streak rolling with another homer",
+            f"{name} stays scorching hot and extends his streak to {hit_streak}",
+        ])
+    if hit_streak >= 10:
+        return random.choice([
+            f"{name} extends his hitting streak to {hit_streak} games",
+            f"{name} keeps the streak alive for the {hit_streak}th straight game",
+        ])
+    if homers >= 2 and pos in _PREMIUM_POSITIONS:
+        return random.choice([
+            f"{name} brings rare power {pos_phrase or 'from a premium spot'} with a two-homer night",
+            f"{name} turns in a two-homer game {pos_phrase or ''}".strip(),
+        ])
     if homers >= 2:
         return random.choice([
             f"{name} turns in a two-homer night",
@@ -1013,15 +1192,30 @@ def build_hitter_subject(name: str, stats: dict, label: str, context: dict, rece
             f"{name} piles up four hits in a standout game",
             f"{name} fills the box score with a four-hit night",
         ])
+    if hits >= 3 and (doubles + triples + homers) >= 2 and pos in _PREMIUM_POSITIONS:
+        return random.choice([
+            f"{name} does real damage {pos_phrase or ''} in a three-hit game".strip(),
+            f"{name} stuffs the box score {pos_phrase or ''} with three hits and extra-base damage".strip(),
+        ])
     if hits >= 3 and (doubles + triples + homers) >= 2:
         return random.choice([
             f"{name} strings together three hits and extra-base damage",
             f"{name} does real damage in a three-hit game",
         ])
+    if homers >= 1 and rbi >= 3 and lineup_spot in _MIDDLE_ORDER_SPOTS:
+        return random.choice([
+            f"{name} cashes in from the heart of the order",
+            f"{name} drives the offense from the middle of the lineup",
+        ])
     if homers >= 1 and rbi >= 3:
         return random.choice([
             f"{name} goes deep and drives in {_word_or_number(rbi)}",
             f"{name} does most of his damage with one big swing",
+        ])
+    if steals >= 2 and pos in {"SS", "2B", "CF"}:
+        return random.choice([
+            f"{name} makes things happen with his legs and his bat",
+            f"{name} adds speed to a useful fantasy line",
         ])
     if steals >= 2:
         return random.choice([
@@ -1038,10 +1232,20 @@ def build_hitter_subject(name: str, stats: dict, label: str, context: dict, rece
             f"{name} keeps the hot streak going",
             f"{name} stays hot with another productive night",
         ])
+    if lineup_spot == 1 and (safe_int(stats.get("runs", 0), 0) >= 2 or steals >= 1):
+        return random.choice([
+            f"{name} sets the tone from the leadoff spot",
+            f"{name} sparks the offense at the top of the lineup",
+        ])
     if hits >= 3:
         return random.choice([
             f"{name} turns in a three-hit game",
             f"{name} keeps the line moving all night",
+        ])
+    if homers == 1 and pos == "C":
+        return random.choice([
+            f"{name} provides pop from behind the plate",
+            f"{name} leaves the yard from the catcher spot",
         ])
     if homers == 1:
         return random.choice([
@@ -1084,7 +1288,21 @@ def _build_summary_opening(name: str, stats: dict, context: dict, opponent_text:
     ])
 
 
-def build_hitter_summary(name: str, team: str, stats: dict, label: str, context: dict, opponent: str, team_won: bool, recent_games: list[dict]) -> str:
+def build_hitter_summary(
+    name: str,
+    team: str,
+    stats: dict,
+    label: str,
+    context: dict,
+    opponent: str,
+    team_won: bool,
+    recent_games: list[dict],
+    pitcher: dict | None = None,
+    lineup_spot: int = 0,
+    position: str = "",
+    team_score: int = -1,
+    opp_score: int = -1,
+) -> str:
     team_name = team_name_from_abbr(team)
     opponent_text = opponent or "the opposing club"
 
@@ -1099,6 +1317,7 @@ def build_hitter_summary(name: str, team: str, stats: dict, label: str, context:
     balls_100 = safe_int(context.get("balls_100", 0), 0)
     homers_info = context.get("homers") or []
     xbh_info = context.get("extra_base_hits") or []
+    pos_phrase = _position_phrase(position)
 
     sentences: list[str] = [
         _build_summary_opening(name, stats, context, opponent_text, team_name, team_won)
@@ -1150,6 +1369,8 @@ def build_hitter_summary(name: str, team: str, stats: dict, label: str, context:
             ])
 
     fantasy_options: list[str] = []
+    if pos_phrase and homers >= 1:
+        fantasy_options.append(f"That kind of pop {pos_phrase} will get noticed in fantasy leagues.")
     if homers >= 2:
         fantasy_options.extend([
             "That kind of power output is going to matter in any fantasy format.",
@@ -1191,6 +1412,17 @@ def build_hitter_summary(name: str, team: str, stats: dict, label: str, context:
             "There was enough across the line here to make it a worthwhile fantasy performance.",
         ])
 
+    meta_options: list[str] = []
+    lineup_sentence = _lineup_context_sentence(lineup_spot, stats)
+    if lineup_sentence:
+        meta_options.append(lineup_sentence)
+    starter_sentence = _starter_context_sentence(pitcher, homers, hits)
+    if starter_sentence:
+        meta_options.append(starter_sentence)
+    close_game_sentence = _close_game_context(team_score, opp_score, team_won, context, rbi)
+    if close_game_sentence:
+        meta_options.append(close_game_sentence)
+
     quality_options: list[str] = []
     if hardest_ev and hardest_ev >= 108:
         quality_options.extend([
@@ -1207,30 +1439,36 @@ def build_hitter_summary(name: str, team: str, stats: dict, label: str, context:
     if trend_note:
         quality_options.append(trend_note)
 
-    for pool in [context_options, fantasy_options, quality_options]:
+    for pool in [context_options, fantasy_options, meta_options, quality_options]:
         for sentence in pool:
             if sentence and sentence not in sentences:
                 sentences.append(sentence)
                 break
 
-    return " ".join(sentences).strip()
+    return " ".join(sentences[:4]).strip()
 
 # ---------------- EMBED POSTING ----------------
 
-async def post_card(channel: discord.abc.Messageable, hitter: dict, opponent: str, team_won: bool, feed: dict, game_date_et) -> None:
+async def post_card(channel: discord.abc.Messageable, hitter: dict, opponent: str, team_won: bool, feed: dict, game_date_et, team_score: int = -1, opp_score: int = -1) -> None:
     stats = hitter["stats"]
     label = classify_hitter(stats)
     recent_games = get_recent_hitter_games(hitter.get("id"), game_date_et)
     game_context = build_hitter_game_context(feed, hitter)
+    position = hitter.get("position", "")
+    lineup_spot = get_batting_order_spot(feed, hitter)
+    pitcher = get_opposing_starter(feed, hitter.get("side", "home"))
     embed = discord.Embed(
         color=TEAM_COLORS.get(normalize_team_abbr(hitter["team"]), 0x2ECC71),
         timestamp=datetime.now(timezone.utc),
     )
     apply_player_card_chrome(embed, hitter["name"], hitter["team"])
-    embed.add_field(name="", value=f"**{build_hitter_subject(hitter['name'], stats, label, game_context, recent_games)}**", inline=False)
+    embed.add_field(name="", value=f"**{build_hitter_subject(hitter['name'], stats, label, game_context, recent_games, position=position, lineup_spot=lineup_spot)}**", inline=False)
     embed.add_field(
         name="Summary",
-        value=build_hitter_summary(hitter["name"], hitter["team"], stats, label, game_context, opponent, team_won, recent_games),
+        value=build_hitter_summary(
+            hitter["name"], hitter["team"], stats, label, game_context, opponent, team_won, recent_games,
+            pitcher=pitcher, lineup_spot=lineup_spot, position=position, team_score=team_score, opp_score=opp_score,
+        ),
         inline=False,
     )
     embed.add_field(name="Game Line", value=format_hitter_game_line(stats), inline=False)
@@ -1393,7 +1631,7 @@ async def hitter_loop() -> None:
                     )
 
                     log(f"Posting {hitter['name']} | {hitter['team']} | {matchup} | score={score_value}")
-                    await post_card(channel, hitter, opponent, team_won, feed, game_date_et)
+                    await post_card(channel, hitter, opponent, team_won, feed, game_date_et, team_score=away_score if player_team == away_abbr else home_score, opp_score=home_score if player_team == away_abbr else away_score)
                     posted.add(post_key)
                     posted_this_game += 1
                     posts_this_scan += 1
