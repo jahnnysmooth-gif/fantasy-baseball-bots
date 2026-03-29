@@ -1164,27 +1164,26 @@ OPENING_FAMILY_POOL = [
     "{name} was {stat_phrase} {result_phrase}.",
     "{name} went {stat_phrase} as the {team_name} {result_verb} the {opponent_text}.",
     "{name} had {stat_phrase} {result_phrase}.",
-    "{name} came through with {stat_phrase} {result_phrase}.",
     "Good night for {name}, who went {stat_phrase} {result_phrase}.",
     "{name} did some damage {result_phrase}, going {stat_phrase}.",
-    "{name} was at it again {result_phrase} — {stat_phrase}.",
-    "{name} put the ball in play all night, finishing {stat_phrase} {result_phrase}.",
-    "{name} carried the {team_name} offense early, ending up {stat_phrase} {result_phrase}.",
     "Another productive night for {name}: {stat_phrase} {result_phrase}.",
     "{name} kept rolling {result_phrase}, going {stat_phrase}.",
-    "Hard to complain about {name} right now — {stat_phrase} {result_phrase}.",
-    "{name} made the most of his trips to the plate, going {stat_phrase} {result_phrase}.",
+    "{name} came up big {result_phrase}, going {stat_phrase}.",
+    "{name} delivered {result_phrase}, finishing {stat_phrase}.",
+    "{name} made his at-bats count {result_phrase}, going {stat_phrase}.",
+    "{name} had a strong one {result_phrase}: {stat_phrase}.",
+    "{name} was one of the better bats on the field {result_phrase}, going {stat_phrase}.",
 ]
 
 CONTEXT_FAMILY_POOL = [
     "He {event_text} {inning_text}.",
     "{inning_text}, he {event_text}.",
-    "The big moment came {inning_text} — he {event_text}.",
+    "The big moment came {inning_text}: he {event_text}.",
     "He {event_text} {inning_text} to do the most damage.",
     "Most of the damage was done {inning_text}, when he {event_text}.",
     "He {event_text} {inning_text}, which was the swing that really mattered.",
     "The night turned {inning_text} when he {event_text}.",
-    "{inning_text} was his biggest moment — he {event_text}.",
+    "His biggest moment came {inning_text}, when he {event_text}.",
     "He came through {inning_text} and {event_text}.",
     "The key blow came {inning_text}: he {event_text}.",
     "He {event_text} {inning_text} for the biggest hit of his night.",
@@ -1195,21 +1194,16 @@ CONTEXT_FAMILY_POOL = [
 ]
 
 FANTASY_CLOSING_POOL = [
-    "He's been one of the better bats in the lineup lately.",
     "Not a bad night at all.",
-    "Solid across the board.",
-    "He's done this a few times lately — the production is starting to feel real.",
-    "It was that kind of night.",
     "Hard to ask for much more than that.",
-    "He's been reliable and this was more of the same.",
-    "The whole line held up.",
-    "He contributed in just about every way possible.",
-    "Another complete game from him.",
-    "He did a little of everything.",
-    "The counting stats were all there.",
-    "Clean game from top to bottom.",
     "He was dialed in from the first at-bat.",
     "Exactly what you want from him.",
+    "He made every at-bat count.",
+    "He was locked in all game.",
+    "Complete game from top to bottom.",
+    "He gave his team everything it needed.",
+    "Clean performance start to finish.",
+    "The production was consistent all night.",
 ]
 
 EV_HIT_FAMILIES = [
@@ -1275,13 +1269,13 @@ LINEUP_FAMILIES = {
         "He batted in the heart of the order and delivered.",
         "That's exactly what you want from a middle of the order bat.",
         "He hit where the damage is supposed to happen and did damage.",
-        "Cleanup type production — he cashed in with runners on.",
+        "Cleanup type production, he cashed in with runners on.",
         "The offense ran through him tonight.",
         "He was the best hitter in the lineup when it mattered.",
         "Batting third through fifth means opportunity, and he didn't waste it.",
         "He did what the middle of the order is supposed to do.",
         "The run-producing role fit him perfectly tonight.",
-        "He turned chances into runs — that's the job.",
+        "He turned chances into runs, that's the job.",
         "Middle of the order bats live for nights like this.",
         "He was the engine of the offense hitting where he hit.",
         "That slot in the lineup exists for guys who can do what he did tonight.",
@@ -1293,7 +1287,7 @@ LINEUP_FAMILIES = {
         "He was hitting sixth or lower and still found a way to hurt them.",
         "That's the kind of night that makes a lineup deeper than it looks on paper.",
         "He wasn't expected to do that much damage from where he was hitting, but he did.",
-        "Lower-order guys are not supposed to carry games — he didn't care.",
+        "Lower-order guys are not supposed to carry games, he didn't care.",
         "That's a nice surprise from the back end of the lineup.",
         "He came up in a low-leverage spot and delivered anyway.",
         "The bottom third of the order gave the club something extra tonight.",
@@ -1302,7 +1296,7 @@ LINEUP_FAMILIES = {
         "He hit in the back of the lineup and acted like he was in the middle.",
         "That's a real contribution from someone hitting down in the order.",
         "The lineup got longer and more dangerous because of what he did.",
-        "Not supposed to be a run producer from that spot — did it anyway.",
+        "Not supposed to be a run producer from that spot, did it anyway.",
         "He gave the club something extra from a spot where you don't always get it.",
     ],
 }
@@ -1576,29 +1570,25 @@ def _last_name(full_name: str) -> str:
 
 
 def _stat_phrase(stats: dict) -> str:
+    """Headline stat phrase for the opener. Leads with impact stats only.
+    Walks and runs are shown in the game line field already."""
     hits = safe_int(stats.get("hits", 0), 0)
     ab = safe_int(stats.get("atBats", 0), 0)
-    runs = safe_int(stats.get("runs", 0), 0)
     rbi = safe_int(stats.get("rbi", 0), 0)
     homers = safe_int(stats.get("homeRuns", 0), 0)
     doubles = safe_int(stats.get("doubles", 0), 0)
     triples = safe_int(stats.get("triples", 0), 0)
-    walks = safe_int(stats.get("baseOnBalls", 0), 0)
     steals = safe_int(stats.get("stolenBases", 0), 0)
 
     extras: list[str] = []
     if homers:
         extras.append(_small_count_phrase(homers, "homer"))
-    if doubles:
+    elif doubles:
         extras.append(_small_count_phrase(doubles, "double"))
-    if triples:
+    elif triples:
         extras.append(_small_count_phrase(triples, "triple"))
     if rbi:
         extras.append(f"{_word_or_number(rbi)} RBI")
-    if runs:
-        extras.append(_small_count_phrase(runs, "run"))
-    if walks:
-        extras.append(_small_count_phrase(walks, "walk"))
     if steals:
         extras.append(_small_count_phrase(steals, "stolen base"))
 
@@ -1663,50 +1653,62 @@ def _starter_context_sentence(pitcher: dict | None, stats: dict, context: dict) 
     event_phrase = _event_phrase_from_stats(stats)
 
     if era is not None and era <= 3.50:
-        return random.choice(PITCHER_EVENT_FAMILIES).format(pitcher=name, event_phrase=event_phrase)
+        return random.choice([
+            f"Doing that against {name} (ERA: {era:.2f}) adds real credibility to the {event_phrase}.",
+            f"The {event_phrase} came against {name}, who has been one of the better arms in the league this year.",
+            f"{name} is not an easy out, which makes the {event_phrase} that much more meaningful.",
+            f"He got to {name}, who came in with a {era:.2f} ERA. That's a quality win.",
+            f"The {event_phrase} off {name} is the kind of thing that gets people's attention.",
+            f"{name} has been sharp this year, but he couldn't stop the {event_phrase}.",
+            f"Worth noting: the {event_phrase} came against {name}, one of the better starters in the game right now.",
+            f"He produced the {event_phrase} against {name}, who doesn't give those up easily.",
+            f"The matchup was a tough one with {name} on the mound, and he delivered anyway.",
+            f"Going up against {name} and getting a {event_phrase} is not a small thing.",
+        ])
     if era is not None and era >= 5.00:
         return random.choice([
-            f"The matchup helped a bit, as the {event_phrase} came against {name}.",
-            f"It came against {name}, who has been more hittable than most so far.",
-            f"The {event_phrase} came in a matchup that looked favorable on paper against {name}.",
-            f"He took advantage of a matchup that tilted his way against {name}.",
-            f"The setting helped, but he still did the damage with the {event_phrase} against {name}.",
-            f"The opponent profile helped a little, as the {event_phrase} came against {name}.",
-            f"He was able to capitalize against {name}, who has been more vulnerable than most.",
-            f"The production came in a spot where the matchup looked workable against {name}.",
-            f"He got into a favorable matchup and made it count against {name}.",
-            f"The {event_phrase} came in a game where the matchup leaned in his favor against {name}.",
-            f"He wasn't facing an ace here, and he made the most of it against {name}.",
-            f"There was some matchup help on the table against {name}, and he took it.",
-            f"He did what he should have done in a favorable spot against {name}.",
-            f"The profile of the matchup helped, though he still had to do the work against {name}.",
-            f"He turned a decent matchup against {name} into a productive night.",
+            f"The matchup was a favorable one with {name} on the mound.",
+            f"{name} has been one of the more hittable starters out there, and it showed.",
+            f"He was facing {name}, who has had a tough go of it this season.",
+            f"The {event_phrase} came against {name}, who has been vulnerable to this kind of damage.",
+            f"{name} didn't have his best stuff, and the {event_phrase} reflected that.",
+            f"He took advantage of a soft matchup with {name} starting.",
+            f"The spot set up well with {name} on the hill.",
+            f"{name} came in with some struggles, and he made him pay.",
+            f"The opportunity was there with {name} pitching, and he cashed in.",
+            f"He got what he was looking for against {name}, who has been hittable lately.",
         ])
     return random.choice([
+        f"He did the damage with {name} starting on the other side.",
         f"The {event_phrase} came against {name}.",
-        f"He did that work with {name} on the other side.",
-        f"That production came facing {name}.",
-        f"The damage came with {name} on the mound.",
-        f"He built that box-score damage while facing {name}.",
-        f"The opponent on the mound was {name}, and he still got to his spots.",
-        f"He pieced that together against {name}.",
-        f"The production came with {name} working the other side.",
-        f"He found some success against {name}.",
-        f"The damage was done against {name}.",
-        f"He built the night against {name}.",
-        f"The work came while facing {name}.",
+        f"{name} was on the mound, and he made him work.",
+        f"He built the night with {name} starting opposite him.",
+        f"He got to {name} for the {event_phrase}.",
+        f"{name} started for the other side, and he had a good night against him.",
+        f"He found his spots against {name}.",
+        f"The {event_phrase} came with {name} pitching.",
         f"He did his damage opposite {name}.",
-        f"The box score took shape against {name}.",
-        f"It all came with {name} on the mound.",
+        f"The production came against {name}.",
     ])
 
 
 def _lineup_context_sentence(lineup_spot: int, stats: dict) -> str:
+    rbi = safe_int(stats.get("rbi", 0), 0)
+    runs = safe_int(stats.get("runs", 0), 0)
+    steals = safe_int(stats.get("stolenBases", 0), 0)
+
     if lineup_spot == 1:
-        return random.choice(LINEUP_FAMILIES["leadoff"])
+        # Only fire for leadoff if they did leadoff things
+        if runs >= 2 or steals >= 1:
+            return random.choice(LINEUP_FAMILIES["leadoff"])
+        return ""
     if lineup_spot in _MIDDLE_ORDER_SPOTS:
-        return random.choice(LINEUP_FAMILIES["middle"])
+        # Middle order only worth noting when RBI total is exceptional
+        if rbi >= 4:
+            return random.choice(LINEUP_FAMILIES["middle"])
+        return ""
     if lineup_spot >= 7:
+        # Bottom order production is always worth a mention
         return random.choice(LINEUP_FAMILIES["bottom"])
     return ""
 
@@ -2158,32 +2160,32 @@ SUMMARY_OPENING_FAMILIES = {
 SUMMARY_CONTEXT_FAMILIES = CONTEXT_FAMILY_POOL
 
 POSITION_POWER_FAMILIES = [
-    "That kind of pop {pos_phrase} will get noticed in fantasy leagues.",
     "Power {pos_phrase} is not something you see every day.",
-    "There is extra fantasy value when that kind of damage comes {pos_phrase}.",
-    "That is a useful kind of power to see {pos_phrase}.",
     "The homer carried some extra weight because it came {pos_phrase}.",
-    "Fantasy managers always notice when power shows up {pos_phrase}.",
-    "It is not every day you get that kind of thump {pos_phrase}.",
-    "There is some added fantasy appeal when the damage comes {pos_phrase}.",
-    "The positional angle made the power play up even more.",
-    "The power stood out a bit more because of where it came from defensively.",
-    "There was some position-scarcity value tied into the power here.",
-    "The homer played up because the position doesn't always offer that much thump.",
-    "The fantasy value climbed a little because of the position attached to the damage.",
-    "His club got some uncommon pop from that defensive spot.",
-    "The position only made the power more useful.",
+    "That kind of thump {pos_phrase} is rare.",
+    "Not many guys hit homers {pos_phrase} like that.",
+    "The power {pos_phrase} is one of the things that makes him special.",
+    "Homers {pos_phrase} don't grow on trees.",
+    "That's an uncommon combination, real pop {pos_phrase}.",
+    "He's one of the few guys who can do that {pos_phrase}.",
+    "Power {pos_phrase} is something teams pay a premium for.",
+    "Not a lot of guys {pos_phrase} hit the ball that hard.",
+    "The homer stood out a bit more because of where it came from.",
+    "That kind of production {pos_phrase} changes how you build a lineup.",
+    "You don't find that kind of pop {pos_phrase} very often.",
+    "The power {pos_phrase} is legitimate and it showed tonight.",
+    "He's built differently for that spot in the field.",
 ]
 
 FANTASY_FAMILIES = {
     "two_homer": FANTASY_CLOSING_POOL + [
         "Two homers in one game doesn't happen often.",
-        "He went deep twice — hard to ask for more than that.",
+        "He went deep twice. Hard to ask for more than that.",
         "Multi-homer games are rare, and he made the most of it.",
         "Two home runs is a big night by anyone's standard.",
         "The power was on full display.",
         "He squared up everything they threw at him.",
-        "Both homers were legitimate — this wasn't a cheap park job.",
+        "Both homers were legitimate. This wasn't a cheap park job.",
         "That's the kind of game you circle on the calendar.",
         "Two-homer nights don't come around often, and he delivered one.",
         "He was locked in at the plate all night.",
@@ -2191,7 +2193,7 @@ FANTASY_FAMILIES = {
     "impact_homer": [
         "One swing did a lot of the work.",
         "The homer was the difference-maker, but there was more around it.",
-        "He didn't need much — one big swing and the damage was done.",
+        "He didn't need much. One big swing and the damage was done.",
         "That's a dangerous combination: power with runners on base.",
         "When he connects with men on, it gets ugly fast for the other team.",
         "He made them pay with one big cut.",
@@ -2206,18 +2208,18 @@ FANTASY_FAMILIES = {
         "That kind of production from one swing is hard to ignore.",
     ],
     "four_hit": [
-        "He was on base all night — pitchers just couldn't get him out.",
+        "He was on base all night, pitchers just couldn't get him out.",
         "Four hits in one game is a legitimately great performance.",
         "He had a hit every time he came up. Outstanding night.",
         "The contact was there from the first at-bat to the last.",
         "He hit everything hard. Four-hit games don't happen by accident.",
         "That's a special night at the plate.",
-        "He was locked in — four hits and he made every one count.",
+        "He was locked in, four hits and he made every one count.",
         "Four hits against MLB pitching is a special kind of night.",
         "He found a way to get on base nearly every trip.",
         "Four hits is the kind of output that carries an offense.",
         "He was the best hitter on the field tonight.",
-        "Couldn't miss — four hits and he was dangerous every at-bat.",
+        "Couldn't miss, four hits and he was dangerous every at-bat.",
         "That's one of the cleaner hitting performances you'll see.",
         "He put the barrel on everything and it showed.",
         "Four-hit games are rare. This one was earned.",
@@ -2240,24 +2242,24 @@ FANTASY_FAMILIES = {
         "The overall shape of the performance was stronger because the contact came with some authority.",
     ],
     "three_hit": [
-        "Consistent night — he put something together every time he came up.",
+        "Consistent night, he put something together every time he came up.",
         "Three hits without a homer is still a very good night.",
         "He kept finding holes all game.",
-        "He was tough to retire — three hits and he made pitchers work.",
+        "He was tough to retire, three hits and he made pitchers work.",
         "Just a clean, steady performance at the plate.",
         "The bat was on time all night.",
         "He sprayed it around and the hits kept coming.",
         "Didn't need the long ball to make an impact.",
         "The contact was there from start to finish.",
-        "Three hits is three hits — a solid outing.",
+        "Three hits is three hits, a solid outing.",
         "He put the barrel on the ball all night.",
-        "Simple but effective — kept the line moving.",
+        "Simple but effective, kept the line moving.",
         "He was in rhythm and it showed.",
         "No flash, just production. Three hits and he contributed.",
         "He got his work in quietly and the numbers reflected it.",
     ],
     "speed": [
-        "He didn't just hit — he ran too, and that changed everything.",
+        "He didn't just hit; he ran too, and that changed everything.",
         "The stolen bases were the difference-maker in this one.",
         "Two steals is a big night on the bases.",
         "His legs gave him extra value on top of what he did with the bat.",
@@ -2275,18 +2277,18 @@ FANTASY_FAMILIES = {
     ],
     "walks": [
         "Didn't do much with the bat but made pitchers work all night.",
-        "He reached base more than the hit total suggests — the walks tell the real story.",
+        "He reached base more than the hit total suggests, the walks tell the real story.",
         "Took what the pitchers gave him, and they gave him a lot of free passes.",
-        "Didn't chase junk all night — the patience paid off.",
+        "Didn't chase junk all night, the patience paid off.",
         "The walks piled up because he refused to chase.",
         "He made the pitcher earn every out and it didn't always happen.",
         "The plate discipline was the story here more than the hit count.",
-        "He had pitchers rattled — they couldn't find the zone against him.",
+        "He had pitchers rattled, they couldn't find the zone against him.",
         "A couple of walks can quietly be as valuable as hits.",
         "He worked deep counts all night and wore the pitcher down.",
         "The hit total was light but he was on base a lot.",
         "He saw a ton of pitches and took his walks.",
-        "Patient approach tonight — lots of pitches, lots of walks.",
+        "Patient approach tonight, lots of pitches, lots of walks.",
         "He let the game come to him and it worked.",
         "The at-bats were quality even when they didn't result in hits.",
     ],
@@ -2340,10 +2342,10 @@ def _build_summary_opening(
     possessive = team_possessive(team_name)
     result_verb = random.choice(["beat", "topped", "downed", "took down", "handled", "got past"]) if team_won else random.choice(["fell to", "lost to", "dropped one to", "couldn't get past"])
 
-    # Score suffix removed — keep opener clean
+    # Score suffix removed, keep opener clean
     score_suffix = ""
 
-    # Pitcher handled as body sentence — keep opener clean
+    # Pitcher handled as body sentence, keep opener clean
     pitcher_suffix = ""
     pitcher_name = (pitcher or {}).get("name", "")
 
@@ -2399,10 +2401,10 @@ def _event_specific_ev_sentence(context: dict, hardest_ev: float | None) -> str:
         options = [
             f"His hardest-hit ball was {result_phrase}, which left the bat at {hardest_ev:.1f} mph.",
             f"The loudest contact of his night was {result_phrase} at {hardest_ev:.1f} mph.",
-            f"He squared up {result_phrase} at {hardest_ev:.1f} mph — that one had some serious carry.",
+            f"He squared up {result_phrase} at {hardest_ev:.1f} mph, that one had some serious carry.",
             f"The {result_phrase} came off the bat at {hardest_ev:.1f} mph.",
             f"That {result_phrase} registered {hardest_ev:.1f} mph off the bat.",
-            f"He put his best swing on {result_phrase} — {hardest_ev:.1f} mph exit velo.",
+            f"He put his best swing on {result_phrase}, {hardest_ev:.1f} mph exit velo.",
             f"The {result_phrase} was the hardest ball he hit all night at {hardest_ev:.1f} mph.",
             f"His top exit velocity came on {result_phrase}: {hardest_ev:.1f} mph.",
         ]
@@ -2419,20 +2421,20 @@ def _event_specific_ev_sentence(context: dict, hardest_ev: float | None) -> str:
         options = [
             f"His hardest-hit ball was a {hit_type}{inning_piece}{rbi_piece}, leaving the bat at {hardest_ev:.1f} mph.",
             f"The loudest swing of his night was a {hit_type}{inning_piece} at {hardest_ev:.1f} mph{rbi_piece}.",
-            f"He ripped a {hit_type}{inning_piece} at {hardest_ev:.1f} mph{rbi_piece} — his best contact of the game.",
+            f"He ripped a {hit_type}{inning_piece} at {hardest_ev:.1f} mph{rbi_piece}, his best contact of the game.",
             f"That {hit_type}{inning_piece} came off the bat at {hardest_ev:.1f} mph{rbi_piece}.",
             f"His top exit velo came on a {hit_type}{inning_piece}: {hardest_ev:.1f} mph{rbi_piece}.",
             f"The {hit_type}{inning_piece} was his hardest ball all night at {hardest_ev:.1f} mph{rbi_piece}.",
         ]
         return random.choice(options)
 
-    # Fallback — no homer or XBH context, just report the number
+    # Fallback, no homer or XBH context, just report the number
     options = [
-        f"He also barreled one at {hardest_ev:.1f} mph — his hardest contact of the night.",
+        f"He also barreled one at {hardest_ev:.1f} mph, his hardest contact of the night.",
         f"The contact quality was there too, with his hardest ball checking in at {hardest_ev:.1f} mph.",
         f"He hit one {hardest_ev:.1f} mph that showed off the raw power.",
         f"His loudest contact came at {hardest_ev:.1f} mph.",
-        f"He had at least one at-bat where the bat really sang — {hardest_ev:.1f} mph off the barrel.",
+        f"He had at least one at-bat where the bat really sang, {hardest_ev:.1f} mph off the barrel.",
         f"The exit velo peaked at {hardest_ev:.1f} mph, which gets anyone's attention.",
     ]
     return random.choice(options)
@@ -2601,7 +2603,7 @@ def build_hitter_summary(
                 return sentence
         return ""
 
-    # Build the ordered pool list — randomize where EV lands relative to fantasy/meta
+    # Build the ordered pool list, randomize where EV lands relative to fantasy/meta
     # so the hard-hit sentence doesn't always appear last
     ordered_pools: list[tuple[list[str], str | None]] = [
         (context_pool, "context"),
@@ -2647,7 +2649,7 @@ def build_hitter_summary(
         if time_of_day == "day" and hits >= 3 and random.random() < 0.4:
             sentences.append(random.choice([
                 f"Not bad for a day game.",
-                f"He was locked in early — a day game didn't slow him down.",
+                f"He was locked in early, a day game didn't slow him down.",
                 f"The day game didn't matter to {last_name}.",
             ]))
 
