@@ -27,11 +27,11 @@ RESET_HITTER_STATE = os.getenv("RESET_HITTER_STATE", "").lower() in {"1", "true"
 MIN_HITTER_SCORE = float(os.getenv("HITTER_MIN_SCORE", "5.0"))
 MAX_CARDS_PER_GAME = int(os.getenv("HITTER_MAX_CARDS_PER_GAME", "10"))
 REQUEST_TIMEOUT = float(os.getenv("HITTER_REQUEST_TIMEOUT", "30"))
-MAX_POSTS_PER_SCAN = int(os.getenv("HITTER_MAX_POSTS_PER_SCAN", "10"))
-MAX_POSTS_PER_GAME_PER_SCAN = int(os.getenv("HITTER_MAX_POSTS_PER_GAME_PER_SCAN", "1"))
+MAX_POSTS_PER_SCAN = int(os.getenv("HITTER_MAX_POSTS_PER_SCAN", "18"))
+MAX_POSTS_PER_GAME_PER_SCAN = int(os.getenv("HITTER_MAX_POSTS_PER_GAME_PER_SCAN", "18"))
 POST_DELAY_SECONDS = float(os.getenv("HITTER_POST_DELAY_SECONDS", "1.25"))
-AWAKE_SCAN_MIN_MINUTES = int(os.getenv("HITTER_AWAKE_SCAN_MIN_MINUTES", "2"))
-AWAKE_SCAN_MAX_MINUTES = int(os.getenv("HITTER_AWAKE_SCAN_MAX_MINUTES", "5"))
+AWAKE_SCAN_MIN_MINUTES = int(os.getenv("HITTER_AWAKE_SCAN_MIN_MINUTES", "10"))
+AWAKE_SCAN_MAX_MINUTES = int(os.getenv("HITTER_AWAKE_SCAN_MAX_MINUTES", "10"))
 SLEEP_START_HOUR_ET = int(os.getenv("HITTER_SLEEP_START_HOUR_ET", "3"))
 SLEEP_END_HOUR_ET = int(os.getenv("HITTER_SLEEP_END_HOUR_ET", "13"))
 ESPN_PLAYER_IDS_PATH = os.getenv("ESPN_PLAYER_IDS_PATH", "shared/player_ids/espn_player_ids.json")
@@ -360,9 +360,7 @@ def seconds_until_wake(current_dt: datetime) -> int:
 
 
 def get_random_awake_interval_seconds() -> int:
-    low = max(AWAKE_SCAN_MIN_MINUTES, 1)
-    high = max(AWAKE_SCAN_MAX_MINUTES, low)
-    return random.randint(low * 60, high * 60)
+    return max(POLL_MINUTES, 1) * 60
 
 
 
@@ -1239,6 +1237,55 @@ async def post_card(channel: discord.abc.Messageable, hitter: dict, opponent: st
     embed.add_field(name="Season", value=format_hitter_season_line(hitter.get("season_stats", {})), inline=False)
     await channel.send(embed=embed)
 
+
+
+def format_hitter_game_line(stats: dict) -> str:
+    ab = safe_int(stats.get("atBats", 0), 0)
+    hits = safe_int(stats.get("hits", 0), 0)
+    runs = safe_int(stats.get("runs", 0), 0)
+    rbi = safe_int(stats.get("rbi", 0), 0)
+    walks = safe_int(stats.get("baseOnBalls", 0), 0)
+    strikeouts = safe_int(stats.get("strikeOuts", 0), 0)
+    homers = safe_int(stats.get("homeRuns", 0), 0)
+    doubles = safe_int(stats.get("doubles", 0), 0)
+    triples = safe_int(stats.get("triples", 0), 0)
+    steals = safe_int(stats.get("stolenBases", 0), 0)
+
+    parts = [f"{hits}-{ab}", f"{runs} R", f"{rbi} RBI"]
+    if homers:
+        parts.append(f"{homers} HR")
+    if doubles:
+        parts.append(f"{doubles} 2B")
+    if triples:
+        parts.append(f"{triples} 3B")
+    if walks:
+        parts.append(f"{walks} BB")
+    if steals:
+        parts.append(f"{steals} SB")
+    if strikeouts:
+        parts.append(f"{strikeouts} K")
+    return " • ".join(parts)
+
+
+def format_hitter_season_line(season_stats: dict) -> str:
+    season = season_stats or {}
+    avg = season.get("avg") or season.get("battingAverage") or ".000"
+    obp = season.get("obp") or season.get("onBasePercentage") or ".000"
+    hr = safe_int(season.get("homeRuns", 0), 0)
+    rbi = safe_int(season.get("rbi", 0), 0)
+    runs = safe_int(season.get("runs", 0), 0)
+    sb = safe_int(season.get("stolenBases", 0), 0)
+
+    parts = [f"AVG {avg}", f"OBP {obp}"]
+    if hr > 0:
+        parts.append(f"{hr} HR")
+    if rbi > 0:
+        parts.append(f"{rbi} RBI")
+    if runs > 0:
+        parts.append(f"{runs} R")
+    if sb > 0:
+        parts.append(f"{sb} SB")
+    return " • ".join(parts)
 
 # ---------------- LOOP ----------------
 
