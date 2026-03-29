@@ -41,6 +41,7 @@ client: discord.Client | None = None
 background_task: asyncio.Task | None = None
 player_headshot_index: dict | None = None
 hitter_stats_cache: dict = {}
+decisive_event_cache: dict = {}
 
 
 TEAM_COLORS = {
@@ -147,6 +148,13 @@ def normalize_team_abbr(team: str | None) -> str:
 def team_name_from_abbr(team: str | None) -> str:
     normalized = normalize_team_abbr(team)
     return TEAM_NAME_MAP.get(normalized, normalized or "opponent")
+
+
+def team_possessive(team_name: str) -> str:
+    cleaned = (team_name or "team").strip()
+    if cleaned.endswith("s"):
+        return f"{cleaned}'"
+    return f"{cleaned}'s"
 
 
 def get_logo(team: str | None) -> str:
@@ -606,6 +614,70 @@ def _pick_context_sentences(context_pool: list[str], count: int = 2) -> list[str
         if len(chosen) >= count:
             break
     return chosen
+
+
+def _final_score_by_side(feed: dict) -> tuple[int, int]:
+    linescore = feed.get("liveData", {}).get("linescore", {}) or {}
+    teams = linescore.get("teams", {}) or {}
+    away = safe_int(teams.get("away", {}).get("runs", 0), 0)
+    home = safe_int(teams.get("home", {}).get("runs", 0), 0)
+    return away, home
+
+
+def _get_decisive_event(feed: dict) -> dict:
+    game_pk = str(feed.get("gameData", {}).get("game", {}).get("pk", ""))
+    if game_pk in decisive_event_cache:
+        return decisive_event_cache[game_pk]
+
+    final_away, final_home = _final_score_by_side(feed)
+    winner_side = "away" if final_away > final_home else "home" if final_home > final_away else ""
+    if not winner_side:
+        decisive_event_cache[game_pk] = {}
+        return {}
+
+    plays = feed.get("liveData", {}).get("plays", {}).get("allPlays", []) or []
+    decisive: dict = {}
+    for idx, play in enumerate(plays):
+        result = play.get("result", {}) or {}
+        about = play.get("about", {}) or {}
+        if not about.get("isScoringPlay"):
+            continue
+
+        away_after = safe_int(result.get("awayScore", 0), 0)
+        home_after = safe_int(result.get("homeScore", 0), 0)
+
+        if winner_side == "away":
+            if away_after <= home_after:
+                continue
+            remained_ahead = True
+            for later in plays[idx + 1:]:
+                later_result = later.get("result", {}) or {}
+                later_away = safe_int(later_result.get("awayScore", away_after), 0)
+                later_home = safe_int(later_result.get("homeScore", home_after), 0)
+                if later_away <= later_home:
+                    remained_ahead = False
+                    break
+            if remained_ahead:
+                decisive = play
+                break
+        else:
+            if home_after <= away_after:
+                continue
+            remained_ahead = True
+            for later in plays[idx + 1:]:
+                later_result = later.get("result", {}) or {}
+                later_away = safe_int(later_result.get("awayScore", away_after), 0)
+                later_home = safe_int(later_result.get("homeScore", home_after), 0)
+                if later_home <= later_away:
+                    remained_ahead = False
+                    break
+            if remained_ahead:
+                decisive = play
+                break
+
+    decisive_event_cache[game_pk] = decisive or {}
+    return decisive_event_cache[game_pk]
+
 
 def build_hitter_game_context(feed: dict, hitter: dict) -> dict:
     hitter_id = hitter.get("id")
@@ -1258,34 +1330,41 @@ def build_hitter_subject(name: str, stats: dict, label: str, context: dict, rece
     ])
 
 
+
 def _build_summary_opening(name: str, stats: dict, context: dict, opponent_text: str, team_name: str, team_won: bool) -> str:
     stat_phrase = _stat_phrase(stats)
+    possessive = team_possessive(team_name)
     if context.get("walkoff"):
         return random.choice([
-            f"{name} went {stat_phrase} in {team_name}'s win over the {opponent_text}, ending the game with the walk-off swing.",
+            f"{name} went {stat_phrase} in {possessive} win over the {opponent_text}, ending the game with the walk-off swing.",
             f"{name} finished {stat_phrase} as the {team_name} beat the {opponent_text}, and his final swing ended it.",
+            f"{name} turned in a {stat_phrase} line in {possessive} win over the {opponent_text}, then put the game away in the final at-bat.",
         ])
     if context.get("go_ahead_homer"):
         return random.choice([
-            f"{name} went {stat_phrase} in {team_name}'s win over the {opponent_text}, with his homer providing the biggest swing of the night.",
-            f"{name} finished {stat_phrase} as the {team_name} beat the {opponent_text}, and his homer changed the shape of the game.",
+            f"{name} went {stat_phrase} in {possessive} win over the {opponent_text}, with his homer providing the swing that decided the game.",
+            f"{name} finished {stat_phrase} as the {team_name} beat the {opponent_text}, and his homer changed the shape of the night.",
+            f"{name} turned in a {stat_phrase} line in {possessive} win over the {opponent_text}, with his biggest damage coming on the decisive swing.",
         ])
     if context.get("go_ahead_hit"):
         return random.choice([
-            f"{name} went {stat_phrase} in {team_name}'s win over the {opponent_text}, and he came through with the hit that mattered most.",
-            f"{name} finished {stat_phrase} as the {team_name} beat the {opponent_text}, with his biggest contribution coming in a key late spot.",
+            f"{name} went {stat_phrase} in {possessive} win over the {opponent_text}, and he came through with the hit that ultimately decided it.",
+            f"{name} finished {stat_phrase} as the {team_name} beat the {opponent_text}, with his biggest contribution arriving in a key late spot.",
+            f"{name} turned in a {stat_phrase} line in {possessive} win over the {opponent_text}, and his go-ahead hit proved to be the difference.",
         ])
     if context.get("game_tying_hit"):
         return random.choice([
             f"{name} went {stat_phrase} against the {opponent_text}, helping the {team_name} stay in the game with a key equalizer.",
             f"{name} finished {stat_phrase} against the {opponent_text}, and one of his biggest swings pulled the {team_name} back even.",
+            f"{name} turned in a {stat_phrase} line against the {opponent_text}, and his biggest hit came when the {team_name} needed to claw back.",
         ])
-    result_phrase = f"in {team_name}'s win over the {opponent_text}" if team_won else f"in {team_name}'s loss to the {opponent_text}"
+    result_phrase = f"in {possessive} win over the {opponent_text}" if team_won else f"in {possessive} loss to the {opponent_text}"
     return random.choice([
         f"{name} went {stat_phrase} {result_phrase}.",
         f"{name} finished {stat_phrase} {result_phrase}.",
         f"{name} turned in a {stat_phrase} line {result_phrase}.",
     ])
+
 
 
 def build_hitter_summary(
@@ -1611,9 +1690,8 @@ async def hitter_loop() -> None:
                 )
 
                 posted_this_game = 0
-                game_scan_limit = max(1, min(MAX_CARDS_PER_GAME, MAX_POSTS_PER_GAME_PER_SCAN))
                 for score_value, hitter in ranked:
-                    if posts_this_scan >= MAX_POSTS_PER_SCAN or posted_this_game >= game_scan_limit:
+                    if posts_this_scan >= MAX_POSTS_PER_SCAN:
                         break
 
                     hitter_id = hitter.get("id")
