@@ -772,6 +772,8 @@ def build_hitter_game_context(feed: dict, hitter: dict) -> dict:
         "balls_100": 0,
         "homers": [],
         "extra_base_hits": [],
+        "steals": [],         # {base: str, inning: int}
+        "pa": 0,              # plate appearances
     }
     if hitter_id is None:
         return context
@@ -837,10 +839,71 @@ def build_hitter_game_context(feed: dict, hitter: dict) -> dict:
                 if ev >= 100:
                     context["balls_100"] += 1
 
+        # Count plate appearances
+        context["pa"] += 1
+
+        # Extract pitch type and hit location for homers/XBH
+        pitch_type = ""
+        pitch_speed = 0
+        hit_trajectory = ""
+        hit_location = ""  # "pull", "center", "oppo"
+
+        for event_obj in play.get("playEvents", []) or []:
+            if not isinstance(event_obj, dict):
+                continue
+            # Find the pitch that ended the at-bat
+            if event_obj.get("type") == "pitch" and event_obj.get("atBatIndex") is not None:
+                pitch_details = event_obj.get("pitchData", {}) or {}
+                pitch_type_obj = event_obj.get("details", {}) or {}
+                raw_type = pitch_type_obj.get("type", {}) or {}
+                pitch_type = str(raw_type.get("description") or "").strip()
+                pitch_speed = float(pitch_details.get("startSpeed") or 0)
+            # Hit data for trajectory/location
+            hit_data = event_obj.get("hitData") if isinstance(event_obj, dict) else None
+            if isinstance(hit_data, dict):
+                hit_trajectory = str(hit_data.get("trajectory") or "").lower()
+                # Determine pull/center/oppo from hit coordinates
+                coords = hit_data.get("coordinates") or {}
+                coord_x = float(coords.get("coordX") or 0)
+                # MLB coordinate system: 125 = roughly center
+                # Left side of field = lower x (pull for RHH, oppo for LHH)
+                if coord_x > 0:
+                    if coord_x < 100:
+                        hit_location = "left"
+                    elif coord_x > 155:
+                        hit_location = "right"
+                    else:
+                        hit_location = "center"
+
+        # Stolen base events
+        if event_type in {"stolen_base_2b", "stolen_base_3b", "stolen_base_home"}:
+            base_map = {
+                "stolen_base_2b": "second",
+                "stolen_base_3b": "third",
+                "stolen_base_home": "home",
+            }
+            context["steals"].append({
+                "base": base_map.get(event_type, "second"),
+                "inning": inning,
+            })
+
         if "home run" in event or event_type == "home_run":
-            context["homers"].append({"inning": inning, "rbi": rbi})
+            context["homers"].append({
+                "inning": inning,
+                "rbi": rbi,
+                "pitch_type": pitch_type,
+                "pitch_speed": pitch_speed,
+                "trajectory": hit_trajectory,
+                "location": hit_location,
+            })
         if event_type in {"double", "triple"}:
-            context["extra_base_hits"].append({"type": event_type, "inning": inning, "rbi": rbi})
+            context["extra_base_hits"].append({
+                "type": event_type,
+                "inning": inning,
+                "rbi": rbi,
+                "trajectory": hit_trajectory,
+                "location": hit_location,
+            })
 
     decisive_play = _get_decisive_event(feed)
     decisive_batter_id = ((decisive_play.get("matchup", {}) or {}).get("batter", {}) or {}).get("id") if decisive_play else None
@@ -1688,9 +1751,14 @@ def _last_name(full_name: str) -> str:
 
 def _stat_phrase(stats: dict) -> str:
     """Headline stat phrase for the opener. Leads with impact stats only.
-    Walks and runs are shown in the game line field already."""
+    Walks and runs are shown in the game line field already.
+    Uses PA context to frame efficiency (2-for-3 vs 2-for-5)."""
     hits = safe_int(stats.get("hits", 0), 0)
     ab = safe_int(stats.get("atBats", 0), 0)
+    walks = safe_int(stats.get("baseOnBalls", 0), 0)
+    hbp = safe_int(stats.get("hitByPitch", 0), 0)
+    sac = safe_int(stats.get("sacFlies", 0), 0) + safe_int(stats.get("sacBunts", 0), 0)
+    pa = ab + walks + hbp + sac
     rbi = safe_int(stats.get("rbi", 0), 0)
     homers = safe_int(stats.get("homeRuns", 0), 0)
     doubles = safe_int(stats.get("doubles", 0), 0)
@@ -1709,7 +1777,11 @@ def _stat_phrase(stats: dict) -> str:
     if steals:
         extras.append(_small_count_phrase(steals, "stolen base"))
 
-    base = f"{hits}-for-{ab}"
+    # Use PA if meaningfully different from AB (i.e. walks present)
+    if walks >= 2 and pa > ab:
+        base = f"{hits}-for-{ab} ({pa} PA)"
+    else:
+        base = f"{hits}-for-{ab}"
     return f"{base} with {_join_text(extras)}" if extras else base
 
 
@@ -2557,7 +2629,6 @@ def _build_summary_opening(
         stat_phrase=stat_phrase,
         opponent_text=opponent_text,
         team_name=team_name,
-        possessive=possessive,
         result_phrase=result_phrase,
         result_verb=result_verb,
     )
@@ -2630,6 +2701,67 @@ def _event_specific_ev_sentence(context: dict, hardest_ev: float | None) -> str:
     return random.choice(options)
 
 
+def _simplify_pitch_type(pitch_type: str, speed: float) -> str:
+    """Convert MLB pitch type description to plain English."""
+    pt = (pitch_type or "").lower()
+    if not pt:
+        return ""
+    if "four-seam" in pt or "4-seam" in pt or "fastball" in pt:
+        if speed >= 95:
+            return f"a {speed:.0f} mph fastball"
+        elif speed > 0:
+            return f"a {speed:.0f} mph heater"
+        return "a fastball"
+    if "sinker" in pt or "two-seam" in pt or "2-seam" in pt:
+        return f"a sinker" if speed == 0 else f"a {speed:.0f} mph sinker"
+    if "cutter" in pt:
+        return "a cutter"
+    if "slider" in pt:
+        return "a slider"
+    if "curveball" in pt or "curve" in pt:
+        return "a curveball"
+    if "changeup" in pt or "change" in pt:
+        return "a changeup"
+    if "splitter" in pt or "split" in pt:
+        return "a splitter"
+    if "sweeper" in pt:
+        return "a sweeper"
+    if "knuckleball" in pt:
+        return "a knuckleball"
+    return ""
+
+
+def _hit_location_phrase(location: str, trajectory: str, batter_side: str = "") -> str:
+    """Return a descriptive phrase for hit location."""
+    loc = (location or "").lower()
+    traj = (trajectory or "").lower()
+
+    traj_word = ""
+    if "line" in traj:
+        traj_word = "line drive"
+    elif "fly" in traj:
+        traj_word = "fly ball"
+    elif "ground" in traj:
+        traj_word = "ground ball"
+    elif "popup" in traj or "pop" in traj:
+        traj_word = "popup"
+
+    if loc == "left":
+        if traj_word:
+            return f"a {traj_word} to left"
+        return "to left field"
+    if loc == "right":
+        if traj_word:
+            return f"a {traj_word} to right"
+        return "to right field"
+    if loc == "center":
+        if traj_word:
+            return f"a {traj_word} to center"
+        return "to center field"
+
+    return traj_word if traj_word else ""
+
+
 def _event_text_from_context(context: dict) -> tuple[str, str]:
     homers = context.get("homers") or []
     xbh = context.get("extra_base_hits") or []
@@ -2657,33 +2789,47 @@ def _event_text_from_context(context: dict) -> tuple[str, str]:
             inning = safe_int(xbh[0].get("inning", 0), 0)
         return "delivered the game-tying hit", f"in the {_ordinal(inning)}" if inning else ""
     if homers:
-        inning = safe_int(homers[0].get("inning", 0), 0)
-        rbi = safe_int(homers[0].get("rbi", 0), 0)
-        # Build a specific homer description based on RBI count
+        first = homers[0]
+        inning = safe_int(first.get("inning", 0), 0)
+        rbi = safe_int(first.get("rbi", 0), 0)
+        pitch_type = first.get("pitch_type", "")
+        pitch_speed = float(first.get("pitch_speed") or 0)
+        trajectory = first.get("trajectory", "")
+        location = first.get("location", "")
+
+        pitch_phrase = _simplify_pitch_type(pitch_type, pitch_speed)
+        loc_phrase = _hit_location_phrase(location, trajectory)
+
+        # Build RBI description
         if rbi >= 3:
-            hr_text = random.choice([
+            rbi_desc = random.choice([
                 f"hit a {_word_or_number(rbi)}-run homer",
                 f"went deep with a {_word_or_number(rbi)}-run shot",
                 f"cleared the bases with a {_word_or_number(rbi)}-run blast",
             ])
         elif rbi == 2:
-            hr_text = random.choice([
+            rbi_desc = random.choice([
                 "hit a two-run homer",
                 "went deep with a two-run shot",
                 "launched a two-run blast",
             ])
         elif rbi == 1:
-            hr_text = random.choice([
+            rbi_desc = random.choice([
                 "hit a solo homer",
                 "went deep on a solo shot",
-                "took one out on his own",
+                "took one deep on his own",
             ])
         else:
-            hr_text = random.choice([
-                "went deep",
-                "left the yard",
-                "hit a homer",
-            ])
+            rbi_desc = random.choice(["went deep", "left the yard", "hit a homer"])
+
+        # Weave in pitch type ~60% of the time if available
+        if pitch_phrase and random.random() < 0.6:
+            hr_text = f"{rbi_desc} off {pitch_phrase}"
+        elif loc_phrase and random.random() < 0.5:
+            hr_text = f"{rbi_desc} {loc_phrase}"
+        else:
+            hr_text = rbi_desc
+
         return hr_text, f"in the {_ordinal(inning)}" if inning else ""
     if xbh:
         hit_type = "double" if xbh[0].get("type") == "double" else "triple"
@@ -2704,6 +2850,58 @@ def _event_text_from_context(context: dict) -> tuple[str, str]:
     if context.get("late_rbi_hit"):
         return "did damage in a key late spot", ""
     return "", ""
+
+
+def _steal_context_sentence(context: dict) -> str:
+    """Build a natural sentence about stolen base context."""
+    steals = context.get("steals") or []
+    if not steals:
+        return ""
+
+    if len(steals) >= 2:
+        bases = [s.get("base", "second") for s in steals[:2]]
+        innings = [safe_int(s.get("inning", 0), 0) for s in steals[:2]]
+        if all(i > 0 for i in innings):
+            return random.choice([
+                f"He swiped {bases[0]} base in the {_ordinal(innings[0])} and {bases[1]} in the {_ordinal(innings[1])}.",
+                f"The stolen bases came in the {_ordinal(innings[0])} and {_ordinal(innings[1])} innings.",
+                f"He was a threat on the bases all night, stealing in the {_ordinal(innings[0])} and {_ordinal(innings[1])}.",
+            ])
+        return random.choice([
+            "He was a threat on the bases all night.",
+            "The stolen bases came at different points in the game.",
+            "He kept the defense honest with multiple swipes.",
+        ])
+
+    steal = steals[0]
+    base = steal.get("base", "second")
+    inning = safe_int(steal.get("inning", 0), 0)
+
+    if base == "home":
+        return random.choice([
+            f"He even stole home{f' in the {_ordinal(inning)}' if inning else ''} — that doesn't happen often.",
+            f"The steal of home{f' in the {_ordinal(inning)}' if inning else ''} was the highlight on the bases.",
+        ])
+    if base == "third":
+        inning_str = f" in the {_ordinal(inning)}" if inning else ""
+        return random.choice([
+            f"He took third{inning_str} and immediately became a scoring threat.",
+            f"Stealing third{inning_str} put him in prime position to score.",
+            f"He was aggressive on the bases, taking third{inning_str}.",
+        ])
+    # Second base
+    inning_str = f" in the {_ordinal(inning)}" if inning else ""
+    late = inning >= 7 if inning else False
+    if late:
+        return random.choice([
+            f"The stolen base{inning_str} came at a key moment late in the game.",
+            f"He stole second{inning_str} and put himself in scoring position at a critical time.",
+        ])
+    return random.choice([
+        f"He took second{inning_str} and put himself in scoring position.",
+        f"The stolen base{inning_str} showed what he can do on the bases.",
+        f"He swiped second{inning_str} and kept the pressure on.",
+    ])
 
 
 def build_hitter_summary(
@@ -2789,6 +2987,12 @@ def build_hitter_summary(
     close_game_sentence = _close_game_context(team_score, opp_score, team_won, context, rbi)
     if close_game_sentence:
         meta_pool.append(close_game_sentence)
+
+    # Stolen base context — always include for speed nights
+    if steals >= 1:
+        steal_sentence = _steal_context_sentence(context)
+        if steal_sentence:
+            meta_pool.insert(0, steal_sentence)
 
     # Opponent record sentence (gated to 7 days after opening day)
     if opponent_abbr:
