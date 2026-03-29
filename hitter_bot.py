@@ -36,6 +36,10 @@ AWAKE_SCAN_MAX_MINUTES = int(os.getenv("HITTER_AWAKE_SCAN_MAX_MINUTES", "5"))
 SLEEP_START_HOUR_ET = int(os.getenv("HITTER_SLEEP_START_HOUR_ET", "3"))
 SLEEP_END_HOUR_ET = int(os.getenv("HITTER_SLEEP_END_HOUR_ET", "13"))
 ESPN_PLAYER_IDS_PATH = os.getenv("ESPN_PLAYER_IDS_PATH", "shared/player_ids/espn_player_ids.json")
+RECAP_CHANNEL_ID = int(os.getenv("HITTER_RECAP_CHANNEL_ID", "0"))
+LEADERBOARD_CHANNEL_ID = int(os.getenv("HITTER_LEADERBOARD_CHANNEL_ID", "0"))
+RECAP_MIN_PLAYERS = int(os.getenv("HITTER_RECAP_MIN_PLAYERS", "4"))
+LEADERBOARD_TOP_N = int(os.getenv("HITTER_LEADERBOARD_TOP_N", "10"))
 
 intents = discord.Intents.default()
 client: discord.Client | None = None
@@ -628,6 +632,52 @@ def _pick_context_sentences(context_pool: list[str], count: int = 2) -> list[str
             break
     return chosen
 
+def get_opposing_starter(feed: dict, hitter_side: str) -> dict:
+    """Return {'name': str, 'era': str} for the opposing starting pitcher, or empty strings."""
+    pitcher_side = "home" if hitter_side == "away" else "away"
+    box_team = feed.get("liveData", {}).get("boxscore", {}).get("teams", {}).get(pitcher_side, {})
+    pitchers = box_team.get("pitchers", [])
+    players = box_team.get("players", {})
+
+    starter_id = pitchers[0] if pitchers else None
+    if not starter_id:
+        return {"name": "", "era": ""}
+
+    player_key = f"ID{starter_id}"
+    player = players.get(player_key, {})
+    name = player.get("person", {}).get("fullName", "")
+
+    season_stats = player.get("seasonStats", {})
+    if isinstance(season_stats, dict) and "pitching" in season_stats:
+        era = season_stats["pitching"].get("era", "")
+    else:
+        era = season_stats.get("era", "")
+
+    return {"name": name, "era": str(era) if era else ""}
+
+
+def get_batting_order_spot(feed: dict, hitter: dict) -> int:
+    """Return the hitter's lineup spot (1-9), or 0 if unknown."""
+    side = hitter.get("side", "")
+    hitter_id = hitter.get("id")
+    if not side or hitter_id is None:
+        return 0
+
+    players = (
+        feed.get("liveData", {})
+        .get("boxscore", {})
+        .get("teams", {})
+        .get(side, {})
+        .get("players", {})
+    )
+    for player in players.values():
+        if player.get("person", {}).get("id") == hitter_id:
+            order = safe_int(player.get("battingOrder", 0), 0)
+            if order:
+                return order // 100
+    return 0
+
+
 def build_hitter_game_context(feed: dict, hitter: dict) -> dict:
     hitter_id = hitter.get("id")
     side = hitter.get("side")
@@ -861,6 +911,7 @@ def classify_hitter(stats: dict) -> str:
     steals = safe_int(stats.get("stolenBases", 0), 0)
     doubles = safe_int(stats.get("doubles", 0), 0)
     triples = safe_int(stats.get("triples", 0), 0)
+    walks = safe_int(stats.get("baseOnBalls", 0), 0)
     xbh = homers + doubles + triples
 
     if homers >= 2:
@@ -877,6 +928,8 @@ def classify_hitter(stats: dict) -> str:
         return "run_producer"
     if hits >= 3:
         return "steady_attack"
+    if walks >= 2 and hits <= 1:
+        return "on_base_grinder"
     return "solid_night"
 
 
@@ -925,13 +978,27 @@ def _recent_trend_note(recent_games: list[dict], stats: dict) -> str:
     return ""
 
 
-def build_hitter_subject(name: str, stats: dict, label: str, context: dict, recent_games: list[dict]) -> str:
+# Positions considered premium for fantasy (harder to produce at those spots)
+_PREMIUM_POSITIONS = {"C", "SS", "2B", "3B"}
+_CORNER_POSITIONS  = {"1B", "LF", "RF"}
+
+def _position_note(position: str) -> str:
+    """Return a parenthetical note if position adds fantasy context, else empty string."""
+    pos = (position or "").upper()
+    if pos in _PREMIUM_POSITIONS:
+        return f" (at {pos})"
+    return ""
+
+
+def build_hitter_subject(name: str, stats: dict, label: str, context: dict, recent_games: list[dict], position: str = "") -> str:
     hits = safe_int(stats.get("hits", 0), 0)
     homers = safe_int(stats.get("homeRuns", 0), 0)
     rbi = safe_int(stats.get("rbi", 0), 0)
     steals = safe_int(stats.get("stolenBases", 0), 0)
     doubles = safe_int(stats.get("doubles", 0), 0)
     triples = safe_int(stats.get("triples", 0), 0)
+    walks = safe_int(stats.get("baseOnBalls", 0), 0)
+    pos_note = _position_note(position)
 
     streak_hits = 0
     for game in recent_games:
@@ -941,45 +1008,57 @@ def build_hitter_subject(name: str, stats: dict, label: str, context: dict, rece
             break
     hit_streak = streak_hits + (1 if hits > 0 else 0)
 
+    # Streak callouts take priority when streak is notable
+    if hit_streak >= 10 and homers >= 1:
+        return f"{name} homers to extend a {hit_streak}-game hit streak{pos_note}"
+    if hit_streak >= 10:
+        return f"{name} extends his hit streak to {hit_streak} games{pos_note}"
+    if hit_streak >= 7 and homers >= 1:
+        return f"{name} stays red-hot with a homer — {hit_streak} straight with a hit{pos_note}"
+    if hit_streak >= 7:
+        return f"{name} keeps the streak alive — hits in {hit_streak} straight{pos_note}"
+
     if context.get("walkoff"):
-        return f"{name} delivers the walk-off hit"
+        return f"{name} delivers the walk-off hit{pos_note}"
     if context.get("go_ahead_homer") and rbi >= 2:
-        return f"{name} hits the go-ahead homer and drives in {rbi}"
+        return f"{name} hits the go-ahead homer and drives in {rbi}{pos_note}"
     if context.get("go_ahead_homer"):
-        return f"{name} breaks it open with the go-ahead homer"
+        return f"{name} breaks it open with the go-ahead homer{pos_note}"
     if context.get("game_tying_hit") and homers >= 1 and rbi >= 2:
-        return f"{name} ties it up with a {rbi}-run homer"
+        return f"{name} ties it up with a {rbi}-run homer{pos_note}"
     if context.get("go_ahead_hit") and rbi >= 2:
-        return f"{name} comes through with the go-ahead hit and {rbi} RBI"
+        return f"{name} comes through with the go-ahead hit and {rbi} RBI{pos_note}"
     if context.get("go_ahead_hit"):
-        return f"{name} comes through with the go-ahead hit"
+        return f"{name} comes through with the go-ahead hit{pos_note}"
     if homers >= 2:
-        return f"{name} homers twice in a big night at the plate"
+        return f"{name} homers twice in a big night at the plate{pos_note}"
     if homers == 1 and doubles + triples >= 1:
-        return f"{name} does damage with multiple extra-base hits"
+        return f"{name} does damage with multiple extra-base hits{pos_note}"
     if homers == 1 and rbi >= 3:
-        return f"{name} goes deep and drives in {rbi}"
+        return f"{name} goes deep and drives in {rbi}{pos_note}"
     if hits >= 4:
-        return f"{name} collects four hits in a standout game"
+        return f"{name} collects four hits in a standout game{pos_note}"
     if hits >= 3 and rbi >= 3:
-        return f"{name} piles up three hits and {rbi} RBI"
+        return f"{name} piles up three hits and {rbi} RBI{pos_note}"
     if hits >= 3 and doubles + triples >= 1:
-        return f"{name} strings together three hits and extra-base damage"
+        return f"{name} strings together three hits and extra-base damage{pos_note}"
     if steals >= 2 and hits >= 2:
-        return f"{name} reaches, runs, and swipes {steals} bags"
+        return f"{name} reaches, runs, and swipes {steals} bags{pos_note}"
     if steals >= 2:
-        return f"{name} changes the game with {steals} stolen bases"
+        return f"{name} changes the game with {steals} stolen bases{pos_note}"
     if rbi >= 4:
-        return f"{name} drives in {rbi} runs in a big fantasy line"
+        return f"{name} drives in {rbi} runs in a big fantasy line{pos_note}"
     if hit_streak >= 6 and homers >= 1:
-        return f"{name} stays hot with another homer"
+        return f"{name} stays hot with another homer{pos_note}"
     if hit_streak >= 6:
-        return f"{name} stays hot with another multi-hit game"
+        return f"{name} stays hot with another multi-hit game{pos_note}"
     if hits >= 3:
-        return f"{name} turns in a three-hit game"
+        return f"{name} turns in a three-hit game{pos_note}"
     if homers == 1:
-        return f"{name} leaves the yard in a productive night"
-    return f"{name} puts together a useful night at the plate"
+        return f"{name} leaves the yard in a productive night{pos_note}"
+    if label == "on_base_grinder" and walks >= 2:
+        return f"{name} grinds out a high on-base night{pos_note}"
+    return f"{name} puts together a useful night at the plate{pos_note}"
 
 
 def format_hitter_game_line(stats: dict) -> str:
@@ -1188,7 +1267,7 @@ def _build_summary_opening(name: str, stats: dict, label: str, context: dict, op
     return random.choice(fallback_options)
 
 
-def build_hitter_summary(name: str, team: str, stats: dict, label: str, context: dict, opponent: str, team_won: bool, recent_games: list[dict]) -> str:
+def build_hitter_summary(name: str, team: str, stats: dict, label: str, context: dict, opponent: str, team_won: bool, recent_games: list[dict], pitcher: dict | None = None, lineup_spot: int = 0, team_score: int = 0, opp_score: int = 0) -> str:
     team_name = team_name_from_abbr(team)
     opponent_text = opponent or "the opposing club"
 
@@ -1276,6 +1355,68 @@ def build_hitter_summary(name: str, team: str, stats: dict, label: str, context:
             "The stolen bases are what separate this line — speed like that adds value even on a quieter night at the plate.",
         ]))
 
+    # Pitcher context
+    if pitcher and pitcher.get("name"):
+        pname = pitcher["name"]
+        pera  = pitcher.get("era", "")
+        era_str = f" ({pera} ERA)" if pera and pera not in ("-.--", "0.00") else ""
+        if label in ("power_show", "impact_power") and homers >= 1:
+            extra_sentences.append(random.choice([
+                f"Worth noting he did that against {pname}{era_str}.",
+                f"He went deep off {pname}{era_str}, which gives the homer extra weight.",
+            ]))
+        elif label in ("hit_parade", "loud_three_hit", "steady_attack"):
+            extra_sentences.append(random.choice([
+                f"He picked apart {pname}{era_str} all night.",
+                f"The hit barrage came against {pname}{era_str}.",
+            ]))
+        elif era_str:
+            extra_sentences.append(f"The damage came against {pname}{era_str}.")
+
+    # Lineup spot context
+    if lineup_spot in (3, 4, 5) and rbi >= 3:
+        extra_sentences.append(random.choice([
+            f"He delivered as a middle-of-the-order bat, which is exactly what you want out of the {_ordinal(lineup_spot)} spot.",
+            f"Batting {_ordinal(lineup_spot)}, he was the engine of the offense tonight.",
+        ]))
+    elif lineup_spot == 1 and (steals >= 1 or runs >= 2):
+        extra_sentences.append(random.choice([
+            "He set the table and stayed on base, doing exactly what a leadoff man should.",
+            "The top-of-the-order job was done well — he got on, moved around, and made things happen.",
+        ]))
+    elif lineup_spot >= 7 and (homers >= 1 or rbi >= 3):
+        extra_sentences.append(random.choice([
+            f"Production out of the {_ordinal(lineup_spot)} spot in the order is a bonus — this line plays up because of where it came from.",
+            f"Coming from the bottom third of the lineup, this line carries extra value.",
+        ]))
+
+    # Score margin context
+    if team_score > 0 or opp_score > 0:
+        margin = abs(team_score - opp_score)
+        if team_won and margin == 1 and (context.get("go_ahead_hit") or context.get("go_ahead_homer") or rbi >= 2):
+            extra_sentences.append(random.choice([
+                "In a one-run game, every bit of his production mattered.",
+                "The final margin was one run — his contributions were the difference.",
+            ]))
+        elif not team_won and rbi >= 3:
+            extra_sentences.append(random.choice([
+                f"The team came up short, but his line held up regardless.",
+                f"Even in the loss, he gave you everything you needed from a fantasy standpoint.",
+            ]))
+        elif team_won and margin >= 5 and homers >= 2:
+            extra_sentences.append(random.choice([
+                "The blowout win gave him a chance to pile up counting stats, and he took full advantage.",
+                "With the game in hand early, he kept swinging and the numbers showed it.",
+            ]))
+
+    # Walk-heavy on-base night
+    if label == "on_base_grinder":
+        extra_sentences.append(random.choice([
+            f"He only had {hits} hit{'s' if hits != 1 else ''} but drew {walks} walks and was a constant presence on the bases.",
+            f"The hit total was modest but the walk column carried this line — {walks} free passes kept him relevant.",
+            f"He made the pitcher work all night and cashed in with {walks} walks to go with {hits} hit{'s' if hits != 1 else ''}.",
+        ]))
+
     hardest_ev = context.get("hardest_ev")
     balls_100 = safe_int(context.get("balls_100", 0), 0)
     if hardest_ev and hardest_ev >= 108:
@@ -1305,22 +1446,29 @@ def build_hitter_summary(name: str, team: str, stats: dict, label: str, context:
 
     return " ".join([first_sentence] + cleaned).strip()
 
+
 # ---------------- EMBED POSTING ----------------
 
-async def post_card(channel: discord.abc.Messageable, hitter: dict, opponent: str, team_won: bool, feed: dict, game_date_et) -> None:
+async def post_card(channel: discord.abc.Messageable, hitter: dict, opponent: str, team_won: bool, feed: dict, game_date_et, team_score: int = 0, opp_score: int = 0) -> None:
     stats = hitter["stats"]
     label = classify_hitter(stats)
+    position = hitter.get("position", "")
     recent_games = get_recent_hitter_games(hitter.get("id"), game_date_et)
     game_context = build_hitter_game_context(feed, hitter)
+    pitcher = get_opposing_starter(feed, hitter.get("side", "home"))
+    lineup_spot = get_batting_order_spot(feed, hitter)
     embed = discord.Embed(
         color=TEAM_COLORS.get(normalize_team_abbr(hitter["team"]), 0x2ECC71),
         timestamp=datetime.now(timezone.utc),
     )
     apply_player_card_chrome(embed, hitter["name"], hitter["team"])
-    embed.add_field(name="", value=f"**{build_hitter_subject(hitter['name'], stats, label, game_context, recent_games)}**", inline=False)
+    embed.add_field(name="", value=f"**{build_hitter_subject(hitter['name'], stats, label, game_context, recent_games, position=position)}**", inline=False)
     embed.add_field(
         name="Summary",
-        value=build_hitter_summary(hitter["name"], hitter["team"], stats, label, game_context, opponent, team_won, recent_games),
+        value=build_hitter_summary(
+            hitter["name"], hitter["team"], stats, label, game_context, opponent, team_won, recent_games,
+            pitcher=pitcher, lineup_spot=lineup_spot, team_score=team_score, opp_score=opp_score,
+        ),
         inline=False,
     )
     embed.add_field(name="Game Line", value=format_hitter_game_line(stats), inline=False)
@@ -1431,15 +1579,34 @@ async def hitter_loop() -> None:
                     team_won = (player_team == away_abbr and away_score > home_score) or (
                         player_team == home_abbr and home_score > away_score
                     )
+                    team_score = away_score if player_team == away_abbr else home_score
+                    opp_score  = home_score if player_team == away_abbr else away_score
 
                     log(f"Posting {hitter['name']} | {hitter['team']} | {matchup} | score={score_value}")
-                    await post_card(channel, hitter, opponent, team_won, feed, game_date_et)
+                    await post_card(channel, hitter, opponent, team_won, feed, game_date_et, team_score=team_score, opp_score=opp_score)
                     posted.add(post_key)
                     posted_this_game += 1
                     posts_this_scan += 1
 
+                    # track for leaderboard state
+                    state.setdefault("leaderboard", []).append({
+                        "name": hitter["name"],
+                        "team": hitter["team"],
+                        "score": score_value,
+                        "game_line": format_hitter_game_line(hitter["stats"]),
+                        "date": str(game_date_et),
+                    })
+
                     if posts_this_scan < MAX_POSTS_PER_SCAN:
                         await asyncio.sleep(max(POST_DELAY_SECONDS, 0.0))
+
+                # Multi-player game recap
+                if posted_this_game >= RECAP_MIN_PLAYERS and RECAP_CHANNEL_ID > 0:
+                    try:
+                        recap_channel = await client.fetch_channel(RECAP_CHANNEL_ID)
+                        await post_game_recap(recap_channel, ranked[:posted_this_game], matchup, away_score, home_score, away_name, home_name)
+                    except Exception as exc:
+                        log(f"Recap post error: {exc}")
 
             state["posted"] = sorted(posted)
             save_state(state)
@@ -1453,6 +1620,67 @@ async def hitter_loop() -> None:
         await asyncio.sleep(sleep_seconds)
 
 
+# ---------------- RECAP & LEADERBOARD ----------------
+
+async def post_game_recap(channel: discord.abc.Messageable, ranked_posted: list, matchup: str, away_score: int, home_score: int, away_name: str, home_name: str) -> None:
+    """Post a summary embed when 4+ players from the same game all earned cards."""
+    total_hr  = sum(safe_int(h["stats"].get("homeRuns", 0), 0) for _, h in ranked_posted)
+    total_rbi = sum(safe_int(h["stats"].get("rbi", 0), 0) for _, h in ranked_posted)
+    total_hits = sum(safe_int(h["stats"].get("hits", 0), 0) for _, h in ranked_posted)
+    names = [h["name"].split()[-1] for _, h in ranked_posted[:5]]
+    name_str = ", ".join(names[:-1]) + (f" and {names[-1]}" if len(names) > 1 else names[0])
+
+    lines = []
+    for score_val, h in ranked_posted:
+        line = format_hitter_game_line(h["stats"])
+        lines.append(f"**{h['name']}** ({h['team']}) — {line}")
+
+    description = "\n".join(lines)
+
+    embed = discord.Embed(
+        title=f"🔥 {matchup} — Offensive Explosion",
+        description=description,
+        color=0xF4C542,
+        timestamp=datetime.now(timezone.utc),
+    )
+    embed.add_field(name="Final", value=f"{away_name} {away_score} — {home_name} {home_score}", inline=True)
+    embed.add_field(name="Combined", value=f"{total_hits} H • {total_hr} HR • {total_rbi} RBI", inline=True)
+    embed.set_footer(text=f"{len(ranked_posted)} players earned cards from this game")
+    await channel.send(embed=embed)
+
+
+async def post_leaderboard(channel: discord.abc.Messageable, state: dict) -> None:
+    """Post today's top-N hitters by fantasy score."""
+    today = str(now_et().date())
+    entries = [e for e in state.get("leaderboard", []) if e.get("date") == today]
+    if not entries:
+        await channel.send("No hitter cards posted today yet.")
+        return
+
+    seen = {}
+    for e in entries:
+        key = e["name"]
+        if key not in seen or e["score"] > seen[key]["score"]:
+            seen[key] = e
+
+    top = sorted(seen.values(), key=lambda x: x["score"], reverse=True)[:LEADERBOARD_TOP_N]
+
+    medals = ["🥇", "🥈", "🥉"]
+    lines = []
+    for i, entry in enumerate(top):
+        medal = medals[i] if i < 3 else f"**{i+1}.**"
+        lines.append(f"{medal} **{entry['name']}** ({entry['team']}) — {entry['game_line']} *(score: {entry['score']:.1f})*")
+
+    embed = discord.Embed(
+        title=f"📊 Top {len(top)} Hitters — {today}",
+        description="\n".join(lines),
+        color=0x2ECC71,
+        timestamp=datetime.now(timezone.utc),
+    )
+    embed.set_footer(text="Score = fantasy point formula • Updates as games finish")
+    await channel.send(embed=embed)
+
+
 # ---------------- DISCORD LIFECYCLE ----------------
 
 async def on_ready() -> None:
@@ -1464,6 +1692,22 @@ async def on_ready() -> None:
         log("Hitter background task created")
 
 
+async def on_message(message: discord.Message) -> None:
+    if message.author.bot:
+        return
+    if message.content.strip().lower() != "!top":
+        return
+    lb_channel_id = LEADERBOARD_CHANNEL_ID or CHANNEL_ID
+    if lb_channel_id <= 0:
+        return
+    try:
+        lb_channel = await client.fetch_channel(lb_channel_id)
+        state = load_state()
+        await post_leaderboard(lb_channel, state)
+    except Exception as exc:
+        log(f"Leaderboard command error: {exc}")
+
+
 async def start_hitter_bot() -> None:
     global client, background_task
     if not TOKEN:
@@ -1472,8 +1716,10 @@ async def start_hitter_bot() -> None:
         raise RuntimeError("HITTER_WATCH_CHANNEL_ID is not set")
 
     background_task = None
+    intents.message_content = True
     client = discord.Client(intents=intents)
     client.event(on_ready)
+    client.event(on_message)
 
     # Let main.py own the restart loop. reconnect=False avoids the discord.py
     # resume path that has been crashing with self.ws=None after connect timeouts.
