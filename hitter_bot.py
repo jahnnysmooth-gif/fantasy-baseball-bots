@@ -26,6 +26,7 @@ POLL_MINUTES = int(os.getenv("HITTER_POLL_MINUTES", "10"))
 RESET_HITTER_STATE = os.getenv("RESET_HITTER_STATE", "").lower() in {"1", "true", "yes"}
 MIN_HITTER_SCORE = float(os.getenv("HITTER_MIN_SCORE", "2.0"))
 MAX_CARDS_PER_GAME = int(os.getenv("HITTER_MAX_CARDS_PER_GAME", "10"))
+MAX_BAD_CARDS_PER_GAME = int(os.getenv("HITTER_MAX_BAD_CARDS_PER_GAME", "3"))
 REQUEST_TIMEOUT = float(os.getenv("HITTER_REQUEST_TIMEOUT", "30"))
 MAX_POSTS_PER_SCAN = int(os.getenv("HITTER_MAX_POSTS_PER_SCAN", "20"))
 MAX_POSTS_PER_GAME_PER_SCAN = int(os.getenv("HITTER_MAX_POSTS_PER_GAME_PER_SCAN", "18"))
@@ -35,11 +36,7 @@ AWAKE_SCAN_MAX_MINUTES = int(os.getenv("HITTER_AWAKE_SCAN_MAX_MINUTES", "10"))
 SLEEP_START_HOUR_ET = int(os.getenv("HITTER_SLEEP_START_HOUR_ET", "3"))
 SLEEP_END_HOUR_ET = int(os.getenv("HITTER_SLEEP_END_HOUR_ET", "13"))
 ESPN_PLAYER_IDS_PATH = os.getenv("ESPN_PLAYER_IDS_PATH", "shared/player_ids/espn_player_ids.json")
-RECAP_CHANNEL_ID = int(os.getenv("HITTER_RECAP_CHANNEL_ID", "0"))
-LEADERBOARD_CHANNEL_ID = int(os.getenv("HITTER_LEADERBOARD_CHANNEL_ID", "0"))
 ERROR_CHANNEL_ID = int(os.getenv("HITTER_ERROR_CHANNEL_ID", "0"))
-RECAP_MIN_PLAYERS = int(os.getenv("HITTER_RECAP_MIN_PLAYERS", "4"))
-LEADERBOARD_TOP_N = int(os.getenv("HITTER_LEADERBOARD_TOP_N", "10"))
 
 intents = discord.Intents.default()
 client: discord.Client | None = None
@@ -1450,7 +1447,7 @@ OPENING_FAMILY_POOL = [
     "When the {team_name} needed offense, {name} delivered — {stat_phrase} {result_phrase}.",
     "{stat_phrase} {result_phrase} for {name}, who was one of the best bats on the field.",
     "It was a good night to be {name} — {stat_phrase} {result_phrase}.",
-    "{result_phrase} for the {team_name}, and {name} did his part: {stat_phrase}.",
+    "{name} did his part {result_phrase}: {stat_phrase}.",
 ]
 
 CONTEXT_FAMILY_POOL = [
@@ -1883,13 +1880,17 @@ def _last_name(full_name: str) -> str:
     Luis Robert Jr. -> Robert
     Pete Crow-Armstrong -> Crow-Armstrong
     Bobby Witt Jr. -> Witt
+    Vladimir Guerrero Jr. -> Guerrero
     """
     parts = (full_name or "").strip().split()
-    suffixes = {"jr.", "sr.", "ii", "iii", "iv", "v"}
-    # Strip trailing suffix if present
-    while parts and parts[-1].lower().rstrip(".") in suffixes:
+    suffixes = {"jr.", "sr.", "ii", "iii", "iv", "v", "jr", "sr"}
+    # Strip ALL trailing suffixes
+    while parts and parts[-1].lower().rstrip(".").rstrip(",") in suffixes:
         parts = parts[:-1]
-    return parts[-1] if parts else full_name
+    if not parts:
+        return full_name
+    # Return last part (handles hyphenated names like Crow-Armstrong)
+    return parts[-1]
 
 
 def _stat_phrase(stats: dict) -> str:
@@ -1920,11 +1921,11 @@ def _stat_phrase(stats: dict) -> str:
     if steals:
         extras.append(_small_count_phrase(steals, "stolen base", include_article=(steals == 1)))
 
-    # Use PA if meaningfully different from AB (i.e. walks present)
-    if walks >= 2 and pa > ab:
-        base = f"{hits}-for-{ab} ({pa} PA)"
-    else:
-        base = f"{hits}-for-{ab}"
+    # Show walks naturally in the stat line instead of raw PA count
+    if walks >= 2:
+        walk_str = f"{_word_or_number(walks)} walks" if walks > 1 else "a walk"
+        extras.append(walk_str)
+    base = f"{hits}-for-{ab}"
     return f"{base} with {_join_text(extras)}" if extras else base
 
 
@@ -2618,11 +2619,12 @@ def _build_position_power_sentence(pos_phrase: str, stats: dict, hitter: dict | 
         f"Power {pos_phrase} is something teams pay a premium for",
     ])
 
-    # Connect them naturally
-    if second_clause[0].isupper() and not second_clause.startswith("That"):
+    # Connect them naturally — always lowercase the second clause after a comma
+    sc = second_clause[0].lower() + second_clause[1:] if second_clause else second_clause
+    # Use period only if second clause is a full independent sentence starting with a name/proper noun
+    if second_clause.startswith("He's") or second_clause.startswith("Teams"):
         return f"{first_clause}. {second_clause}"
-    else:
-        return f"{first_clause}, {second_clause}"
+    return f"{first_clause}, {sc}"
 
 FANTASY_FAMILIES = {
     "two_homer": FANTASY_CLOSING_POOL + [
@@ -3342,10 +3344,10 @@ def build_hitter_summary(
         milestones = get_milestone_notes(hitter, stats)
         for milestone in milestones[:1]:  # Max one milestone per card
             sentences.append(random.choice([
-                f"That gives {last_name} his {milestone}.",
-                f"The {milestone} came tonight.",
-                f"{last_name} also reached {milestone} with tonight's performance.",
-                f"Worth noting: {last_name} picked up his {milestone}.",
+                f"{last_name} also hit his {milestone} tonight.",
+                f"That was his {milestone}.",
+                f"Worth noting: {last_name} hit his {milestone} with that swing.",
+                f"He also knocked in his {milestone} on the night.",
             ]))
 
     # --- Next game opponent ---
@@ -3360,12 +3362,15 @@ def build_hitter_summary(
 
     # --- Use last name to vary pronoun in later sentences ---
     # Swap "He " at the start of sentence 2 with last name ~40% of the time
-    if len(sentences) >= 2 and random.random() < 0.4:
+    # Guard: only swap if last_name is a real surname (not a suffix like Jr.)
+    _suffixes = {"jr", "sr", "ii", "iii", "iv", "v"}
+    safe_last = last_name if last_name.lower().rstrip(".") not in _suffixes else ""
+    if safe_last and len(sentences) >= 2 and random.random() < 0.4:
         s = sentences[1]
         if s.startswith("He "):
-            sentences[1] = last_name + " " + s[3:]
+            sentences[1] = safe_last + " " + s[3:]
         elif s.startswith("His "):
-            sentences[1] = f"{last_name}'s " + s[4:]
+            sentences[1] = f"{safe_last}'s " + s[4:]
 
     standout = homers >= 2 or rbi >= 4 or hits >= 4 or steals >= 2 or (homers >= 1 and rbi >= 3)
     max_sentences = 5 if standout else 4
@@ -3447,6 +3452,361 @@ def build_hitter_summary(
     if name in final:
         final = final.replace(name, f"**{name}**", 1)
     return final
+
+# ---------------- BAD NIGHT CARDS ----------------
+
+def is_bad_night(stats: dict) -> bool:
+    """Return True if the player qualifies for a bad night card.
+    Condition 1: 0-for-4 or worse WITH 2+ strikeouts
+    Condition 2: 3+ strikeouts with no hits
+    """
+    hits = safe_int(stats.get("hits", 0), 0)
+    ab = safe_int(stats.get("atBats", 0), 0)
+    strikeouts = safe_int(stats.get("strikeOuts", 0), 0)
+    # Condition 1: 0-for-4 or worse AND at least 2 strikeouts
+    if hits == 0 and ab >= 4 and strikeouts >= 2:
+        return True
+    # Condition 2: 3+ strikeouts with no hits
+    if strikeouts >= 3 and hits == 0:
+        return True
+    return False
+
+
+def is_slump(recent_games: list[dict], stats: dict) -> tuple[bool, int]:
+    """Return (is_slumping, hitless_streak_length).
+    A slump is defined as 0-for in 3+ straight games including tonight."""
+    if not recent_games:
+        return False, 0
+    today_hits = safe_int(stats.get("hits", 0), 0)
+    if today_hits > 0:
+        return False, 0  # Got a hit tonight, no slump
+
+    hitless_streak = 0
+    for g in recent_games:
+        if g.get("h", 0) == 0:
+            hitless_streak += 1
+        else:
+            break
+    total_streak = hitless_streak + 1  # +1 for tonight
+    return total_streak >= 3, total_streak
+
+
+def should_post_slump_card(hitter_id: int, hitless_streak: int, state: dict) -> bool:
+    """Return True if we should post a slump card for this player.
+    Posts on streak start (day 3) then every 3 games after."""
+    if hitless_streak < 3:
+        return False
+    slump_log = state.get("slump_log", {})
+    last_posted = slump_log.get(str(hitter_id), 0)
+    # Post on day 3, then every 3 games (6, 9, 12...)
+    if last_posted == 0:
+        return hitless_streak == 3
+    return hitless_streak >= last_posted + 3
+
+
+def classify_bad_night(stats: dict) -> str:
+    hits = safe_int(stats.get("hits", 0), 0)
+    ab = safe_int(stats.get("atBats", 0), 0)
+    strikeouts = safe_int(stats.get("strikeOuts", 0), 0)
+    rbi = safe_int(stats.get("rbi", 0), 0)
+    walks = safe_int(stats.get("baseOnBalls", 0), 0)
+
+    if strikeouts >= 4:
+        return "whiff_fest"
+    if strikeouts >= 3 and hits == 0:
+        return "rough_all_around"
+    if strikeouts >= 3:
+        return "strikeout_heavy"
+    if hits == 0 and ab >= 5:
+        return "hitless_deep"
+    if hits == 0 and rbi == 0 and walks == 0:
+        return "silent"
+    return "hitless"
+
+
+def build_bad_night_subject(name: str, stats: dict, label: str, opponent: str) -> str:
+    hits = safe_int(stats.get("hits", 0), 0)
+    ab = safe_int(stats.get("atBats", 0), 0)
+    strikeouts = safe_int(stats.get("strikeOuts", 0), 0)
+    last = _last_name(name)
+    opp = opponent or "the opposition"
+
+    if label == "whiff_fest":
+        return random.choice([
+            f"{name} struggles at the plate with {strikeouts} strikeouts",
+            f"A tough night for {name}, who fanned {strikeouts} times",
+            f"{name} runs into trouble, striking out {strikeouts} times",
+            f"The strikeouts pile up for {name}",
+        ])
+    if label == "rough_all_around":
+        return random.choice([
+            f"{name} goes hitless with {strikeouts} strikeouts against the {opp}",
+            f"A rough one for {name} — no hits and {strikeouts} punchouts",
+            f"{name} has a night to forget against the {opp}",
+        ])
+    if label == "strikeout_heavy":
+        return random.choice([
+            f"{name} fans {strikeouts} times in a tough outing",
+            f"Strikeouts are the story for {name} tonight",
+            f"{name} struggles to make contact, striking out {strikeouts} times",
+        ])
+    if label == "hitless_deep":
+        return random.choice([
+            f"{name} goes 0-for-{ab} in a quiet night",
+            f"No hits for {name} in {ab} at-bats",
+            f"{name} goes hitless against the {opp}",
+        ])
+    return random.choice([
+        f"{name} goes hitless against the {opp}",
+        f"A quiet night for {name} at the plate",
+        f"{name} is held without a hit by the {opp}",
+        f"Nothing doing for {name} offensively tonight",
+    ])
+
+
+def build_bad_night_summary(
+    name: str,
+    team: str,
+    stats: dict,
+    label: str,
+    opponent: str,
+    team_won: bool,
+    recent_games: list[dict],
+    pitcher: dict | None = None,
+) -> str:
+    team_name = team_name_from_abbr(team)
+    opponent_text = opponent or "the opposing club"
+    last = _last_name(name)
+
+    hits = safe_int(stats.get("hits", 0), 0)
+    ab = safe_int(stats.get("atBats", 0), 0)
+    strikeouts = safe_int(stats.get("strikeOuts", 0), 0)
+    walks = safe_int(stats.get("baseOnBalls", 0), 0)
+    rbi = safe_int(stats.get("rbi", 0), 0)
+
+    result = "the " + team_name + " win" if team_won else "a " + team_name + " loss"
+
+    # Build opener
+    parts = [f"{hits}-for-{ab}"]
+    if strikeouts:
+        parts.append(f"{strikeouts} strikeout{'s' if strikeouts != 1 else ''}")
+    if walks:
+        parts.append(f"a walk" if walks == 1 else f"{_word_or_number(walks)} walks")
+
+    stat_str = ", ".join(parts[:-1]) + (" and " + parts[-1] if len(parts) > 1 else parts[0])
+    opener = random.choice([
+        f"Tough night for **{name}**, who finished {stat_str} in {result}.",
+        f"**{name}** went {stat_str} in {result}.",
+        f"Not much going offensively for **{name}** — {stat_str} in {result}.",
+        f"A quiet one for **{name}**: {stat_str} in {result}.",
+    ])
+
+    sentences = [opener]
+
+    # Strikeout context
+    if strikeouts >= 3:
+        sentences.append(random.choice([
+            f"The strikeouts were the story — {last} punched out {strikeouts} times.",
+            f"He had trouble putting the ball in play, fanning {strikeouts} times.",
+            f"Contact was hard to come by, with {strikeouts} punchouts on the night.",
+            f"The bat was slow tonight — {strikeouts} strikeouts tells the story.",
+        ]))
+
+    # Pitcher context — good pitcher makes a bad night more excusable
+    if pitcher and pitcher.get("name"):
+        pname = pitcher["name"]
+        era_raw = pitcher.get("era", "")
+        games_started = safe_int(pitcher.get("games_started", 0), 0)
+        try:
+            era = float(era_raw)
+        except Exception:
+            era = None
+        if era is not None and era <= 3.50 and games_started >= 3:
+            sentences.append(random.choice([
+                f"To be fair, {pname} was on the mound and has been tough on everyone.",
+                f"He was facing {pname}, who has been one of the harder starters to hit this year.",
+                f"{pname} has been sharp, so this is not the first lineup he's quieted.",
+                f"Not a lot of hitters have had success against {pname} lately.",
+            ]))
+        else:
+            sentences.append(random.choice([
+                f"He was facing {pname} and couldn't get anything going.",
+                f"The matchup with {pname} didn't work in his favor.",
+            ]))
+
+    # Cold streak context
+    if recent_games:
+        recent_slice = recent_games[:5]
+        hitless_streak = 0
+        for g in recent_slice:
+            if g.get("h", 0) == 0:
+                hitless_streak += 1
+            else:
+                break
+        total_hitless = hitless_streak + (1 if hits == 0 else 0)
+
+        if total_hitless >= 3:
+            sentences.append(random.choice([
+                f"This is now {total_hitless} straight games without a hit — a real cold stretch.",
+                f"He's now gone {total_hitless} straight without a hit. Worth monitoring.",
+                f"The cold stretch continues — {total_hitless} consecutive hitless games.",
+                f"That makes {total_hitless} games in a row without a hit.",
+            ]))
+        elif total_hitless >= 2:
+            sentences.append(random.choice([
+                f"He's gone back-to-back games without a hit now.",
+                f"Two straight hitless games for {last}.",
+            ]))
+
+    # Keep it short — 2-3 sentences max for bad cards
+    return " ".join(sentences[:3]).strip()
+
+
+def build_slump_subject(name: str, hitless_streak: int) -> str:
+    last = _last_name(name)
+    return random.choice([
+        f"{name} extends hitless streak to {hitless_streak} games",
+        f"The cold stretch continues for {name} — {hitless_streak} straight without a hit",
+        f"{name} still searching for a hit, now {hitless_streak} games deep",
+        f"No end in sight for {last} slump — {hitless_streak} games without a hit",
+        f"{name} goes hitless for the {_ordinal(hitless_streak)} straight game",
+    ])
+
+
+def build_slump_summary(
+    name: str,
+    team: str,
+    stats: dict,
+    hitless_streak: int,
+    opponent: str,
+    team_won: bool,
+    recent_games: list[dict],
+    pitcher: dict | None = None,
+) -> str:
+    team_name = team_name_from_abbr(team)
+    last = _last_name(name)
+    result = "the " + team_name + " win" if team_won else "a " + team_name + " loss"
+
+    hits = safe_int(stats.get("hits", 0), 0)
+    ab = safe_int(stats.get("atBats", 0), 0)
+    strikeouts = safe_int(stats.get("strikeOuts", 0), 0)
+    walks = safe_int(stats.get("baseOnBalls", 0), 0)
+
+    parts = [f"{hits}-for-{ab}"]
+    if strikeouts:
+        parts.append(f"{strikeouts} strikeout{'s' if strikeouts != 1 else ''}")
+    if walks:
+        parts.append("a walk" if walks == 1 else f"{_word_or_number(walks)} walks")
+    stat_str = ", ".join(parts[:-1]) + (" and " + parts[-1] if len(parts) > 1 else parts[0])
+
+    opener = random.choice([
+        f"**{name}** went {stat_str} in {result}, extending his hitless streak to {hitless_streak} games.",
+        f"Still no hits for **{name}** — {stat_str} in {result} makes it {hitless_streak} straight.",
+        f"**{name}** is now {hitless_streak} games without a hit after going {stat_str} in {result}.",
+        f"The drought continues for **{name}**: {stat_str} in {result}, now {hitless_streak} straight hitless.",
+    ])
+
+    sentences = [opener]
+
+    # Recent slump context
+    recent_ab = sum(g.get("ab", 0) for g in recent_games[:hitless_streak - 1])
+    if recent_ab > 0:
+        sentences.append(random.choice([
+            f"He's gone {recent_ab + ab} at-bats without a hit over this stretch.",
+            f"Over the last {hitless_streak} games he's been held hitless across {recent_ab + ab} at-bats.",
+            f"That's {recent_ab + ab} consecutive at-bats without a knock.",
+        ]))
+
+    # Pitcher context — good arm softens the slump narrative
+    if pitcher and pitcher.get("name"):
+        pname = pitcher["name"]
+        era_raw = pitcher.get("era", "")
+        games_started = safe_int(pitcher.get("games_started", 0), 0)
+        try:
+            era = float(era_raw)
+        except Exception:
+            era = None
+        if era is not None and era <= 3.50 and games_started >= 3:
+            sentences.append(random.choice([
+                f"Tonight he faced {pname}, who has been one of the harder arms to hit this year.",
+                f"To be fair, {pname} is a tough out for anyone right now.",
+            ]))
+
+    sentences.append(random.choice([
+        f"Something has to give soon — {last} is too good a hitter for this to last.",
+        f"The talent is there. It's just a matter of when it turns around.",
+        f"Slumps happen. The question is how long this one runs.",
+        f"He'll be worth monitoring closely over the next few games.",
+        f"A hitter of his caliber will find a way out of this.",
+    ]))
+
+    return " ".join(sentences[:4]).strip()
+
+
+async def post_slump_card(
+    channel: discord.abc.Messageable,
+    hitter: dict,
+    opponent: str,
+    team_won: bool,
+    feed: dict,
+    game_date_et,
+    hitless_streak: int,
+) -> None:
+    stats = hitter["stats"]
+    recent_games = get_recent_hitter_games(hitter.get("id"), game_date_et)
+    pitcher = get_opposing_starter(feed, hitter.get("side", "home"))
+
+    embed = discord.Embed(
+        color=0x2C2F33,  # Slightly darker than bad night cards
+        timestamp=datetime.now(timezone.utc),
+    )
+    apply_player_card_chrome(embed, hitter["name"], hitter["team"])
+    subject = build_slump_subject(hitter["name"], hitless_streak)
+    embed.add_field(name="", value=f"**🥶 {subject}**", inline=False)
+    embed.add_field(
+        name="Summary",
+        value=build_slump_summary(
+            hitter["name"], hitter["team"], stats, hitless_streak,
+            opponent, team_won, recent_games, pitcher=pitcher,
+        ),
+        inline=False,
+    )
+    embed.add_field(name="Game Line", value=format_hitter_game_line(stats), inline=False)
+    embed.add_field(name="Season", value=format_hitter_season_line(hitter.get("season_stats", {})), inline=False)
+    await channel.send(embed=embed)
+
+
+async def post_bad_card(
+    channel: discord.abc.Messageable,
+    hitter: dict,
+    opponent: str,
+    team_won: bool,
+    feed: dict,
+    game_date_et,
+) -> None:
+    stats = hitter["stats"]
+    label = classify_bad_night(stats)
+    recent_games = get_recent_hitter_games(hitter.get("id"), game_date_et)
+    pitcher = get_opposing_starter(feed, hitter.get("side", "home"))
+
+    embed = discord.Embed(
+        color=0x36393F,  # Dark gray — visually distinct from good cards
+        timestamp=datetime.now(timezone.utc),
+    )
+    apply_player_card_chrome(embed, hitter["name"], hitter["team"])
+    subject = build_bad_night_subject(hitter["name"], stats, label, opponent)
+    embed.add_field(name="", value=f"**📉 {subject}**", inline=False)
+    embed.add_field(
+        name="Summary",
+        value=build_bad_night_summary(
+            hitter["name"], hitter["team"], stats, label, opponent, team_won, recent_games, pitcher=pitcher,
+        ),
+        inline=False,
+    )
+    embed.add_field(name="Game Line", value=format_hitter_game_line(stats), inline=False)
+    embed.add_field(name="Season", value=format_hitter_season_line(hitter.get("season_stats", {})), inline=False)
+    await channel.send(embed=embed)
+
 
 # ---------------- EMBED POSTING ----------------
 
@@ -3657,14 +4017,6 @@ async def hitter_loop() -> None:
                     posted_this_game += 1
                     posts_this_scan += 1
 
-                    # Track for leaderboard
-                    state.setdefault("leaderboard", []).append({
-                        "name": hitter["name"],
-                        "team": hitter["team"],
-                        "score": score_value,
-                        "game_line": format_hitter_game_line(hitter["stats"]),
-                        "date": str(game_date_et),
-                    })
 
                     # Save state immediately after each post to prevent duplicates on crash
                     # Skip during testing (RESET_HITTER_STATE) to avoid disrupting test runs
@@ -3675,13 +4027,73 @@ async def hitter_loop() -> None:
                     if posts_this_scan < MAX_POSTS_PER_SCAN:
                         await asyncio.sleep(max(POST_DELAY_SECONDS, 0.0))
 
-                # Post game recap if enough players earned cards
-                if posted_this_game >= RECAP_MIN_PLAYERS and RECAP_CHANNEL_ID > 0:
-                    try:
-                        recap_channel = await client.fetch_channel(RECAP_CHANNEL_ID)
-                        await post_game_recap(recap_channel, ranked[:posted_this_game], matchup, away_score, home_score, away_name, home_name)
-                    except Exception as exc:
-                        log(f"Recap post error: {exc}")
+
+                # --- Bad night + slump cards ---
+                bad_posted_this_game = 0
+                for hitter in hitters:
+                    if posts_this_scan >= MAX_POSTS_PER_SCAN:
+                        break
+                    if bad_posted_this_game >= MAX_BAD_CARDS_PER_GAME:
+                        break
+
+                    hitter_id = hitter.get("id")
+                    if hitter_id is None:
+                        continue
+
+                    # Skip if already got a good card
+                    post_key = f"{game_id}_{hitter_id}"
+                    if post_key in posted:
+                        continue
+
+                    player_team = normalize_team_abbr(hitter.get("team"))
+                    opponent = home_name if player_team == away_abbr else away_name
+                    team_won = (player_team == away_abbr and away_score > home_score) or (
+                        player_team == home_abbr and home_score > away_score
+                    )
+
+                    recent_games_h = get_recent_hitter_games(hitter_id, game_date_et)
+                    slumping, hitless_streak = is_slump(recent_games_h, hitter["stats"])
+
+                    # Check slump card first (takes priority over plain bad night)
+                    if slumping and should_post_slump_card(hitter_id, hitless_streak, state):
+                        slump_key = f"{game_id}_{hitter_id}_slump"
+                        if slump_key not in posted and slump_key not in set(load_state().get("posted", [])):
+                            log(f"Slump card: {hitter['name']} | {hitless_streak} games hitless")
+                            await post_slump_card(channel, hitter, opponent, team_won, feed, game_date_et, hitless_streak)
+                            posted.add(slump_key)
+                            state.setdefault("slump_log", {})[str(hitter_id)] = hitless_streak
+                            bad_posted_this_game += 1
+                            posts_this_scan += 1
+                            if not RESET_HITTER_STATE:
+                                state["posted"] = sorted(posted)
+                                save_state(state)
+                            if posts_this_scan < MAX_POSTS_PER_SCAN:
+                                await asyncio.sleep(max(POST_DELAY_SECONDS, 0.0))
+                            continue
+
+                    # Regular bad night card
+                    bad_key = f"{game_id}_{hitter_id}_bad"
+                    if bad_key in posted:
+                        continue
+                    if bad_key in set(load_state().get("posted", [])):
+                        posted.add(bad_key)
+                        continue
+
+                    if not is_bad_night(hitter["stats"]):
+                        continue
+
+                    log(f"Bad night: {hitter['name']} | {hitter['team']} | {matchup}")
+                    await post_bad_card(channel, hitter, opponent, team_won, feed, game_date_et)
+                    posted.add(bad_key)
+                    bad_posted_this_game += 1
+                    posts_this_scan += 1
+
+                    if not RESET_HITTER_STATE:
+                        state["posted"] = sorted(posted)
+                        save_state(state)
+
+                    if posts_this_scan < MAX_POSTS_PER_SCAN:
+                        await asyncio.sleep(max(POST_DELAY_SECONDS, 0.0))
 
             state["posted"] = sorted(posted)
             save_state(state)
@@ -3692,63 +4104,6 @@ async def hitter_loop() -> None:
 
         log(f"Sleeping {sleep_seconds} seconds before next scan")
         await asyncio.sleep(sleep_seconds)
-
-
-# ---------------- RECAP & LEADERBOARD ----------------
-
-async def post_game_recap(channel: discord.abc.Messageable, ranked_posted: list, matchup: str, away_score: int, home_score: int, away_name: str, home_name: str) -> None:
-    """Post a summary embed when 4+ players from the same game earned cards."""
-    total_hr   = sum(safe_int(h["stats"].get("homeRuns", 0), 0) for _, h in ranked_posted)
-    total_rbi  = sum(safe_int(h["stats"].get("rbi", 0), 0) for _, h in ranked_posted)
-    total_hits = sum(safe_int(h["stats"].get("hits", 0), 0) for _, h in ranked_posted)
-
-    lines = []
-    for _, h in ranked_posted:
-        line = format_hitter_game_line(h["stats"])
-        lines.append(f"**{h['name']}** ({h['team']}) — {line}")
-
-    embed = discord.Embed(
-        title=f"🔥 {matchup} — Offensive Explosion",
-        description="\n".join(lines),
-        color=0xF4C542,
-        timestamp=datetime.now(timezone.utc),
-    )
-    embed.add_field(name="Final", value=f"{away_name} {away_score} — {home_name} {home_score}", inline=True)
-    embed.add_field(name="Combined", value=f"{total_hits} H • {total_hr} HR • {total_rbi} RBI", inline=True)
-    embed.set_footer(text=f"{len(ranked_posted)} players earned cards from this game")
-    await channel.send(embed=embed)
-
-
-async def post_leaderboard(channel: discord.abc.Messageable, state: dict) -> None:
-    """Post today's top-N hitters by fantasy score."""
-    today = str(now_et().date())
-    entries = [e for e in state.get("leaderboard", []) if e.get("date") == today]
-    if not entries:
-        await channel.send("No hitter cards posted today yet.")
-        return
-
-    # Deduplicate by name, keep highest score
-    seen: dict[str, dict] = {}
-    for e in entries:
-        key = e["name"]
-        if key not in seen or e["score"] > seen[key]["score"]:
-            seen[key] = e
-
-    top = sorted(seen.values(), key=lambda x: x["score"], reverse=True)[:LEADERBOARD_TOP_N]
-    medals = ["🥇", "🥈", "🥉"]
-    lines = []
-    for i, entry in enumerate(top):
-        medal = medals[i] if i < 3 else f"**{i + 1}.**"
-        lines.append(f"{medal} **{entry['name']}** ({entry['team']}) — {entry['game_line']} *(score: {entry['score']:.1f})*")
-
-    embed = discord.Embed(
-        title=f"📊 Top {len(top)} Hitters — {today}",
-        description="\n".join(lines),
-        color=0x2ECC71,
-        timestamp=datetime.now(timezone.utc),
-    )
-    embed.set_footer(text="Score = fantasy point formula • Updates as games finish")
-    await channel.send(embed=embed)
 
 
 # ---------------- DISCORD LIFECYCLE ----------------
@@ -3762,21 +4117,6 @@ async def on_ready() -> None:
         log("Hitter background task created")
 
 
-async def on_message(message: discord.Message) -> None:
-    if message.author.bot:
-        return
-    if message.content.strip().lower() != "!top":
-        return
-    lb_channel_id = LEADERBOARD_CHANNEL_ID or CHANNEL_ID
-    if lb_channel_id <= 0:
-        return
-    try:
-        lb_channel = await client.fetch_channel(lb_channel_id)
-        state = load_state()
-        await post_leaderboard(lb_channel, state)
-    except Exception as exc:
-        log(f"Leaderboard command error: {exc}")
-
 
 async def start_hitter_bot() -> None:
     global client, background_task
@@ -3786,10 +4126,8 @@ async def start_hitter_bot() -> None:
         raise RuntimeError("HITTER_WATCH_CHANNEL_ID is not set")
 
     background_task = None
-    intents.message_content = True
     client = discord.Client(intents=intents)
     client.event(on_ready)
-    client.event(on_message)
 
     # Let main.py own the restart loop. reconnect=False avoids the discord.py
     # resume path that has been crashing with self.ws=None after connect timeouts.
