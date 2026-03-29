@@ -2199,6 +2199,160 @@ SUMMARY_FILLER_POOL = [
     "The performance brought a little more to the table than a simple box-score glance might suggest.",
 ]
 
+SUMMARY_GENERAL_OPENING_FAMILIES = [
+    "{name} helped drive the offense in {possessive} {result_word} over the {opponent_text}.",
+    "{name} turned in a productive showing in {possessive} {result_word} over the {opponent_text}.",
+    "{name} played a key offensive role in {possessive} {result_word} over the {opponent_text}.",
+    "{name} chipped in with a useful performance in {possessive} {result_word} over the {opponent_text}.",
+    "{name} helped power {team_name} in {possessive} {result_word} over the {opponent_text}.",
+    "{name} came through with a productive game as the {team_name} {result_verb} the {opponent_text}.",
+    "{name} put together a strong offensive game in {possessive} {result_word} over the {opponent_text}.",
+    "{name} gave the {team_name} a steady offensive push in {possessive} {result_word} over the {opponent_text}.",
+    "{name} found a few ways to help in {possessive} {result_word} over the {opponent_text}.",
+    "{name} pieced together a productive afternoon in {possessive} {result_word} over the {opponent_text}.",
+    "{name} made his presence felt offensively in {possessive} {result_word} over the {opponent_text}.",
+    "{name} gave the offense a needed lift in {possessive} {result_word} over the {opponent_text}.",
+    "{name} delivered a useful all-around game as the {team_name} {result_verb} the {opponent_text}.",
+    "{name} kept the offense moving in {possessive} {result_word} over the {opponent_text}.",
+    "{name} turned his opportunities into a useful offensive night in {possessive} {result_word} over the {opponent_text}.",
+]
+
+STAT_RECAP_FAMILIES = [
+    "He finished {stat_line}.",
+    "He went {stat_line}.",
+    "The box score showed {stat_line}.",
+    "His final numbers included {stat_line}.",
+    "He wrapped up the game with {stat_line}.",
+    "He checked in at {stat_line}.",
+    "That effort featured {stat_line}.",
+    "Along the way, he posted {stat_line}.",
+    "The production came with {stat_line}.",
+    "He ended the day at {stat_line}.",
+]
+
+STAT_RESULT_FAMILIES = [
+    "He finished {stat_line} in {possessive} {result_word} over the {opponent_text}.",
+    "He went {stat_line} in {possessive} {result_word} over the {opponent_text}.",
+    "He posted {stat_line} as the {team_name} {result_verb} the {opponent_text}.",
+    "His final numbers were {stat_line} in {possessive} {result_word} over the {opponent_text}.",
+    "He checked in at {stat_line} as the {team_name} {result_verb} the {opponent_text}.",
+    "He wrapped up the game with {stat_line} in {possessive} {result_word} over the {opponent_text}.",
+    "The box score showed {stat_line} in {possessive} {result_word} over the {opponent_text}.",
+    "He delivered {stat_line} in {possessive} {result_word} over the {opponent_text}.",
+]
+
+CONTEXT_WITH_TIME_FAMILIES = [
+    "The biggest swing came {inning_text}, when he {event_text}.",
+    "His key damage came {inning_text}, when he {event_text}.",
+    "He made his loudest impact {inning_text}, when he {event_text}.",
+    "The turning point of his night came {inning_text}, when he {event_text}.",
+    "His biggest contribution arrived {inning_text}, when he {event_text}.",
+    "He delivered his most important swing {inning_text}, when he {event_text}.",
+    "A key moment came {inning_text}, when he {event_text}.",
+    "He came through {inning_text}, when he {event_text}.",
+]
+
+CONTEXT_NO_TIME_FAMILIES = [
+    "The biggest swing came when he {event_text}.",
+    "His key damage came when he {event_text}.",
+    "He made his loudest impact when he {event_text}.",
+    "The turning point of his night came when he {event_text}.",
+    "His biggest contribution arrived when he {event_text}.",
+    "He delivered his most important swing when he {event_text}.",
+    "A key moment came when he {event_text}.",
+    "He came through when he {event_text}.",
+]
+
+SUMMARY_ORDER_PATTERNS = [
+    ["opening", "stat", "context", "fantasy", "meta", "quality", "trend"],
+    ["stat", "opening", "context", "meta", "fantasy", "quality", "trend"],
+    ["opening", "context", "stat", "fantasy", "meta", "quality", "trend"],
+    ["opening", "stat", "meta", "context", "fantasy", "quality", "trend"],
+    ["context", "opening", "stat", "fantasy", "meta", "quality", "trend"],
+    ["opening", "fantasy", "stat", "context", "meta", "quality", "trend"],
+]
+
+
+def _summary_result_words(team_won: bool) -> tuple[str, str]:
+    return ("win", "beat") if team_won else ("loss", "lost to")
+
+
+
+def _stat_detail_fragments(stats: dict) -> list[str]:
+    hits = safe_int(stats.get("hits", 0), 0)
+    ab = safe_int(stats.get("atBats", 0), 0)
+    runs = safe_int(stats.get("runs", 0), 0)
+    rbi = safe_int(stats.get("rbi", 0), 0)
+    homers = safe_int(stats.get("homeRuns", 0), 0)
+    doubles = safe_int(stats.get("doubles", 0), 0)
+    triples = safe_int(stats.get("triples", 0), 0)
+    walks = safe_int(stats.get("baseOnBalls", 0), 0)
+    steals = safe_int(stats.get("stolenBases", 0), 0)
+
+    fragments: list[str] = [f"{hits}-for-{ab}"]
+    if homers:
+        fragments.append(_small_count_phrase(homers, "homer", include_article=True))
+    if doubles:
+        fragments.append(_small_count_phrase(doubles, "double", include_article=True))
+    if triples:
+        fragments.append(_small_count_phrase(triples, "triple", include_article=True))
+    if rbi:
+        fragments.append(f"{_word_or_number(rbi)} RBI")
+    if runs:
+        fragments.append(_small_count_phrase(runs, "run scored", plural="runs scored", include_article=True))
+    if walks:
+        fragments.append(_small_count_phrase(walks, "walk", include_article=True))
+    if steals:
+        fragments.append(_small_count_phrase(steals, "stolen base", include_article=True))
+    return fragments
+
+
+
+def _join_stat_fragments(parts: list[str]) -> str:
+    if not parts:
+        return ""
+    if len(parts) == 1:
+        return parts[0]
+    head = parts[0]
+    tail = parts[1:]
+    if len(tail) == 1:
+        return f"{head} with {tail[0]}"
+    if len(tail) == 2:
+        return f"{head} with {tail[0]} and {tail[1]}"
+    return f"{head} with {', '.join(tail[:-1])}, and {tail[-1]}"
+
+
+
+def _build_stat_recap_sentence(stats: dict, team_name: str, opponent_text: str, team_won: bool) -> str:
+    stat_line = _join_stat_fragments(_stat_detail_fragments(stats))
+    possessive = team_possessive(team_name)
+    result_word, result_verb = _summary_result_words(team_won)
+
+    if len(_stat_detail_fragments(stats)) >= 4 and random.random() < 0.55:
+        template = random.choice(STAT_RESULT_FAMILIES)
+        return template.format(
+            stat_line=stat_line,
+            possessive=possessive,
+            opponent_text=opponent_text,
+            team_name=team_name,
+            result_word=result_word,
+            result_verb=result_verb,
+        )
+
+    template = random.choice(STAT_RECAP_FAMILIES)
+    return template.format(stat_line=stat_line)
+
+
+
+def _build_context_sentence(context: dict) -> str:
+    event_text, inning_text = _event_text_from_context(context)
+    if not event_text:
+        return ""
+    if inning_text:
+        return random.choice(CONTEXT_WITH_TIME_FAMILIES).format(inning_text=inning_text, event_text=event_text)
+    return random.choice(CONTEXT_NO_TIME_FAMILIES).format(event_text=event_text)
+
+
 
 def _build_summary_opening(name: str, stats: dict, context: dict, opponent_text: str, team_name: str, team_won: bool) -> str:
     stat_phrase = _stat_phrase(stats)
@@ -2340,17 +2494,9 @@ def build_hitter_summary(
     balls_100 = safe_int(context.get("balls_100", 0), 0)
     pos_phrase = _position_phrase(position)
 
-    sentences: list[str] = [
-        _build_summary_opening(name, stats, context, opponent_text, team_name, team_won)
-    ]
-
-    used_signatures: set[str] = {"opening"}
-
-    event_text, inning_text = _event_text_from_context(context)
-    context_pool: list[str] = []
-    if event_text:
-        for template in SUMMARY_CONTEXT_FAMILIES:
-            context_pool.append(template.format(event_text=event_text, inning_text=inning_text or ""))
+    opening_sentence = _build_summary_opening(name, stats, context, opponent_text, team_name, team_won)
+    stat_sentence = _build_stat_recap_sentence(stats, team_name, opponent_text, team_won)
+    context_sentence = _build_context_sentence(context)
 
     fantasy_key = "general"
     if homers >= 2:
@@ -2390,58 +2536,77 @@ def build_hitter_summary(
         quality_pool.extend([s.format(balls_100=balls_100) for s in QUALITY_100_FAMILIES])
 
     trend_note = _recent_trend_note(recent_games, stats)
-    if trend_note:
-        quality_pool.append(trend_note)
+    trend_pool = [trend_note] if trend_note else []
+
+    bucket_map: dict[str, list[str]] = {
+        "opening": [opening_sentence],
+        "stat": [stat_sentence],
+        "context": [context_sentence] if context_sentence else [],
+        "fantasy": fantasy_pool,
+        "meta": meta_pool,
+        "quality": quality_pool,
+        "trend": trend_pool,
+        "filler": SUMMARY_FILLER_POOL,
+    }
+
+    used_signatures: set[str] = set()
+    sentences: list[str] = []
 
     def _sig(sentence: str) -> str:
         lowered = sentence.lower()
-        if "lead for good" in lowered or "ultimately decided" in lowered or "proved to be the difference" in lowered or "difference-maker" in lowered:
-            return "decisive"
+        if sentence == opening_sentence:
+            return "opening"
+        if sentence == stat_sentence:
+            return "stat"
+        if sentence == context_sentence:
+            return "context"
+        if sentence in trend_pool:
+            return "trend"
         if "walk-off" in lowered:
             return "walkoff"
         if "mph" in lowered or "exit velocity" in lowered or "100-plus" in lowered or "triple-digit" in lowered:
-            return "ev"
-        if "leadoff" in lowered or "middle of the order" in lowered or "heart of the order" in lowered or "bottom third" in lowered or "lineup" in lowered:
+            return "quality"
+        if "leadoff" in lowered or "middle of the order" in lowered or "heart of the order" in lowered or "bottom third" in lowered or "cleanup-type" in lowered:
             return "lineup"
-        if "streak" in lowered or "quiet stretch" in lowered or "straight games" in lowered or "bounce-back" in lowered:
-            return "trend"
-        if "fantasy" in lowered or "category" in lowered or "matchup" in lowered or "season-long" in lowered or "daily leagues" in lowered:
+        if "fantasy" in lowered or "category" in lowered or "season-long" in lowered or "daily leagues" in lowered:
             return "fantasy"
         if "against " in lowered or "on the mound" in lowered or "facing " in lowered:
             return "pitcher"
-        if "inning" in lowered or "swing" in lowered or "gap" in lowered or "equalizer" in lowered:
-            return "context"
+        if "one-run game" in lowered or "scoreboard" in lowered or "margin" in lowered:
+            return "game_state"
         return lowered
 
-    def _pick_unique(pool: list[str], fallback_sig: str | None = None) -> str:
+    def _add_from_bucket(bucket_name: str) -> bool:
+        pool = bucket_map.get(bucket_name, [])
         for sentence in pool:
-            signature = _sig(sentence) if fallback_sig is None else fallback_sig
+            signature = _sig(sentence)
             if sentence and sentence not in sentences and signature not in used_signatures:
+                sentences.append(sentence)
                 used_signatures.add(signature)
-                return sentence
-        return ""
-
-    for pool, forced_sig in [
-        (context_pool, "context"),
-        (fantasy_pool, "fantasy"),
-        (meta_pool, None),
-        (quality_pool, None),
-    ]:
-        picked = _pick_unique(pool, forced_sig)
-        if picked:
-            sentences.append(picked)
+                return True
+        return False
 
     standout = homers >= 2 or rbi >= 4 or hits >= 4 or steals >= 2 or (homers >= 1 and rbi >= 3)
-    max_sentences = 5 if standout else 4
+    target_sentences = 5 if standout else 4
+
+    valid_patterns = [pattern for pattern in SUMMARY_ORDER_PATTERNS if not pattern[0] == "context" or context_sentence]
+    chosen_pattern = random.choice(valid_patterns)
+
+    for bucket_name in chosen_pattern:
+        if len(sentences) >= target_sentences:
+            break
+        _add_from_bucket(bucket_name)
+
+    for bucket_name in ["opening", "stat", "context", "fantasy", "meta", "quality", "trend"]:
+        if len(sentences) >= target_sentences:
+            break
+        _add_from_bucket(bucket_name)
 
     while len(sentences) < 4:
-        filler = _pick_unique(SUMMARY_FILLER_POOL, "filler")
-        if filler:
-            sentences.append(filler)
-        else:
+        if not _add_from_bucket("filler"):
             break
 
-    return " ".join(sentences[:max_sentences]).strip()
+    return " ".join(sentences[:target_sentences]).strip()
 
 # ---------------- EMBED POSTING ----------------
 
