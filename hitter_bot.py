@@ -19,7 +19,7 @@ STATE_DIR.mkdir(parents=True, exist_ok=True)
 STATE_FILE = STATE_DIR / "state.json"
 
 ET = ZoneInfo("America/New_York")
-SCHEDULE_URL = "https://statsapi.mlb.com/api/v1/schedule?sportId=1"
+SCHEDULE_URL = "https://statsapi.mlb.com/api/v1/schedule?sportId=1&gameType=R"
 LIVE_URL = "https://statsapi.mlb.com/api/v1.1/game/{}/feed/live"
 
 POLL_MINUTES = int(os.getenv("HITTER_POLL_MINUTES", "10"))
@@ -342,6 +342,88 @@ def save_state(state: dict) -> None:
     STATE_FILE.write_text(json.dumps({"posted": state.get("posted", [])}, indent=2), encoding="utf-8")
 
 
+
+
+# ---------------- SEASON CONSTANTS ----------------
+
+# Opening Day 2025 — opponent record context gates 7 days after this
+OPENING_DAY = date(2025, 3, 27)
+
+# Standings cache to avoid repeated API calls
+_standings_cache: dict = {}
+_standings_cache_date: str = ""
+
+
+def get_team_record(team_abbr: str) -> tuple[int, int]:
+    """Return (wins, losses) for a team. Returns (-1, -1) if unavailable
+    or if it's too early in the season to use records meaningfully."""
+    global _standings_cache, _standings_cache_date
+
+    today = now_et().date()
+    days_into_season = (today - OPENING_DAY).days
+    if days_into_season < 7:
+        return (-1, -1)  # Too early — don't use records
+
+    today_str = str(today)
+    if _standings_cache_date != today_str or not _standings_cache:
+        try:
+            url = "https://statsapi.mlb.com/api/v1/standings?leagueId=103,104&season=2025&standingsTypes=regularSeason"
+            resp = requests.get(url, timeout=REQUEST_TIMEOUT)
+            resp.raise_for_status()
+            data = resp.json()
+            _standings_cache = {}
+            for record in data.get("records", []):
+                for team_record in record.get("teamRecords", []):
+                    abbr = normalize_team_abbr(
+                        team_record.get("team", {}).get("abbreviation", "")
+                    )
+                    wins = safe_int(team_record.get("wins", 0), 0)
+                    losses = safe_int(team_record.get("losses", 0), 0)
+                    _standings_cache[abbr] = (wins, losses)
+            _standings_cache_date = today_str
+        except Exception:
+            return (-1, -1)
+
+    return _standings_cache.get(normalize_team_abbr(team_abbr), (-1, -1))
+
+
+def _opponent_record_phrase(opponent_abbr: str) -> str:
+    """Return a short phrase like 'the first-place Phillies (8-2)' or empty string."""
+    wins, losses = get_team_record(opponent_abbr)
+    if wins < 0:
+        return ""
+    total = wins + losses
+    if total < 5:
+        return ""  # Too few games for record to mean anything
+
+    opp_name = team_name_from_abbr(opponent_abbr)
+    record_str = f"{wins}-{losses}"
+
+    # Add standing context if record is notable
+    if wins > losses and wins >= 7:
+        return random.choice([
+            f"the {wins}-{losses} {opp_name}",
+            f"a {opp_name} team that came in at {record_str}",
+            f"the hot {opp_name} ({record_str})",
+        ])
+    if losses > wins and losses >= 7:
+        return random.choice([
+            f"the {wins}-{losses} {opp_name}",
+            f"a struggling {opp_name} squad ({record_str})",
+        ])
+    return f"the {opp_name} ({record_str})"
+
+
+def get_series_context(game: dict) -> str:
+    """Return series context string like 'Game 2 of 3' or empty string."""
+    try:
+        game_num = safe_int(game.get("seriesGameNumber", 0), 0)
+        series_games = safe_int(game.get("gamesInSeries", 0), 0)
+        if game_num and series_games:
+            return f"Game {game_num} of {series_games}"
+    except Exception:
+        pass
+    return ""
 
 
 # ---------------- SCHEDULING ----------------
@@ -1194,7 +1276,6 @@ CONTEXT_FAMILY_POOL = [
 ]
 
 FANTASY_CLOSING_POOL = [
-    "Not a bad night at all.",
     "Hard to ask for much more than that.",
     "He was dialed in from the first at-bat.",
     "Exactly what you want from him.",
@@ -1204,6 +1285,17 @@ FANTASY_CLOSING_POOL = [
     "He gave the team everything it needed.",
     "Clean performance start to finish.",
     "The production was consistent all night.",
+    "He showed up when it counted.",
+    "Everything clicked for him tonight.",
+    "One of his better all-around games of the year.",
+    "He was a problem every time he came up.",
+    "You could see early this was going to be a good one for him.",
+    "He kept the line moving from the first inning to the last.",
+    "There was nothing fluky about it.",
+    "He earned every bit of that line.",
+    "A quiet but effective night — the numbers tell the story.",
+    "The at-bats were quality from start to finish.",
+    "He put the team on his back and delivered.",
 ]
 
 EV_HIT_FAMILIES = [
@@ -1879,11 +1971,20 @@ def _recent_trend_note(recent_games: list[dict], stats: dict) -> str:
         else:
             break
 
+    # Cold streak bounce-back (3+ hitless games before tonight)
     if hitless_tail >= 3 and today_hits >= 2:
         return random.choice(TREND_FAMILIES["bounce_back"])
+    if hitless_tail >= 2 and today_hits >= 2 and today_hr >= 1:
+        return random.choice([
+            f"That snapped a quiet stretch for {_word_or_number(hitless_tail + 1)} games.",
+            "He had been quiet lately, but not tonight.",
+            "Good timing on the breakout after a couple of slow games.",
+            f"He had been held hitless in {_word_or_number(hitless_tail)} straight before this.",
+        ])
+
     if homer_streak >= 2:
         return random.choice(TREND_FAMILIES["homer_streak"]).format(n=homer_streak)
-    if hit_streak >= 4:
+    if hit_streak >= 3:
         return random.choice(TREND_FAMILIES["hit_streak"]).format(n=hit_streak)
     if multi_hit_streak >= 2:
         return random.choice(TREND_FAMILIES["multi_hit_streak"]).format(n=multi_hit_streak)
@@ -2121,54 +2222,54 @@ def build_hitter_subject(name: str, stats: dict, label: str, context: dict, rece
 
 SUMMARY_OPENING_FAMILIES = {
     "walkoff": [
-        "{name} went {stat_phrase} in {possessive} win over the {opponent_text}, ending the game with the walk-off swing.",
+        "{name} went {stat_phrase} in the {possessive} win over the {opponent_text}, ending the game with the walk-off swing.",
         "{name} finished {stat_phrase} as the {team_name} beat the {opponent_text}, and his final swing ended it.",
-        "{name} turned in a {stat_phrase} performance in {possessive} win over the {opponent_text}, then put the game away in the final at-bat.",
-        "{name} delivered a {stat_phrase} showing in {possessive} win over the {opponent_text}, with the last swing serving as the game-winner.",
-        "{name} went {stat_phrase} in {possessive} win over the {opponent_text}, then ended it himself in the final frame.",
-        "{name} built a {stat_phrase} box score in {possessive} win over the {opponent_text}, and the last swing was the one everyone remembered.",
-        "{name} finished {stat_phrase} in {possessive} win over the {opponent_text}, punctuating the night with the walk-off hit.",
+        "{name} turned in a {stat_phrase} performance in the {possessive} win over the {opponent_text}, then put the game away in the final at-bat.",
+        "{name} delivered a {stat_phrase} showing in the {possessive} win over the {opponent_text}, with the last swing serving as the game-winner.",
+        "{name} went {stat_phrase} in the {possessive} win over the {opponent_text}, then ended it himself in the final frame.",
+        "{name} built a {stat_phrase} box score in the {possessive} win over the {opponent_text}, and the last swing was the one everyone remembered.",
+        "{name} finished {stat_phrase} in the {possessive} win over the {opponent_text}, punctuating the night with the walk-off hit.",
         "{name} turned in a {stat_phrase} performance as the {team_name} beat the {opponent_text}, and he handled the final swing too.",
-        "{name} put together a {stat_phrase} showing in {possessive} win over the {opponent_text}, then delivered the game-ending moment.",
-        "{name} went {stat_phrase} in {possessive} win over the {opponent_text}, with the walk-off swing serving as the finishing touch.",
-        "{name} finished {stat_phrase} in {possessive} win over the {opponent_text}, and he made sure the final at-bat belonged to him.",
-        "{name} built a {stat_phrase} line in {possessive} win over the {opponent_text}, then closed the book with the walk-off swing.",
+        "{name} put together a {stat_phrase} showing in the {possessive} win over the {opponent_text}, then delivered the game-ending moment.",
+        "{name} went {stat_phrase} in the {possessive} win over the {opponent_text}, with the walk-off swing serving as the finishing touch.",
+        "{name} finished {stat_phrase} in the {possessive} win over the {opponent_text}, and he made sure the final at-bat belonged to him.",
+        "{name} built a {stat_phrase} line in the {possessive} win over the {opponent_text}, then closed the book with the walk-off swing.",
         "{name} turned in a {stat_phrase} line as the {team_name} beat the {opponent_text}, capping it with the final blow.",
-        "{name} went {stat_phrase} in {possessive} win over the {opponent_text}, and his last swing was the difference.",
+        "{name} went {stat_phrase} in the {possessive} win over the {opponent_text}, and his last swing was the difference.",
         "{name} gave the {team_name} a {stat_phrase} performance in the win over the {opponent_text}, then ended it himself.",
     ],
     "go_ahead_homer": [
-        "{name} went {stat_phrase} in {possessive} win over the {opponent_text}, with his homer providing the swing that decided the game.",
+        "{name} went {stat_phrase} in the {possessive} win over the {opponent_text}, with his homer providing the swing that decided the game.",
         "{name} finished {stat_phrase} as the {team_name} beat the {opponent_text}, and his homer changed the shape of the night.",
-        "{name} turned in a {stat_phrase} performance in {possessive} win over the {opponent_text}, with his biggest damage coming on the decisive swing.",
-        "{name} built a {stat_phrase} box score in {possessive} win over the {opponent_text}, and the homer proved to be the turning point.",
-        "{name} went {stat_phrase} in {possessive} win over the {opponent_text}, with the long ball standing up as the key swing.",
-        "{name} finished {stat_phrase} in {possessive} win over the {opponent_text}, and the homer ended up carrying the most weight.",
+        "{name} turned in a {stat_phrase} performance in the {possessive} win over the {opponent_text}, with his biggest damage coming on the decisive swing.",
+        "{name} built a {stat_phrase} box score in the {possessive} win over the {opponent_text}, and the homer proved to be the turning point.",
+        "{name} went {stat_phrase} in the {possessive} win over the {opponent_text}, with the long ball standing up as the key swing.",
+        "{name} finished {stat_phrase} in the {possessive} win over the {opponent_text}, and the homer ended up carrying the most weight.",
         "{name} turned in a {stat_phrase} performance as the {team_name} beat the {opponent_text}, with the homer serving as the difference-maker.",
         "{name} gave the {team_name} a {stat_phrase} showing in the win over the {opponent_text}, and his homer was the loudest moment.",
-        "{name} posted a {stat_phrase} box score in {possessive} win over the {opponent_text}, with the homer proving to be enough.",
-        "{name} built a {stat_phrase} line in {possessive} win over the {opponent_text}, and the game turned on his homer.",
-        "{name} went {stat_phrase} in {possessive} win over the {opponent_text}, and the long ball tilted the game for good.",
+        "{name} posted a {stat_phrase} box score in the {possessive} win over the {opponent_text}, with the homer proving to be enough.",
+        "{name} built a {stat_phrase} line in the {possessive} win over the {opponent_text}, and the game turned on his homer.",
+        "{name} went {stat_phrase} in the {possessive} win over the {opponent_text}, and the long ball tilted the game for good.",
         "{name} finished {stat_phrase} as the {team_name} beat the {opponent_text}, with the homer putting a permanent swing into the scoreboard.",
-        "{name} came away with a {stat_phrase} line in {possessive} win over the {opponent_text}, and his homer ended up being the one that held.",
+        "{name} came away with a {stat_phrase} line in the {possessive} win over the {opponent_text}, and his homer ended up being the one that held.",
         "{name} built a {stat_phrase} box score in the win over the {opponent_text}, with the homer carrying decisive weight.",
-        "{name} turned in a {stat_phrase} performance in {possessive} win over the {opponent_text}, and the homer was the lasting swing.",
+        "{name} turned in a {stat_phrase} performance in the {possessive} win over the {opponent_text}, and the homer was the lasting swing.",
     ],
     "go_ahead_hit": [
-        "{name} went {stat_phrase} in {possessive} win over the {opponent_text}, and he came through with the hit that ultimately decided it.",
+        "{name} went {stat_phrase} in the {possessive} win over the {opponent_text}, and he came through with the hit that ultimately decided it.",
         "{name} finished {stat_phrase} as the {team_name} beat the {opponent_text}, with his biggest contribution arriving in a key late spot.",
-        "{name} turned in a {stat_phrase} performance in {possessive} win over the {opponent_text}, and his go-ahead hit proved to be the difference.",
-        "{name} built a {stat_phrase} box score in {possessive} win over the {opponent_text}, with the deciding hit standing out above the rest.",
-        "{name} went {stat_phrase} in {possessive} win over the {opponent_text}, and his key hit ended up holding all the way through.",
-        "{name} finished {stat_phrase} in {possessive} win over the {opponent_text}, with his most important swing coming in the biggest spot.",
+        "{name} turned in a {stat_phrase} performance in the {possessive} win over the {opponent_text}, and his go-ahead hit proved to be the difference.",
+        "{name} built a {stat_phrase} box score in the {possessive} win over the {opponent_text}, with the deciding hit standing out above the rest.",
+        "{name} went {stat_phrase} in the {possessive} win over the {opponent_text}, and his key hit ended up holding all the way through.",
+        "{name} finished {stat_phrase} in the {possessive} win over the {opponent_text}, with his most important swing coming in the biggest spot.",
         "{name} turned in a {stat_phrase} performance as the {team_name} beat the {opponent_text}, and the go-ahead knock gave the box score its shape.",
         "{name} gave the {team_name} a {stat_phrase} showing in the win over the {opponent_text}, and his biggest hit came when the game was still hanging there.",
-        "{name} posted a {stat_phrase} box score in {possessive} win over the {opponent_text}, and his timely hit ended up being the one that stood.",
+        "{name} posted a {stat_phrase} box score in the {possessive} win over the {opponent_text}, and his timely hit ended up being the one that stood.",
         "{name} built a {stat_phrase} box score in the win over the {opponent_text}, with the most valuable piece coming on the go-ahead hit.",
-        "{name} went {stat_phrase} in {possessive} win over the {opponent_text}, and his key knock turned into the deciding moment.",
+        "{name} went {stat_phrase} in the {possessive} win over the {opponent_text}, and his key knock turned into the deciding moment.",
         "{name} finished {stat_phrase} as the {team_name} beat the {opponent_text}, with the biggest hit coming exactly when it needed to.",
         "{name} turned in a {stat_phrase} performance in the win over the {opponent_text}, and his biggest swing came in the deciding spot.",
-        "{name} came away with a {stat_phrase} showing in {possessive} win over the {opponent_text}, and his key hit pushed the game in the right direction for good.",
+        "{name} came away with a {stat_phrase} showing in the {possessive} win over the {opponent_text}, and his key hit pushed the game in the right direction for good.",
         "{name} built a {stat_phrase} box score in the victory over the {opponent_text}, and the go-ahead hit gave the performance real weight.",
     ],
     "game_tying": [
@@ -2566,6 +2667,8 @@ def build_hitter_summary(
     opp_score: int = -1,
     feed: dict | None = None,
     hitter: dict | None = None,
+    series_context: str = "",
+    opponent_abbr: str = "",
 ) -> str:
     team_name = team_name_from_abbr(team)
     opponent_text = opponent or "the opposing club"
@@ -2631,6 +2734,24 @@ def build_hitter_summary(
     close_game_sentence = _close_game_context(team_score, opp_score, team_won, context, rbi)
     if close_game_sentence:
         meta_pool.append(close_game_sentence)
+
+    # Opponent record sentence (gated to 7 days after opening day)
+    if opponent_abbr:
+        opp_record_phrase = _opponent_record_phrase(opponent_abbr)
+        if opp_record_phrase:
+            meta_pool.append(random.choice([
+                f"The win came against {opp_record_phrase}.",
+                f"That production came against {opp_record_phrase}.",
+                f"Worth noting: the damage was done against {opp_record_phrase}.",
+            ]))
+
+    # Series context sentence
+    if series_context:
+        meta_pool.append(random.choice([
+            f"This was {series_context} of the series.",
+            f"It was {series_context}, and he made his presence felt.",
+            f"{series_context} of the series, and he had a big one.",
+        ]))
 
     # --- Quality pool (EV / hard contact) ---
     quality_pool: list[str] = []
@@ -2752,11 +2873,15 @@ def build_hitter_summary(
         else:
             break
 
-    return " ".join(sentences[:max_sentences]).strip()
+    final = " ".join(sentences[:max_sentences]).strip()
+    # Bold the first occurrence of the player's full name in the summary
+    if name in final:
+        final = final.replace(name, f"**{name}**", 1)
+    return final
 
 # ---------------- EMBED POSTING ----------------
 
-async def post_card(channel: discord.abc.Messageable, hitter: dict, opponent: str, team_won: bool, feed: dict, game_date_et, team_score: int = -1, opp_score: int = -1) -> None:
+async def post_card(channel: discord.abc.Messageable, hitter: dict, opponent: str, team_won: bool, feed: dict, game_date_et, team_score: int = -1, opp_score: int = -1, series_context: str = "", opponent_abbr: str = "") -> None:
     stats = hitter["stats"]
     label = classify_hitter(stats)
     recent_games = get_recent_hitter_games(hitter.get("id"), game_date_et)
@@ -2775,7 +2900,7 @@ async def post_card(channel: discord.abc.Messageable, hitter: dict, opponent: st
         value=build_hitter_summary(
             hitter["name"], hitter["team"], stats, label, game_context, opponent, team_won, recent_games,
             pitcher=pitcher, lineup_spot=lineup_spot, position=position, team_score=team_score, opp_score=opp_score,
-            feed=feed, hitter=hitter,
+            feed=feed, hitter=hitter, series_context=series_context, opponent_abbr=opponent_abbr,
         ),
         inline=False,
     )
@@ -2930,8 +3055,9 @@ async def hitter_loop() -> None:
                         player_team == home_abbr and home_score > away_score
                     )
 
+                    opp_abbr = home_abbr if player_team == away_abbr else away_abbr
                     log(f"Posting {hitter['name']} | {hitter['team']} | {matchup} | score={score_value}")
-                    await post_card(channel, hitter, opponent, team_won, feed, game_date_et, team_score=away_score if player_team == away_abbr else home_score, opp_score=home_score if player_team == away_abbr else away_score)
+                    await post_card(channel, hitter, opponent, team_won, feed, game_date_et, team_score=away_score if player_team == away_abbr else home_score, opp_score=home_score if player_team == away_abbr else away_score, series_context=get_series_context(game), opponent_abbr=opp_abbr)
                     posted.add(post_key)
                     posted_this_game += 1
                     posts_this_scan += 1
