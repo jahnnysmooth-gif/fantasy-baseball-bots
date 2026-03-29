@@ -434,7 +434,7 @@ def format_ip_for_summary(ip: str) -> str:
 
     text = str(ip).strip()
     if text.endswith(".0"):
-        whole = safe_int(float(text), 0)
+        whole = safe_int(text.split(".")[0], 0)
         return f"{whole} innings"
     if text.endswith(".1"):
         whole = safe_int(text.split(".")[0], 0)
@@ -540,10 +540,10 @@ def format_starter_season_line(season_stats: dict) -> str:
     era = season.get("era") or season.get("earnedRunAverage") or "0.00"
     whip = season.get("whip") or season.get("walksAndHitsPerInningPitched")
     w = safe_int(season.get("wins", 0), 0)
-    l = safe_int(season.get("losses", 0), 0)
+    losses = safe_int(season.get("losses", 0), 0)
     k = safe_int(season.get("strikeOuts", 0), 0)
     ip = season.get("inningsPitched") or "0.0"
-    parts = [f"{w}-{l}", f"ERA {era}"]
+    parts = [f"{w}-{losses}", f"ERA {era}"]
     if whip not in (None, ""):
         parts.append(f"WHIP {whip}")
     parts.append(f"{k} K")
@@ -1538,9 +1538,9 @@ def build_starter_subject_line(p: dict, label: str, game_context: dict, seed: in
             choices.append(f"💥 {name} misses bats but gets punished on contact")
     elif label == "NO_COMMAND":
         choices = [
-            f"🎯 {name} never gets the count working for him",
-            f"🎯 {name} fights the zone all night",
-            f"🎯 {name} cannot get comfortable in the strike zone",
+            f"🧭 {name} never gets the count working for him",
+            f"🧭 {name} fights the zone all night",
+            f"🧭 {name} cannot get comfortable in the strike zone",
         ]
     elif label == "UNEVEN":
         choices = [
@@ -1630,6 +1630,7 @@ def build_starter_summary(p: dict, label: str, game_context: dict, recent_appear
 
     return " ".join(final_sentences[:4])
 
+
 def get_games():
     today = datetime.now(ET).date()
     yesterday = today - timedelta(days=1)
@@ -1649,9 +1650,13 @@ def get_games():
 
 
 def get_feed(game_id):
-    r = requests.get(LIVE_URL.format(game_id), timeout=30)
-    r.raise_for_status()
-    return r.json()
+    try:
+        r = requests.get(LIVE_URL.format(game_id), timeout=30)
+        r.raise_for_status()
+        return r.json()
+    except Exception as e:
+        log(f"Feed fetch error for game {game_id}: {e}")
+        return None
 
 
 
@@ -1706,7 +1711,9 @@ async def loop():
                 if not game_id:
                     continue
 
-                feed = get_feed(game_id)
+                feed = await asyncio.to_thread(get_feed, game_id)
+                if feed is None:
+                    continue
                 starters = get_starters(feed)
 
                 game_teams = feed.get("gameData", {}).get("teams", {})
@@ -1758,7 +1765,7 @@ async def loop():
                     if posted_this_game >= MAX_STARTER_CARDS_PER_GAME:
                         break
 
-                    recent_appearances = get_recent_appearances(pid, game_date_et, limit=3, max_days=45)
+                    recent_appearances = await asyncio.to_thread(get_recent_appearances, pid, game_date_et, limit=3, max_days=45)
                     log(f"Posting {p['name']} | {p['team']} | {score_value} | score={score}")
                     await post_card(channel, p, game_context, score_value, recent_appearances=recent_appearances)
                     posted.add(key)
