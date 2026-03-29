@@ -497,6 +497,8 @@ def build_starter_pitch_metrics(feed: dict, pitcher_id: int):
     whiffs = 0
     fastball_velos = []
     pitch_type_counts = {}
+    first_pitch_strikes = 0
+    first_pitch_total = 0
 
     for play in plays:
         matchup = play.get("matchup", {}) if isinstance(play, dict) else {}
@@ -504,17 +506,27 @@ def build_starter_pitch_metrics(feed: dict, pitcher_id: int):
         if pitcher.get("id") != pitcher_id:
             continue
 
-        for event in play.get("playEvents", []):
+        play_events = play.get("playEvents", [])
+        first_pitch_seen = False
+        for event in play_events:
             if not isinstance(event, dict) or not event.get("isPitch"):
                 continue
             total_pitches += 1
             details = event.get("details", {})
-            if details.get("isStrike"):
+            is_strike = bool(details.get("isStrike"))
+            if is_strike:
                 strikes += 1
             if is_called_strike_event(event):
                 called_strikes += 1
             if is_whiff_event(event):
                 whiffs += 1
+
+            # First pitch of the plate appearance
+            if not first_pitch_seen:
+                first_pitch_seen = True
+                first_pitch_total += 1
+                if is_strike or is_called_strike_event(event) or is_whiff_event(event):
+                    first_pitch_strikes += 1
 
             pitch_data = event.get("pitchData", {})
             start_speed = safe_float(pitch_data.get("startSpeed"), 0.0)
@@ -532,9 +544,13 @@ def build_starter_pitch_metrics(feed: dict, pitcher_id: int):
         "whiffs": whiffs,
         "called_strikes": called_strikes,
         "pitch_type_counts": pitch_type_counts,
+        "first_pitch_strikes": first_pitch_strikes,
+        "first_pitch_total": first_pitch_total,
     }
     if total_pitches > 0:
         payload["csw_percent"] = round(((called_strikes + whiffs) / total_pitches) * 100.0, 1)
+    if first_pitch_total > 0:
+        payload["fp_strike_pct"] = round((first_pitch_strikes / first_pitch_total) * 100.0, 1)
     if len(fastball_velos) >= VELOCITY_MIN_FASTBALLS and total_pitches >= VELOCITY_MIN_PITCHES:
         payload["avg_fastball_velocity"] = round(sum(fastball_velos) / len(fastball_velos), 1)
         payload["fastball_count"] = len(fastball_velos)
@@ -550,6 +566,14 @@ def build_starter_game_flow(feed: dict, pitcher_id: int, side: str):
         "scored_in_first": False, "settled_after_rough": False,
         "late_damage": False, "team_runs_while_in": 0, "opp_runs_while_in": 0,
         "entry_margin": 0, "exit_margin": 0, "first_inning": None, "last_inning": None,
+        # new fields
+        "leverage_damage_runs": 0,       # opp runs scored while margin was <= 2
+        "garbage_time_runs": 0,           # opp runs scored while pitcher's team led 4+
+        "stranded_runners": 0,            # baserunners left on when outs made / inning ended
+        "runners_on_exit": 0,             # runners on base when pitcher left game
+        "bullpen_blew_inherited": False,  # those exit runners scored after pitcher left
+        "longest_scoreless_streak": 0,    # longest consecutive scoreless inning run mid-outing
+        "high_leverage_clean": False,     # pitched in tight game (margin <=1) and kept it scoreless
     }
     if not feed or pitcher_id is None:
         return default
@@ -558,6 +582,7 @@ def build_starter_game_flow(feed: dict, pitcher_id: int, side: str):
     if not plays:
         return default
 
+    # Index all plays by pitcher id
     pitcher_plays = []
     for idx, play in enumerate(plays):
         matchup = play.get("matchup", {}) if isinstance(play, dict) else {}
@@ -572,30 +597,120 @@ def build_starter_game_flow(feed: dict, pitcher_id: int, side: str):
         result = play.get("result", {}) if isinstance(play, dict) else {}
         return safe_int(result.get("awayScore", 0), 0), safe_int(result.get("homeScore", 0), 0)
 
+    def runners_on_base(play):
+        """Count baserunners at the START of a play (from matchup.postOnFirst etc or offense runners)."""
+        offense = play.get("offense", {}) if isinstance(play, dict) else {}
+        count = 0
+        for base in ("first", "second", "third"):
+            if offense.get(f"postOn{base.capitalize()}") or offense.get(f"on{base.capitalize()}"):
+                count += 1
+        # fallback: use matchup runners
+        matchup = play.get("matchup", {}) if isinstance(play, dict) else {}
+        if not count:
+            for base in ("postOnFirst", "postOnSecond", "postOnThird"):
+                if matchup.get(base):
+                    count += 1
+        return count
+
+    def runners_after_play(play):
+        """Count baserunners in play result (runners still on after play ends)."""
+        result = play.get("result", {}) if isinstance(play, dict) else {}
+        runners = play.get("runners", []) if isinstance(play, dict) else []
+        count = 0
+        for r in runners:
+            if not isinstance(r, dict):
+                continue
+            movement = r.get("movement", {})
+            end_base = movement.get("end") or movement.get("endBase")
+            if end_base and end_base not in ("score", "Score", "4B", None):
+                count += 1
+        return count
+
     first_idx = pitcher_plays[0][0]
     prev_away, prev_home = score_tuple(plays[first_idx - 1]) if first_idx > 0 else (0, 0)
 
     entry_team = prev_home if side == "home" else prev_away
-    entry_opp = prev_away if side == "home" else prev_home
+    entry_opp  = prev_away if side == "home" else prev_home
 
     innings_sequence = []
-    runs_by_inning = {}
+    runs_by_inning   = {}
+    leverage_damage_runs = 0
+    garbage_time_runs    = 0
+    stranded_total       = 0
+    high_leverage_tight_innings = 0
+    high_leverage_clean_innings = 0
 
-    for _, play in pitcher_plays:
-        about = play.get("about", {}) if isinstance(play, dict) else {}
+    last_idx_in_pitcher_plays = pitcher_plays[-1][0]
+
+    for list_pos, (play_idx, play) in enumerate(pitcher_plays):
+        about  = play.get("about", {}) if isinstance(play, dict) else {}
         inning = safe_int(about.get("inning", 0), 0)
+        is_last_play = (list_pos == len(pitcher_plays) - 1)
+
         if inning and inning not in innings_sequence:
             innings_sequence.append(inning)
 
         away_after, home_after = score_tuple(play)
         opp_runs_on_play = (away_after - prev_away) if side == "home" else (home_after - prev_home)
+
         if opp_runs_on_play > 0 and inning:
             runs_by_inning[inning] = runs_by_inning.get(inning, 0) + opp_runs_on_play
 
+            # Margin BEFORE this play scored
+            team_score_before = prev_home if side == "home" else prev_away
+            opp_score_before  = prev_away if side == "home" else prev_home
+            margin_before = team_score_before - opp_score_before
+
+            if margin_before <= 2:
+                leverage_damage_runs += opp_runs_on_play
+            if margin_before >= 4:
+                garbage_time_runs += opp_runs_on_play
+
+            # Track high-leverage (margin <=1) innings
+            if abs(margin_before) <= 1:
+                high_leverage_tight_innings += 1
+
         prev_away, prev_home = away_after, home_after
 
+        # Stranded runners: after last play of each inning (half), count runners left
+        # We approximate by detecting inning change or end of pitcher's tenure
+        if list_pos < len(pitcher_plays) - 1:
+            next_inning = safe_int(pitcher_plays[list_pos + 1][1].get("about", {}).get("inning", 0), 0)
+            if next_inning != inning and inning:
+                on_base = runners_after_play(play)
+                stranded_total += on_base
+        # On the last play, count runners left as "runners on exit"
+        if is_last_play:
+            runners_on_exit = runners_after_play(play)
+        else:
+            runners_on_exit = 0
+
     exit_team = prev_home if side == "home" else prev_away
-    exit_opp = prev_away if side == "home" else prev_home
+    exit_opp  = prev_away if side == "home" else prev_home
+
+    # Did the bullpen blow the inherited runners?
+    # Look at plays AFTER the pitcher's last play and see if those runners scored
+    bullpen_blew_inherited = False
+    if runners_on_exit > 0 and last_idx_in_pitcher_plays < len(plays) - 1:
+        # Score right when pitcher exited
+        exit_away, exit_home = score_tuple(plays[last_idx_in_pitcher_plays])
+        exit_opp_score = exit_away if side == "home" else exit_home
+        # Find final score of that same inning (last play of that half-inning)
+        exit_inning = safe_int(plays[last_idx_in_pitcher_plays].get("about", {}).get("inning", 0), 0)
+        exit_half   = plays[last_idx_in_pitcher_plays].get("about", {}).get("isTopInning", None)
+        later_opp_runs = 0
+        for future_play in plays[last_idx_in_pitcher_plays + 1:]:
+            if not isinstance(future_play, dict):
+                continue
+            f_about = future_play.get("about", {})
+            f_inning = safe_int(f_about.get("inning", 0), 0)
+            f_half   = f_about.get("isTopInning", None)
+            if f_inning != exit_inning or f_half != exit_half:
+                break  # moved to next half-inning
+            f_away, f_home = score_tuple(future_play)
+            f_opp = f_away if side == "home" else f_home
+            later_opp_runs = f_opp - exit_opp_score
+        bullpen_blew_inherited = later_opp_runs > 0
 
     inning_runs = [runs_by_inning.get(inning, 0) for inning in innings_sequence]
     scoreless_to_start = 0
@@ -605,27 +720,50 @@ def build_starter_game_flow(feed: dict, pitcher_id: int, side: str):
         else:
             break
 
-    run_innings = [r for r in inning_runs if r > 0]
+    # Longest mid-outing consecutive scoreless streak
+    longest_streak = 0
+    current_streak = 0
+    for runs in inning_runs:
+        if runs == 0:
+            current_streak += 1
+            longest_streak = max(longest_streak, current_streak)
+        else:
+            current_streak = 0
+
+    run_innings    = [r for r in inning_runs if r > 0]
     scored_in_first = bool(inning_runs and inning_runs[0] > 0)
     settled_after_rough = scored_in_first and len(inning_runs) >= 3 and all(r == 0 for r in inning_runs[1:3])
     late_damage = len(inning_runs) >= 2 and inning_runs[-1] > 0 and sum(inning_runs[:-1]) == 0
 
+    # High-leverage clean: pitched when game was within 1 run AND allowed zero runs in those tight frames
+    total_tight_frames = sum(1 for r in runs_by_inning.values() if r == 0) if runs_by_inning else 0
+    high_leverage_clean = (leverage_damage_runs == 0 and
+                           len(innings_sequence) >= 5 and
+                           abs(exit_team - exit_opp) <= 2)
+
     payload = dict(default)
     payload.update({
-        "innings_sequence": innings_sequence,
-        "runs_by_inning": runs_by_inning,
-        "scoreless_to_start": scoreless_to_start,
+        "innings_sequence":          innings_sequence,
+        "runs_by_inning":            runs_by_inning,
+        "scoreless_to_start":        scoreless_to_start,
         "only_damage_in_one_inning": len(run_innings) == 1 and sum(run_innings) > 0,
-        "biggest_inning_runs": max(run_innings) if run_innings else 0,
-        "scored_in_first": scored_in_first,
-        "settled_after_rough": settled_after_rough,
-        "late_damage": late_damage,
-        "team_runs_while_in": max(exit_team - entry_team, 0),
-        "opp_runs_while_in": max(exit_opp - entry_opp, 0),
-        "entry_margin": entry_team - entry_opp,
-        "exit_margin": exit_team - exit_opp,
-        "first_inning": innings_sequence[0] if innings_sequence else None,
-        "last_inning": innings_sequence[-1] if innings_sequence else None,
+        "biggest_inning_runs":       max(run_innings) if run_innings else 0,
+        "scored_in_first":           scored_in_first,
+        "settled_after_rough":       settled_after_rough,
+        "late_damage":               late_damage,
+        "team_runs_while_in":        max(exit_team - entry_team, 0),
+        "opp_runs_while_in":         max(exit_opp - entry_opp, 0),
+        "entry_margin":              entry_team - entry_opp,
+        "exit_margin":               exit_team - exit_opp,
+        "first_inning":              innings_sequence[0] if innings_sequence else None,
+        "last_inning":               innings_sequence[-1] if innings_sequence else None,
+        "leverage_damage_runs":      leverage_damage_runs,
+        "garbage_time_runs":         garbage_time_runs,
+        "stranded_runners":          stranded_total,
+        "runners_on_exit":           runners_on_exit,
+        "bullpen_blew_inherited":    bullpen_blew_inherited,
+        "longest_scoreless_streak":  longest_streak,
+        "high_leverage_clean":       high_leverage_clean,
     })
     return payload
 
@@ -683,6 +821,8 @@ def get_starters(feed: dict):
                 "avg_fastball_velocity": metrics.get("avg_fastball_velocity"),
                 "fastball_count": metrics.get("fastball_count", 0),
                 "pitch_type_counts": metrics.get("pitch_type_counts", {}),
+                "fp_strike_pct": metrics.get("fp_strike_pct"),
+                "first_pitch_total": metrics.get("first_pitch_total", 0),
                 "game_flow": game_flow,
             }
             candidates.append(candidate)
@@ -1738,6 +1878,352 @@ def build_starter_opp_quality_sentence(p: dict, label: str, seed: int, opp_hitti
     return choices[(seed // 41) % len(choices)]
 
 
+# ---------------- NEW SENTENCE BUILDERS ----------------
+
+def build_starter_kbb_sentence(p: dict, label: str, seed: int) -> str:
+    """K:BB ratio — fires for both strong command and poor command."""
+    stats = p.get("stats", {})
+    k  = safe_int(stats.get("strikeOuts", 0), 0)
+    bb = safe_int(stats.get("baseOnBalls", 0), 0)
+    ip = safe_float(stats.get("inningsPitched", "0.0"), 0.0)
+
+    # Need at least 4 IP and meaningful K total to say anything useful
+    if ip < 4.0 or k < 3:
+        return ""
+
+    # --- Elite command: BB = 0 ---
+    if bb == 0 and k >= 5:
+        choices = [
+            f"He did not walk a single batter, which made every inning feel like it belonged to him.",
+            f"No walks in the book for him — when he needed a strikeout he found one, and when he needed a groundball he got that too.",
+            f"He went the whole way without issuing a free pass, and that kind of command changes the entire shape of a start.",
+            f"Zero walks is the cleanest command story you can write, and he earned every bit of that line.",
+            f"The walk column stayed empty all night, and you could feel the lineup's frustration building around it.",
+            f"He never gave anyone a free base, which is the kind of discipline that makes everything else downstream easier.",
+            f"Not a single walk the entire time he was out there — the zone was his property all night.",
+            f"Walking nobody is the ultimate form of working ahead, and he made it look almost routine.",
+        ]
+        if k >= 10:
+            choices.extend([
+                f"He struck out {number_word(k)} and walked nobody — that is the cleanest version of a dominant outing.",
+                f"Double-digit strikeouts and not one walk is the kind of line that does not need any further explanation.",
+            ])
+        return choices[(seed // 43) % len(choices)]
+
+    # --- Great ratio: K >= 3x BB, at least 2 BB ---
+    if bb >= 2 and k >= bb * 3:
+        ratio_text = f"{k}-to-{bb}"
+        choices = [
+            f"His strikeout-to-walk ratio tells the command story well — {ratio_text} is a really clean number.",
+            f"He finished with a {ratio_text} strikeout-to-walk mark, which is exactly the kind of dominance-to-mistake balance you want from a starter.",
+            f"A {ratio_text} K-to-BB ratio is hard to argue with, and it explains why the lineup never found much traction.",
+            f"He punched out {number_word(k)} and walked only {number_word(bb)}, and that gap alone tells you how much he was in control.",
+            f"The {ratio_text} strikeout-to-walk split was the clearest sign he had his best stuff working tonight.",
+            f"Striking out {number_word(k)} while only walking {number_word(bb)} is efficient, aggressive pitching — he was hunting outs all night.",
+        ]
+        return choices[(seed // 43) % len(choices)]
+
+    # --- Decent ratio: 2:1 or better, but not 3:1 ---
+    if bb >= 1 and k >= bb * 2 and label in GOOD_STARTER_LABELS:
+        choices = [
+            f"He struck out {number_word(k)} and walked {number_word(bb)}, and that ratio kept the damage from getting out of hand.",
+            f"The {k}-to-{bb} K-to-walk split shows he was ahead in counts more often than not.",
+            f"He punched out {number_word(k)} against {number_word(bb)} walks — not perfectly clean, but efficient enough to stay in control.",
+            f"Finishing with {number_word(k)} strikeouts against {number_word(bb)} walks is a solid command line for a long outing.",
+        ]
+        return choices[(seed // 43) % len(choices)]
+
+    # --- Bad ratio: walks competing with or exceeding strikeouts ---
+    if bb >= 3 and k <= bb * 1.5 and label in SUBPAR_STARTER_LABELS | {"NO_COMMAND"}:
+        choices = [
+            f"He struck out {number_word(k)} but walked {number_word(bb)}, and those free passes kept every inning more stressful than it needed to be.",
+            f"The {k}-to-{bb} strikeout-to-walk split is the kind of ratio that makes a long night feel even longer.",
+            f"He only had {number_word(k)} strikeouts against {number_word(bb)} walks, which means he was giving away too many at-bats.",
+            f"Punching out {number_word(k)} while walking {number_word(bb)} is hard to sustain — and eventually it caught up with him.",
+            f"The walk total was too close to the strikeout total, and that math almost never works out well over a full start.",
+            f"He struck out {number_word(k)} but the {number_word(bb)} walks bled into every inning and kept the pressure building.",
+            f"When you walk {number_word(bb)} and only strike out {number_word(k)}, too many counts are going the wrong direction.",
+        ]
+        return choices[(seed // 43) % len(choices)]
+
+    # --- High BB even with good K: he's a wild strikeout arm ---
+    if bb >= 4 and k >= 7 and label in {"STRIKEOUT", "UNEVEN"}:
+        choices = [
+            f"He struck out {number_word(k)} but the {number_word(bb)} walks kept offsetting everything — the stuff was there, the command was not consistent enough.",
+            f"The strikeout total was impressive but the {number_word(bb)} walks were always waiting in the background to make things complicated.",
+            f"He had {number_word(k)} punchouts to his name but {number_word(bb)} walks alongside them, which is the definition of a hard night to manage.",
+            f"Big strikeout total, big walk total — he was electric in spots and loose in others, and both showed up in the line.",
+        ]
+        return choices[(seed // 43) % len(choices)]
+
+    return ""
+
+
+def build_starter_fp_strike_sentence(p: dict, label: str, seed: int) -> str:
+    """First-pitch strike rate — fires when clearly high or clearly low."""
+    fp_pct = p.get("fp_strike_pct")
+    fp_total = safe_int(p.get("first_pitch_total", 0), 0)
+
+    if fp_pct is None or fp_total < 10:
+        return ""
+
+    try:
+        fp_val = float(fp_pct)
+    except Exception:
+        return ""
+
+    elite   = fp_val >= 70.0
+    good    = fp_val >= 63.0
+    poor    = fp_val <= 50.0
+    bad     = fp_val <= 44.0
+
+    fp_text = f"{int(round(fp_val))} percent"
+
+    if label in GOOD_STARTER_LABELS and good:
+        if elite:
+            choices = [
+                f"He got ahead on the first pitch {fp_text} of the time, and that kind of early count control is the foundation everything else is built on.",
+                f"His first-pitch strike rate of {fp_text} meant he was dictating the at-bat before it even got started.",
+                f"He threw first-pitch strikes at a {fp_text} clip, which tells you how much he was in attack mode from pitch one.",
+                f"Getting ahead {fp_text} of the time on the first pitch makes every subsequent pitch easier, and he used that all night.",
+                f"A first-pitch strike rate of {fp_text} is elite territory — he never let hitters dig in and get comfortable.",
+                f"He pounded the zone early and often, hitting first-pitch strikes {fp_text} of the time and never letting batters settle in.",
+            ]
+        else:
+            choices = [
+                f"He was ahead in the count early, getting first-pitch strikes {fp_text} of the time and consistently working from a position of strength.",
+                f"Getting ahead {fp_text} of the time on first pitches helped him stay efficient and keep deep counts to a minimum.",
+                f"His first-pitch strike rate of {fp_text} was a big reason counts stayed in his favor for most of the night.",
+                f"He was in control from pitch one more often than not, landing first-pitch strikes at a {fp_text} rate.",
+            ]
+        return choices[(seed // 47) % len(choices)]
+
+    if label in SUBPAR_STARTER_LABELS and poor:
+        if bad:
+            choices = [
+                f"He was only getting first-pitch strikes {fp_text} of the time, which meant he was playing from behind almost every at-bat.",
+                f"A first-pitch strike rate of {fp_text} is a rough way to go through a lineup — you're giving away the count before the battle even starts.",
+                f"He could not get ahead consistently, hitting first-pitch strikes just {fp_text} of the time and letting hitters set the terms.",
+                f"When you're only throwing first-pitch strikes {fp_text} of the time, every at-bat becomes a grind, and the innings reflect that.",
+                f"The first-pitch strike numbers were ugly at {fp_text} — he was behind in the count before he even made his second pitch.",
+            ]
+        else:
+            choices = [
+                f"He got ahead early in only {fp_text} of at-bats, which kept too many counts tilted in the hitter's favor.",
+                f"The first-pitch strike rate of {fp_text} was below where it needed to be, and it set up a lot of the trouble that followed.",
+                f"He struggled to get ahead on the first pitch — only {fp_text} — and that dug him into holes he could not always escape.",
+            ]
+        return choices[(seed // 47) % len(choices)]
+
+    # Interesting contrast: bad label but good FP rate (stuff issue, not approach)
+    if label in BAD_STARTER_LABELS and good:
+        choices = [
+            f"He got first-pitch strikes {fp_text} of the time, so this was not a command or approach problem — the damage came after he was already ahead.",
+            f"His first-pitch strike rate of {fp_text} shows he was attacking the zone early; the issue was what happened once hitters made contact.",
+            f"He was ahead in the count plenty — first-pitch strikes {fp_text} of the time — so the rough line was more about the quality of contact than the approach.",
+        ]
+        return choices[(seed // 47) % len(choices)]
+
+    return ""
+
+
+def build_starter_leverage_sentence(p: dict, label: str, seed: int) -> str:
+    """Contextualizes when damage came relative to game state."""
+    flow = p.get("game_flow") or {}
+    leverage_damage = safe_int(flow.get("leverage_damage_runs", 0), 0)
+    garbage_runs    = safe_int(flow.get("garbage_time_runs", 0), 0)
+    opp_runs_total  = safe_int(flow.get("opp_runs_while_in", 0), 0)
+    innings         = flow.get("innings_sequence") or []
+    high_lev_clean  = bool(flow.get("high_leverage_clean"))
+
+    if not innings or opp_runs_total == 0 and not high_lev_clean:
+        return ""
+
+    name = p.get("name", "He")
+
+    # All damage came in garbage time
+    if opp_runs_total > 0 and garbage_runs >= opp_runs_total and garbage_runs >= 2:
+        choices = [
+            "Most of the damage on his ledger came after the lead was already well in hand, so the ERA hit is a bit misleading.",
+            "The runs he gave up came late with the game already decided — that is a different kind of damage than runs that actually change an outcome.",
+            "A lot of the damage was in low-stakes situations, which makes the earned run total look worse than the outing actually felt.",
+            "He absorbed some runs when the game was effectively over, which inflates the line a little.",
+            "The earned runs came with a comfortable cushion behind him, so they cost less than a scoreline alone would suggest.",
+        ]
+        return choices[(seed // 53) % len(choices)]
+
+    # Damage came almost entirely in tight situations
+    if leverage_damage >= 2 and leverage_damage >= opp_runs_total * 0.75:
+        choices = [
+            "The trouble came when the game was closest, which made every run feel heavier than it might have in another context.",
+            "The damage landed in the high-stakes frames, not in mop-up time — those runs actually shaped the game.",
+            "Most of what he gave up came while the margin was tight, which is the worst time for a pitcher to spring a leak.",
+            "The runs hit in the innings that mattered most, and that is what made the outing harder to absorb than the total alone suggests.",
+            "He gave up runs when the game was in the balance, not after the outcome was settled — that is a meaningful distinction.",
+        ]
+        return choices[(seed // 53) % len(choices)]
+
+    # Held up in close game / high-leverage clean
+    if high_lev_clean and label in GOOD_STARTER_LABELS:
+        choices = [
+            "He worked through several innings where the game was tight and never let the pressure create a big inning.",
+            "The game stayed close for stretches, and he kept his composure and the scoreboard in check throughout.",
+            "He was pitching with the margin slim for portions of the night, and his ability to hold the line there was the real story.",
+            "Some of the quietest innings came when the game was at its tightest — that is when it is hardest to be clean, and he was.",
+            "He pitched well in the frames that actually mattered, keeping the game within reach even when the margin was thin.",
+        ]
+        return choices[(seed // 53) % len(choices)]
+
+    # Mixed: some leverage damage, some not — only worth noting if contrast is notable
+    if leverage_damage >= 1 and garbage_runs >= 2 and label in BAD_STARTER_LABELS:
+        choices = [
+            "Some of the damage came with the game already out of hand, so the line overstates how badly he was beaten.",
+            "Not all of those runs came in critical moments — a couple arrived after the game had already turned.",
+        ]
+        return choices[(seed // 53) % len(choices)]
+
+    return ""
+
+
+def build_starter_stranded_sentence(p: dict, label: str, seed: int) -> str:
+    """Credit or note stranded baserunners depending on start quality."""
+    flow     = p.get("game_flow") or {}
+    stranded = safe_int(flow.get("stranded_runners", 0), 0)
+    stats    = p.get("stats", {})
+    er       = safe_int(stats.get("earnedRuns", 0), 0)
+    ip       = safe_float(stats.get("inningsPitched", "0.0"), 0.0)
+
+    if ip < 4.0 or stranded < 3:
+        return ""
+
+    name = p.get("name", "He")
+
+    if label in GOOD_STARTER_LABELS:
+        if stranded >= 7:
+            choices = [
+                f"He left {number_word(stranded)} runners stranded across the night, which means the damage count was much lower than the traffic would have predicted.",
+                f"The ability to pitch out of trouble was a huge part of this start — {number_word(stranded)} runners left on base, and almost none of them crossed the plate.",
+                f"He stranded {number_word(stranded)} baserunners, and that capacity to strand traffic was the difference between a good line and a great one.",
+                f"Leaving {number_word(stranded)} runners on base is not luck — that is pitching with something in reserve when it counts.",
+                f"With {number_word(stranded)} runners stranded, he gave away very little when he was in trouble, which is the mark of a pitcher who knows how to close out an inning.",
+            ]
+        else:
+            choices = [
+                f"He stranded {number_word(stranded)} runners along the way, keeping the damage below what the baserunner count might have suggested.",
+                f"The {number_word(stranded)} stranded runners tell the story of a pitcher who consistently found the out he needed to end the inning.",
+                f"He worked out of traffic well, leaving {number_word(stranded)} on base and keeping the run total manageable throughout.",
+                f"Leaving {number_word(stranded)} runners on base across the night helped him keep the earned run total honest.",
+            ]
+        return choices[(seed // 59) % len(choices)]
+
+    elif label in BAD_STARTER_LABELS:
+        if stranded >= 5:
+            choices = [
+                f"He actually stranded {number_word(stranded)} runners, so the damage could have been even worse — the line was bad but the bullpen did not inherit a complete mess.",
+                f"For all the trouble he was in, he did strand {number_word(stranded)} runners, which kept the damage from escalating further.",
+            ]
+        else:
+            choices = [
+                f"He only stranded {number_word(stranded)} runners across the night, which means most of the damage that came through, he could not stop.",
+            ]
+        return choices[(seed // 59) % len(choices)]
+
+    elif label == "UNEVEN":
+        choices = [
+            f"He left {number_word(stranded)} runners on base, and those escapes were the main reason the line stayed in the range it did.",
+            f"Stranding {number_word(stranded)} runners in a night with this much traffic is part of why the outing did not fall apart completely.",
+            f"He worked his way out of trouble more than once, leaving {number_word(stranded)} on base and keeping the run total from getting too ugly.",
+            f"The {number_word(stranded)} stranded runners kept the line honest — this was a grinding outing, but he found the escape hatch often enough.",
+        ]
+        return choices[(seed // 59) % len(choices)]
+
+    return ""
+
+
+def build_starter_inherited_sentence(p: dict, label: str, seed: int) -> str:
+    """Only fires when the bullpen definitively blew inherited runners after pitcher exited."""
+    flow = p.get("game_flow") or {}
+    if not flow.get("bullpen_blew_inherited"):
+        return ""
+
+    runners_on_exit = safe_int(flow.get("runners_on_exit", 0), 0)
+    if runners_on_exit == 0:
+        return ""
+
+    stats = p.get("stats", {})
+    ip    = safe_float(stats.get("inningsPitched", "0.0"), 0.0)
+    er    = safe_int(stats.get("earnedRuns", 0), 0)
+    name  = p.get("name", "He")
+
+    on_text = "a runner" if runners_on_exit == 1 else f"{number_word(runners_on_exit)} runners"
+
+    choices = [
+        f"He left {on_text} on base when he exited, and the bullpen let them score — those runs show up in the box score but not on his ledger.",
+        f"The {on_text} he left on base came around to score after he was already out of the game, so his actual earned run line looks a bit heavier than it should.",
+        f"He exited with {on_text} on base, and the relief corps could not get out of the inning clean — that is a different story than the raw numbers tell.",
+        f"The runs that followed his exit were not his to give up in the traditional sense — he left {on_text} on base and the pen could not hold them.",
+        f"There was {on_text} on base when he handed off, and they came around to score, which inflates the damage assigned to this start.",
+        f"When he left, there were still {on_text} on base — and they scored — so his ERA will feel this one a little more than the outing actually warranted.",
+    ]
+    if runners_on_exit >= 2:
+        choices.extend([
+            f"He gave up the base-runners, but what happened after he exited with {on_text} still on base is on the bullpen, not on him.",
+            f"Leaving with {on_text} on base and watching them score is one of the more frustrating ways to see your line get padded.",
+        ])
+
+    return choices[(seed // 61) % len(choices)]
+
+
+def build_starter_scoreless_streak_sentence(p: dict, label: str, seed: int) -> str:
+    """Mid-outing consecutive scoreless innings streak (min 4 innings)."""
+    flow            = p.get("game_flow") or {}
+    longest_streak  = safe_int(flow.get("longest_scoreless_streak", 0), 0)
+    scoreless_start = safe_int(flow.get("scoreless_to_start", 0), 0)
+    innings_total   = len(flow.get("innings_sequence") or [])
+
+    MIN_STREAK = 4  # per user preference
+
+    if longest_streak < MIN_STREAK:
+        return ""
+
+    # If the streak is just the opening run, scoreless_to_start already covers it
+    # Only fire here if there's a notable mid-outing streak AFTER taking damage
+    scored_in_first = bool(flow.get("scored_in_first"))
+    only_from_start = (longest_streak == scoreless_start)
+
+    if only_from_start and not scored_in_first:
+        return ""  # already handled by scoreless_to_start logic in flow_sentence
+
+    streak_text = number_word(longest_streak)
+
+    if label in GOOD_STARTER_LABELS:
+        choices = [
+            f"He put together a stretch of {streak_text} straight scoreless innings at one point, which gave the game a sense of inevitability.",
+            f"There was a run of {streak_text} consecutive scoreless frames in there that changed the feel of the entire night.",
+            f"His best stretch was {streak_text} innings in a row without allowing a run, and that is when the start really locked in.",
+            f"He ran off {streak_text} clean innings in a row, and that streak was the backbone of the whole outing.",
+            f"A {streak_text}-inning scoreless stretch at one point made this outing feel even more controlled than the final line shows.",
+            f"He was at his sharpest during a run of {streak_text} straight scoreless frames — nothing was getting through during that stretch.",
+        ]
+    elif scored_in_first and longest_streak >= 4:
+        # He recovered from early damage and went on a clean streak
+        choices = [
+            f"After the early trouble, he settled into a stretch of {streak_text} consecutive scoreless innings — that recovery was the whole story of this start.",
+            f"He found his footing and ran off {streak_text} scoreless innings in a row after the rough opening, which put the game back on track.",
+            f"He answered the early damage with {streak_text} straight clean frames, and that run of control is what made the line salvageable.",
+            f"The {streak_text}-inning scoreless streak he put together after being touched early is really what defined the outing.",
+            f"Once he settled in, he was nearly untouchable — {streak_text} straight scoreless innings after the rough start is a real story.",
+            f"After giving up runs early, he went {streak_text} innings without allowing another — that kind of bounce-back is harder than it looks.",
+        ]
+    else:
+        choices = [
+            f"He had a run of {streak_text} straight scoreless innings in there, even if the full picture was messier than that stretch.",
+            f"There was a {streak_text}-inning clean stretch buried in the outing that kept the damage from being worse.",
+        ]
+
+    return choices[(seed // 67) % len(choices)]
+
+
 # ---------------- SUBJECT LINE ----------------
 
 def build_starter_subject_line(p: dict, label: str, game_context: dict, seed: int) -> str:
@@ -1902,32 +2388,42 @@ def build_starter_summary(
     season_sentence    = build_starter_season_context_sentence(p, label, seed)
     nd_sentence        = build_starter_no_decision_sentence(p, label, seed)
     opp_sentence       = build_starter_opp_quality_sentence(p, label, seed, opp_hitting)
+    # new
+    kbb_sentence       = build_starter_kbb_sentence(p, label, seed)
+    fp_sentence        = build_starter_fp_strike_sentence(p, label, seed)
+    leverage_sentence  = build_starter_leverage_sentence(p, label, seed)
+    stranded_sentence  = build_starter_stranded_sentence(p, label, seed)
+    inherited_sentence = build_starter_inherited_sentence(p, label, seed)
+    streak_sentence    = build_starter_scoreless_streak_sentence(p, label, seed)
+
+    # Cap at 5 sentences for GEM/DOMINANT, 4 for everything else
+    cap = 5 if label in {"GEM", "DOMINANT"} else 4
 
     if is_bad_starter_label(label):
         order_options = [
-            [overview, flow_sentence, stat_sentence, positive_sentence, pressure_sentence, pitch_sentence, team_sentence, velocity_sentence, csw_sentence, opp_sentence, pitch_mix_sentence],
-            [overview, pressure_sentence, stat_sentence, positive_sentence, flow_sentence, pitch_sentence, team_sentence, velocity_sentence, csw_sentence, opp_sentence, season_sentence],
-            [overview, stat_sentence, flow_sentence, positive_sentence, csw_sentence, pitch_sentence, team_sentence, velocity_sentence, opp_sentence, pitch_mix_sentence],
-            [overview, stat_sentence, pitch_sentence, flow_sentence, pressure_sentence, positive_sentence, team_sentence, velocity_sentence, opp_sentence],
+            [overview, flow_sentence, stat_sentence, positive_sentence, pressure_sentence, leverage_sentence, kbb_sentence, pitch_sentence, team_sentence, velocity_sentence, csw_sentence, opp_sentence, inherited_sentence],
+            [overview, pressure_sentence, stat_sentence, positive_sentence, flow_sentence, kbb_sentence, leverage_sentence, pitch_sentence, team_sentence, velocity_sentence, csw_sentence, opp_sentence, season_sentence],
+            [overview, stat_sentence, flow_sentence, positive_sentence, leverage_sentence, csw_sentence, pitch_sentence, team_sentence, velocity_sentence, opp_sentence, kbb_sentence, inherited_sentence],
+            [overview, stat_sentence, pitch_sentence, flow_sentence, pressure_sentence, positive_sentence, kbb_sentence, team_sentence, velocity_sentence, opp_sentence, leverage_sentence],
         ]
     elif label == "STRIKEOUT":
         order_options = [
-            [overview, csw_sentence, stat_sentence, flow_sentence, pressure_sentence, pitch_sentence, team_sentence, velocity_sentence, season_sentence, nd_sentence, opp_sentence],
-            [overview, flow_sentence, csw_sentence, stat_sentence, team_sentence, pitch_sentence, velocity_sentence, pressure_sentence, season_sentence, opp_sentence],
-            [overview, stat_sentence, csw_sentence, flow_sentence, team_sentence, velocity_sentence, pressure_sentence, pitch_sentence, nd_sentence, opp_sentence],
+            [overview, csw_sentence, kbb_sentence, stat_sentence, flow_sentence, pressure_sentence, fp_sentence, pitch_sentence, team_sentence, velocity_sentence, season_sentence, nd_sentence, opp_sentence],
+            [overview, flow_sentence, csw_sentence, kbb_sentence, stat_sentence, team_sentence, fp_sentence, pitch_sentence, velocity_sentence, pressure_sentence, season_sentence, opp_sentence],
+            [overview, stat_sentence, csw_sentence, flow_sentence, kbb_sentence, team_sentence, velocity_sentence, pressure_sentence, fp_sentence, pitch_sentence, nd_sentence, opp_sentence],
         ]
     elif label in {"GEM", "DOMINANT"}:
         order_options = [
-            [overview, flow_sentence, csw_sentence, pressure_sentence, stat_sentence, team_sentence, velocity_sentence, pitch_sentence, season_sentence, nd_sentence, opp_sentence],
-            [overview, pressure_sentence, stat_sentence, flow_sentence, csw_sentence, team_sentence, pitch_sentence, velocity_sentence, season_sentence, opp_sentence],
-            [overview, csw_sentence, stat_sentence, flow_sentence, team_sentence, pressure_sentence, velocity_sentence, pitch_sentence, nd_sentence, opp_sentence],
+            [overview, flow_sentence, streak_sentence, csw_sentence, kbb_sentence, pressure_sentence, stat_sentence, stranded_sentence, team_sentence, velocity_sentence, fp_sentence, pitch_sentence, season_sentence, nd_sentence, opp_sentence],
+            [overview, pressure_sentence, kbb_sentence, stat_sentence, flow_sentence, streak_sentence, csw_sentence, stranded_sentence, team_sentence, fp_sentence, pitch_sentence, velocity_sentence, season_sentence, opp_sentence],
+            [overview, csw_sentence, kbb_sentence, stat_sentence, flow_sentence, streak_sentence, team_sentence, pressure_sentence, stranded_sentence, velocity_sentence, fp_sentence, pitch_sentence, nd_sentence, opp_sentence],
         ]
     else:
         order_options = [
-            [overview, flow_sentence, stat_sentence, pressure_sentence, team_sentence, pitch_sentence, csw_sentence, velocity_sentence, season_sentence, nd_sentence, opp_sentence, pitch_mix_sentence],
-            [overview, pitch_sentence, flow_sentence, stat_sentence, pressure_sentence, team_sentence, csw_sentence, velocity_sentence, season_sentence, opp_sentence],
-            [overview, pressure_sentence, stat_sentence, flow_sentence, csw_sentence, team_sentence, velocity_sentence, pitch_sentence, nd_sentence, opp_sentence, pitch_mix_sentence],
-            [overview, stat_sentence, team_sentence, flow_sentence, pressure_sentence, pitch_sentence, velocity_sentence, csw_sentence, season_sentence, opp_sentence],
+            [overview, flow_sentence, streak_sentence, stat_sentence, pressure_sentence, kbb_sentence, team_sentence, pitch_sentence, csw_sentence, fp_sentence, stranded_sentence, velocity_sentence, season_sentence, nd_sentence, opp_sentence, pitch_mix_sentence],
+            [overview, pitch_sentence, flow_sentence, kbb_sentence, stat_sentence, pressure_sentence, team_sentence, csw_sentence, fp_sentence, streak_sentence, velocity_sentence, season_sentence, opp_sentence],
+            [overview, pressure_sentence, stat_sentence, flow_sentence, kbb_sentence, csw_sentence, team_sentence, velocity_sentence, pitch_sentence, stranded_sentence, nd_sentence, opp_sentence, streak_sentence, pitch_mix_sentence],
+            [overview, stat_sentence, team_sentence, flow_sentence, kbb_sentence, pressure_sentence, pitch_sentence, fp_sentence, velocity_sentence, csw_sentence, stranded_sentence, season_sentence, opp_sentence],
         ]
 
     ordered = [s for s in order_options[seed % len(order_options)] if s]
@@ -1935,7 +2431,7 @@ def build_starter_summary(
     for sentence in ordered:
         if sentence and sentence not in final_sentences:
             final_sentences.append(sentence)
-        if len(final_sentences) >= 4:
+        if len(final_sentences) >= cap:
             break
 
     if len(final_sentences) < 3:
@@ -1943,14 +2439,16 @@ def build_starter_summary(
             flow_sentence, stat_sentence, pressure_sentence, team_sentence,
             csw_sentence, pitch_sentence, velocity_sentence, positive_sentence,
             pitch_mix_sentence, season_sentence, nd_sentence, opp_sentence,
+            kbb_sentence, fp_sentence, leverage_sentence, stranded_sentence,
+            inherited_sentence, streak_sentence,
         ]
         for sentence in fillers:
             if sentence and sentence not in final_sentences:
                 final_sentences.append(sentence)
-            if len(final_sentences) >= 4:
+            if len(final_sentences) >= cap:
                 break
 
-    return " ".join(final_sentences[:4])
+    return " ".join(final_sentences[:cap])
 
 
 # ---------------- API FETCHERS ----------------
