@@ -2045,28 +2045,28 @@ def build_summary(name: str, team: str, s: dict, label: str, context: dict, stre
     opp_phrase = f"against the {opp}" if opp else ""
 
     # Combined score + opponent tail phrase for close games (margin <= 2)
+    # Only fires for lead/trailing — tie games are excluded since the final score
+    # won't match the tied state at entry and produces nonsensical phrases.
+    # Also excluded for BLOWN (pitcher lost the lead, "win" would be contradictory)
+    # and generic RELIEF (not meaningful enough to add score context).
     margin = safe_int(context.get("entry_margin", 0), 0)
     state_kind = context.get("entry_state_kind", "")
     score_tail = ""
-    if (pitcher_score > 0 or opp_score > 0) and margin <= 2 and state_kind in {"lead", "trailing", "tie"}:
+    exclude_labels = {"BLOWN", "SHAKY_HOLD"}
+    if (
+        (pitcher_score > 0 or opp_score > 0)
+        and margin <= 2
+        and state_kind in {"lead", "trailing"}
+        and label not in exclude_labels
+    ):
         win_score = max(pitcher_score, opp_score)
         lose_score = min(pitcher_score, opp_score)
         score_num = f"{win_score}-{lose_score}"
-        tied_num = f"{pitcher_score}-{opp_score}"
 
-        # For SAVE, opponent is already in line1 — drop opp from score tail to avoid duplication
+        # For SAVE, opponent already in line1 — drop opp from score tail
         opp_in_score_tail = opp and label not in {"SAVE"}
 
-        if state_kind == "trailing":
-            if opp_in_score_tail:
-                score_tail = random.choice([
-                    f"in a {score_num} loss to the {opp}",
-                    f"as the {opp} won {score_num}",
-                    f"with the {opp} taking it {score_num}",
-                ])
-            else:
-                score_tail = f"in a {score_num} loss"
-        elif state_kind == "lead":
+        if state_kind == "lead":
             if opp_in_score_tail:
                 score_tail = random.choice([
                     f"in a {score_num} win over the {opp}",
@@ -2078,14 +2078,15 @@ def build_summary(name: str, team: str, s: dict, label: str, context: dict, stre
                     f"in a {score_num} win",
                     f"as his team held on {score_num}",
                 ])
-        else:  # tie — entry context already says "in a tie game", just add the number
+        elif state_kind == "trailing":
             if opp_in_score_tail:
                 score_tail = random.choice([
-                    f"with the score {tied_num} against the {opp}",
-                    f"in a {tied_num} tie against the {opp}",
+                    f"in a {score_num} loss to the {opp}",
+                    f"as the {opp} won {score_num}",
+                    f"with the {opp} taking it {score_num}",
                 ])
             else:
-                score_tail = f"with the score {tied_num}"
+                score_tail = f"in a {score_num} loss"
 
     # opp_in_line1: True for labels where opponent belongs in line1
     # False for HOLD/DOM/CLEAN/TRAFFIC/RELIEF — opponent woven in later
