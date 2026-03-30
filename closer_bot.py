@@ -812,7 +812,7 @@ def get_pitcher_entry_context(feed: dict, pitcher_id: int, pitcher_side: str):
         prev_half = prev_about.get("halfInning", "")
         if prev_inning == inning and prev_half == half:
             entry_outs = safe_int(prev_about.get("endOuts", prev_about.get("outs", 0)), 0)
-            relieved_pitcher = str(prev_play.get("matchup", {}).get("pitcher", {}).get("fullName", "") or "").strip()
+            relieved_pitcher = _fix_name(prev_play.get("matchup", {}).get("pitcher", {}).get("fullName", ""))
 
     entry_phrase = ""
     if inning is not None and half:
@@ -922,11 +922,15 @@ OUT_EVENTS = {
 
 def _batter_display_name(full_name: str) -> str:
     """Return properly capitalized full name for display in summaries."""
-    name = str(full_name or "").strip()
-    if not name:
-        return name
-    # Title-case as safety net against API sending lowercase names
-    return " ".join(part.capitalize() for part in name.split())
+    return _fix_name(full_name)
+
+
+def _fix_name(name: str) -> str:
+    """Title-case a player name as a safety net against API sending lowercase."""
+    n = str(name or "").strip()
+    if not n:
+        return n
+    return " ".join(part.capitalize() for part in n.split())
 
 
 def _batting_order_slot(about: dict) -> int:
@@ -1071,7 +1075,7 @@ def get_pitcher_outing_detail(feed: dict, pitcher_id: int, ip: str = "0.0", er: 
                     if not r.get("movement", {}).get("isOut", False)
                     and not r.get("details", {}).get("isScoringEvent", False)
                 )
-                replaced_by = str(next_matchup.get("pitcher", {}).get("fullName", "") or "").strip()
+                replaced_by = _fix_name(next_matchup.get("pitcher", {}).get("fullName", ""))
 
     return {
         "strikeouts": strikeouts,
@@ -2715,7 +2719,7 @@ def get_pitchers(feed: dict):
             velo = get_fastball_velocity_summary(feed, p.get("person", {}).get("id"))
             player_obj = {
                 "id": p.get("person", {}).get("id"),
-                "name": p.get("person", {}).get("fullName", "Unknown Pitcher"),
+                "name": _fix_name(p.get("person", {}).get("fullName", "Unknown Pitcher")),
                 "team": normalize_team_abbr(team),
                 "side": side,
                 "stats": stats,
