@@ -25,6 +25,9 @@ SCHEDULE_URL = "https://statsapi.mlb.com/api/v1/schedule?sportId=1"
 LIVE_URL = "https://statsapi.mlb.com/api/v1.1/game/{}/feed/live"
 
 POLL_MINUTES = 10
+POST_STAGGER_SECONDS = 45
+MAX_POSTS_PER_LOOP = 4
+GAME_RECENCY_HOURS = 15  # use start time as proxy; 15h covers a game starting at 10 PM + 3h game + buffer
 RESET_CLOSER_STATE = os.getenv("RESET_CLOSER_STATE", "").lower() in {"1", "true", "yes"}
 DEPTH_CHART_OVERRIDE_CHANNEL_ID = int(os.getenv("DEPTH_CHART_OVERRIDE_CHANNEL_ID", "1484232761597366412"))
 TREND_STATE_FILE = "state/closer/trend_state.json"
@@ -2056,7 +2059,7 @@ def build_summary(name: str, team: str, s: dict, label: str, context: dict, stre
     if (
         (pitcher_score > 0 or opp_score > 0)
         and margin <= 2
-        and state_kind in {"lead", "trailing"}
+        and state_kind == "lead"
         and label not in exclude_labels
     ):
         win_score = max(pitcher_score, opp_score)
@@ -2078,15 +2081,6 @@ def build_summary(name: str, team: str, s: dict, label: str, context: dict, stre
                     f"in a {score_num} win",
                     f"as his team held on {score_num}",
                 ])
-        elif state_kind == "trailing":
-            if opp_in_score_tail:
-                score_tail = random.choice([
-                    f"in a {score_num} loss to the {opp}",
-                    f"as the {opp} won {score_num}",
-                    f"with the {opp} taking it {score_num}",
-                ])
-            else:
-                score_tail = f"in a {score_num} loss"
 
     # opp_in_line1: True for labels where opponent belongs in line1
     # False for HOLD/DOM/CLEAN/TRAFFIC/RELIEF — opponent woven in later
@@ -2940,104 +2934,205 @@ async def loop():
 
     tracked = await refresh_tracked_pitchers()
     last_refresh_date = datetime.now(ET).date()
+    loop_lock = asyncio.Lock()
 
     while True:
-        try:
-            now_et = datetime.now(ET)
-            current_date = now_et.date()
-            if current_date != last_refresh_date:
-                tracked = await refresh_tracked_pitchers()
-                last_refresh_date = current_date
+        if loop_lock.locked():
+            log("Previous loop still posting — skipping this cycle")
+            await asyncio.sleep(POLL_MINUTES * 60)
+            continue
 
-            games = await get_games()
-            log(f"Checking {len(games)} games")
-            processed_pitchers_by_game = []
+        async with loop_lock:
+            try:
+                now_et = datetime.now(ET)
+                current_date = now_et.date()
+                if current_date != last_refresh_date:
+                    tracked = await refresh_tracked_pitchers()
+                    last_refresh_date = current_date
 
-            for g in games:
-                if g.get("status", {}).get("detailedState") != "Final":
-                    continue
+                games = await get_games()
+                log(f"Checking {len(games)} games")
+                processed_pitchers_by_game = []
 
-                game_id = g.get("gamePk")
-                if not game_id:
-                    continue
+                # --- collect all postable candidates ---
+                candidates = []
 
-                feed = await get_feed(game_id)
-                pitchers = get_pitchers(feed)
-                game_date_et = parse_game_date_et(g)
-
-                game_teams = feed.get("gameData", {}).get("teams", {})
-                away_abbr = game_teams.get("away", {}).get("abbreviation") or g.get("teams", {}).get("away", {}).get("team", {}).get("abbreviation") or "AWAY"
-                home_abbr = game_teams.get("home", {}).get("abbreviation") or g.get("teams", {}).get("home", {}).get("team", {}).get("abbreviation") or "HOME"
-                away_team_name = game_teams.get("away", {}).get("teamName") or away_abbr
-                home_team_name = game_teams.get("home", {}).get("teamName") or home_abbr
-                away_score = safe_int(g.get("teams", {}).get("away", {}).get("score", 0), 0)
-                home_score = safe_int(g.get("teams", {}).get("home", {}).get("score", 0), 0)
-                matchup = f"{away_abbr} @ {home_abbr}"
-                score = build_score_line(away_abbr, away_score, home_abbr, home_score)
-
-                for p in pitchers:
-                    pitcher_id = p.get("id")
-                    if pitcher_id is None:
+                for g in games:
+                    if g.get("status", {}).get("detailedState") != "Final":
                         continue
 
-                    context = get_pitcher_entry_context(feed, pitcher_id, p["side"])
-                    recent_appearances = await get_recent_appearances(pitcher_id, game_date_et, limit=5, max_days=21)
-                    current_app = {
-                        "ip": str(p["stats"].get("inningsPitched", "0.0")),
-                        "h": safe_int(p["stats"].get("hits", 0), 0),
-                        "er": safe_int(p["stats"].get("earnedRuns", 0), 0),
-                        "bb": safe_int(p["stats"].get("baseOnBalls", 0), 0),
-                        "k": safe_int(p["stats"].get("strikeOuts", 0), 0),
-                        "saves": safe_int(p["stats"].get("saves", 0), 0),
-                        "holds": safe_int(p["stats"].get("holds", 0), 0),
-                        "blownSaves": safe_int(p["stats"].get("blownSaves", 0), 0),
-                        "avg_fastball_velocity": p.get("avg_fastball_velocity"),
-                        "fastball_count": safe_int(p.get("fastball_count", 0), 0),
-                        "pitch_count": safe_int(p.get("pitch_count", 0), 0),
-                    }
-                    recent_for_trend = [current_app] + recent_appearances
-                    processed_pitchers_by_game.append({
-                        "pitcher": p,
-                        "current_app": current_app,
-                        "recent_appearances": recent_for_trend,
-                        "context": context,
-                        "game_date_et": game_date_et,
-                    })
-
-                    key = f"{game_id}_{pitcher_id}"
-                    if key in posted:
+                    game_id = g.get("gamePk")
+                    if not game_id:
                         continue
 
-                    tracked_info = find_tracked_pitcher_info(p["name"], p["team"], tracked)
-                    is_save = safe_int(p["stats"].get("saves", 0), 0) > 0
-                    is_tracked = tracked_info is not None
-                    if not (is_save or is_tracked):
-                        continue
+                    # Recency check — skip games that started more than GAME_RECENCY_HOURS ago
+                    game_date_str = g.get("gameDate", "")
+                    if game_date_str:
+                        try:
+                            game_start_utc = datetime.fromisoformat(game_date_str.replace("Z", "+00:00"))
+                            hours_since_start = (datetime.now(timezone.utc) - game_start_utc).total_seconds() / 3600
+                            if hours_since_start > GAME_RECENCY_HOURS:
+                                continue
+                        except Exception:
+                            pass
+
+                    feed = await get_feed(game_id)
+                    pitchers = get_pitchers(feed)
+                    game_date_et = parse_game_date_et(g)
+
+                    game_teams = feed.get("gameData", {}).get("teams", {})
+                    away_abbr = game_teams.get("away", {}).get("abbreviation") or g.get("teams", {}).get("away", {}).get("team", {}).get("abbreviation") or "AWAY"
+                    home_abbr = game_teams.get("home", {}).get("abbreviation") or g.get("teams", {}).get("home", {}).get("team", {}).get("abbreviation") or "HOME"
+                    away_team_name = game_teams.get("away", {}).get("teamName") or away_abbr
+                    home_team_name = game_teams.get("home", {}).get("teamName") or home_abbr
+                    away_score = safe_int(g.get("teams", {}).get("away", {}).get("score", 0), 0)
+                    home_score = safe_int(g.get("teams", {}).get("home", {}).get("score", 0), 0)
+                    matchup = f"{away_abbr} @ {home_abbr}"
+                    score = build_score_line(away_abbr, away_score, home_abbr, home_score)
+
+                    for p in pitchers:
+                        pitcher_id = p.get("id")
+                        if pitcher_id is None:
+                            continue
+
+                        context = get_pitcher_entry_context(feed, pitcher_id, p["side"])
+                        recent_appearances = await get_recent_appearances(pitcher_id, game_date_et, limit=5, max_days=21)
+                        current_app = {
+                            "ip": str(p["stats"].get("inningsPitched", "0.0")),
+                            "h": safe_int(p["stats"].get("hits", 0), 0),
+                            "er": safe_int(p["stats"].get("earnedRuns", 0), 0),
+                            "bb": safe_int(p["stats"].get("baseOnBalls", 0), 0),
+                            "k": safe_int(p["stats"].get("strikeOuts", 0), 0),
+                            "saves": safe_int(p["stats"].get("saves", 0), 0),
+                            "holds": safe_int(p["stats"].get("holds", 0), 0),
+                            "blownSaves": safe_int(p["stats"].get("blownSaves", 0), 0),
+                            "avg_fastball_velocity": p.get("avg_fastball_velocity"),
+                            "fastball_count": safe_int(p.get("fastball_count", 0), 0),
+                            "pitch_count": safe_int(p.get("pitch_count", 0), 0),
+                        }
+                        recent_for_trend = [current_app] + recent_appearances
+                        processed_pitchers_by_game.append({
+                            "pitcher": p,
+                            "current_app": current_app,
+                            "recent_appearances": recent_for_trend,
+                            "context": context,
+                            "game_date_et": game_date_et,
+                        })
+
+                        key = f"{game_id}_{pitcher_id}"
+                        if key in posted:
+                            continue
+
+                        tracked_info = find_tracked_pitcher_info(p["name"], p["team"], tracked)
+                        is_save = safe_int(p["stats"].get("saves", 0), 0) > 0
+                        is_tracked = tracked_info is not None
+                        if not (is_save or is_tracked):
+                            continue
+
+                        # Compute label for sorting and suppression
+                        s_preview = {
+                            "ip": str(p["stats"].get("inningsPitched", "0.0")),
+                            "h": safe_int(p["stats"].get("hits", 0), 0),
+                            "er": safe_int(p["stats"].get("earnedRuns", 0), 0),
+                            "bb": safe_int(p["stats"].get("baseOnBalls", 0), 0),
+                            "k": safe_int(p["stats"].get("strikeOuts", 0), 0),
+                            "saves": safe_int(p["stats"].get("saves", 0), 0),
+                            "holds": safe_int(p["stats"].get("holds", 0), 0),
+                            "blownSaves": safe_int(p["stats"].get("blownSaves", 0), 0),
+                        }
+                        label_preview = classify(s_preview)
+                        # Apply SHAKY_HOLD reclassification for sorting purposes
+                        if (
+                            label_preview == "HOLD"
+                            and s_preview["er"] > 0
+                            and safe_int(context.get("entry_inning"), 0) >= 9
+                            and safe_int(context.get("entry_margin", 0), 0) <= 3
+                            and context.get("entry_state_kind") == "lead"
+                        ):
+                            label_preview = "SHAKY_HOLD"
+
+                        candidates.append({
+                            "key": key,
+                            "pitcher": p,
+                            "game_id": game_id,
+                            "pitcher_id": pitcher_id,
+                            "context": context,
+                            "recent_appearances": recent_appearances,
+                            "recent_for_trend": recent_for_trend,
+                            "current_app": current_app,
+                            "game_date_et": game_date_et,
+                            "matchup": matchup,
+                            "score": score,
+                            "away_team_name": away_team_name,
+                            "home_team_name": home_team_name,
+                            "away_score": away_score,
+                            "home_score": home_score,
+                            "tracked_info": tracked_info,
+                            "is_tracked": is_tracked,
+                            "label": label_preview,
+                            "feed": feed,
+                        })
+
+                # --- sort by priority ---
+                label_order = {
+                    "SAVE": 0, "BLOWN": 1, "SHAKY_HOLD": 2, "HOLD": 3,
+                    "ROUGH": 4, "DOM": 5, "TRAFFIC": 6, "CLEAN": 7, "RELIEF": 8,
+                }
+                candidates.sort(key=lambda c: (
+                    0 if c["is_tracked"] else 1,          # tracked first
+                    label_order.get(c["label"], 9),        # then by label priority
+                ))
+
+                # --- apply cap: tracked always through, non-tracked suppressed when at cap ---
+                to_post = []
+                loop_count = 0
+                for c in candidates:
+                    if loop_count >= MAX_POSTS_PER_LOOP:
+                        if c["is_tracked"]:
+                            to_post.append(c)  # tracked always posts
+                        else:
+                            log(f"Suppressing {c['pitcher']['name']} (cap reached, non-tracked)")
+                    else:
+                        to_post.append(c)
+                        loop_count += 1
+
+                log(f"Queued {len(to_post)} cards this loop ({len(candidates)} candidates)")
+
+                # --- post with stagger, write state after each ---
+                for i, c in enumerate(to_post):
+                    p = c["pitcher"]
+                    pitcher_id = c["pitcher_id"]
+                    game_id = c["game_id"]
+                    game_date_et = c["game_date_et"]
+                    context = c["context"]
+                    recent_appearances = c["recent_appearances"]
+                    recent_for_trend = c["recent_for_trend"]
+                    current_app = c["current_app"]
 
                     streak_count = await get_streak_count(pitcher_id, game_date_et)
                     usage_note = build_usage_sentence(await get_recent_usage_snapshot(pitcher_id, game_date_et))
                     velocity_alert = build_velocity_alert(current_app, recent_for_trend)
 
-                    log(f"Posting {p['name']} | {p['team']} | {matchup}")
+                    log(f"Posting {p['name']} | {p['team']} | {c['matchup']} ({i+1}/{len(to_post)})")
                     await post_card(
                         channel,
                         p,
-                        matchup,
-                        score,
+                        c["matchup"],
+                        c["score"],
                         context,
                         streak_count,
-                        tracked_info,
+                        c["tracked_info"],
                         recent_appearances,
                         usage_note=usage_note,
-                        velocity_alert=velocity_alert if is_tracked else None,
-                        feed=feed,
-                        away_team_name=away_team_name,
-                        home_team_name=home_team_name,
-                        away_score=away_score,
-                        home_score=home_score,
+                        velocity_alert=velocity_alert if c["is_tracked"] else None,
+                        feed=c["feed"],
+                        away_team_name=c["away_team_name"],
+                        home_team_name=c["home_team_name"],
+                        away_score=c["away_score"],
+                        home_score=c["home_score"],
                     )
 
-                    if (not is_tracked) and should_post_velocity_alert(state, pitcher_id, game_id, velocity_alert, now_et):
+                    if (not c["is_tracked"]) and should_post_velocity_alert(state, pitcher_id, game_id, velocity_alert, now_et):
                         log(f"Velocity alert {p['name']} | {p['team']} | {velocity_alert.get('subject')}")
                         await post_velocity_card(
                             channel,
@@ -3050,36 +3145,42 @@ async def loop():
                         )
                         mark_velocity_posted(state, pitcher_id, game_id, velocity_alert, now_et)
 
-                    posted.add(key)
+                    # Write state after each post to prevent duplicates if loop overlaps
+                    posted.add(c["key"])
+                    state["posted"] = list(posted)
+                    save_state(state)
 
-            # trend blurbs use the same channel, but only for non-depth-chart relievers
-            if can_post_trend_now(state, now_et):
-                trend_candidates = await gather_trend_candidates_from_recent_games(tracked, processed_pitchers_by_game)
-                for candidate in trend_candidates:
-                    pid = candidate["pitcher_id"]
-                    sig = appearance_signature(candidate["recent_appearances"])
-                    existing = state.get("trend_posted", {}).get(str(pid), {})
-                    trend_family = candidate["trend"].get("family", "misc")
-                    if existing.get("sig") == sig and existing.get("family") == trend_family:
-                        continue
-                    if is_trend_family_on_cooldown(state, trend_family, now_et):
-                        continue
-                    if state.get("trend_history", {}).get(f"{pid}:{trend_family}:{sig}"):
-                        continue
-                    last_date = existing.get("date")
-                    today_key = now_et.strftime("%Y-%m-%d")
-                    if last_date == today_key:
-                        continue
-                    log(f"Trend blurb {candidate['meta'].get('name')} | {candidate['meta'].get('team')} | {candidate['trend'].get('subject')}")
-                    await post_trend_card(channel, candidate["meta"], candidate["trend"], candidate["recent_appearances"])
-                    mark_trend_posted(state, pid, candidate["trend"].get("code"), sig, now_et, trend_family=trend_family)
-                    break
+                    if i < len(to_post) - 1:
+                        await asyncio.sleep(POST_STAGGER_SECONDS)
 
-            state["posted"] = list(posted)
-            save_state(state)
+                # --- trend blurbs ---
+                if can_post_trend_now(state, now_et):
+                    trend_candidates = await gather_trend_candidates_from_recent_games(tracked, processed_pitchers_by_game)
+                    for candidate in trend_candidates:
+                        pid = candidate["pitcher_id"]
+                        sig = appearance_signature(candidate["recent_appearances"])
+                        existing = state.get("trend_posted", {}).get(str(pid), {})
+                        trend_family = candidate["trend"].get("family", "misc")
+                        if existing.get("sig") == sig and existing.get("family") == trend_family:
+                            continue
+                        if is_trend_family_on_cooldown(state, trend_family, now_et):
+                            continue
+                        if state.get("trend_history", {}).get(f"{pid}:{trend_family}:{sig}"):
+                            continue
+                        last_date = existing.get("date")
+                        today_key = now_et.strftime("%Y-%m-%d")
+                        if last_date == today_key:
+                            continue
+                        log(f"Trend blurb {candidate['meta'].get('name')} | {candidate['meta'].get('team')} | {candidate['trend'].get('subject')}")
+                        await post_trend_card(channel, candidate["meta"], candidate["trend"], candidate["recent_appearances"])
+                        mark_trend_posted(state, pid, candidate["trend"].get("code"), sig, now_et, trend_family=trend_family)
+                        break
 
-        except Exception as e:
-            log(f"Loop error: {e}")
+                state["posted"] = list(posted)
+                save_state(state)
+
+            except Exception as e:
+                log(f"Loop error: {e}")
 
         await asyncio.sleep(POLL_MINUTES * 60)
 
