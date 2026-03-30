@@ -756,10 +756,12 @@ def get_pitcher_entry_context(feed: dict, pitcher_id: int, pitcher_side: str):
         return {
             "entry_phrase": "",
             "entry_outs_text": "",
+            "entry_outs": 0,
             "entry_state_text": "",
             "entry_state_kind": "",
             "entry_margin": 0,
             "entry_inning": None,
+            "inherited_runners": 0,
             "finished_game": False,
         }
 
@@ -773,10 +775,12 @@ def get_pitcher_entry_context(feed: dict, pitcher_id: int, pitcher_side: str):
         return {
             "entry_phrase": "",
             "entry_outs_text": "",
+            "entry_outs": 0,
             "entry_state_text": "",
             "entry_state_kind": "",
             "entry_margin": 0,
             "entry_inning": None,
+            "inherited_runners": 0,
             "finished_game": False,
         }
 
@@ -787,18 +791,49 @@ def get_pitcher_entry_context(feed: dict, pitcher_id: int, pitcher_side: str):
     about = first_play.get("about", {})
     inning = about.get("inning")
     half = about.get("halfInning", "")
-    outs = safe_int(first_play.get("count", {}).get("outs", 0), 0)
+
+    # Entry outs: use endOuts from the play immediately before this pitcher's first appearance.
+    # count.outs on the first play reflects outs at pitch time, not entry time.
+    # If this pitcher started the inning (first_idx == 0 or previous play was a different inning),
+    # outs at entry = 0.
+    entry_outs = 0
+    if first_idx > 0:
+        prev_play = plays[first_idx - 1]
+        prev_about = prev_play.get("about", {})
+        prev_inning = prev_about.get("inning")
+        prev_half = prev_about.get("halfInning", "")
+        if prev_inning == inning and prev_half == half:
+            # same inning half — outs at entry = outs at end of previous at-bat
+            entry_outs = safe_int(prev_about.get("endOuts", prev_about.get("outs", 0)), 0)
+        # different inning half means this pitcher started the inning — entry_outs stays 0
 
     entry_phrase = ""
     if inning is not None and half:
         entry_phrase = f"in the {half.lower()} of the {ordinal(inning)}"
 
-    if outs == 0:
-        entry_outs_text = "with nobody out"
-    elif outs == 1:
+    # Only mention outs if the pitcher entered with runners/outs already on board
+    if entry_outs == 0:
+        entry_outs_text = ""  # started the inning clean — no need to mention
+    elif entry_outs == 1:
         entry_outs_text = "with one out"
     else:
         entry_outs_text = "with two outs"
+
+    # Inherited runners: check runners present at start of pitcher's first play
+    inherited_runners = []
+    for runner_event in first_play.get("runners", []):
+        movement = runner_event.get("movement", {})
+        details = runner_event.get("details", {})
+        # Runner was on base before this play started (originBase set, not scoring yet)
+        origin = movement.get("originBase")
+        start = movement.get("start")
+        is_out_on_play = movement.get("isOut", False)
+        # A runner inherited from before this at-bat will have a start base and
+        # their playIndex will be 0 (they were already on base)
+        if start and not details.get("isScoringEvent", False) and not is_out_on_play:
+            inherited_runners.append(start)
+
+    inherited_count = len(inherited_runners)
 
     if first_idx > 0:
         prev_result = plays[first_idx - 1].get("result", {})
@@ -843,10 +878,12 @@ def get_pitcher_entry_context(feed: dict, pitcher_id: int, pitcher_side: str):
     return {
         "entry_phrase": entry_phrase,
         "entry_outs_text": entry_outs_text,
+        "entry_outs": entry_outs,
         "entry_state_text": state_text,
         "entry_state_kind": state_kind,
         "entry_margin": abs_diff,
         "entry_inning": inning,
+        "inherited_runners": inherited_count,
         "finished_game": (last_idx == len(plays) - 1),
     }
 
@@ -875,10 +912,9 @@ OUT_EVENTS = {
 }
 
 
-def _batter_last_name(full_name: str) -> str:
-    """Return last name from a full name string."""
-    parts = str(full_name or "").strip().split()
-    return parts[-1] if parts else full_name
+def _batter_display_name(full_name: str) -> str:
+    """Return full name for display in summaries."""
+    return str(full_name or "").strip()
 
 
 def _batting_order_slot(about: dict) -> int:
@@ -937,7 +973,7 @@ def get_pitcher_outing_detail(feed: dict, pitcher_id: int) -> dict:
         result = play.get("result", {})
         batter = matchup.get("batter", {})
         batter_name = batter.get("fullName", "")
-        last_name = _batter_last_name(batter_name)
+        last_name = _batter_display_name(batter_name)
         slot = _batting_order_slot(about)
         event = result.get("event", "")
         rbi = safe_int(result.get("rbi", 0), 0)
@@ -1018,29 +1054,24 @@ def build_line2_from_detail(s: dict, detail: dict, ip_text: str) -> str:
 
     # --- runs allowed ---
     if run_events:
-        run_parts = []
+        run_sentences = []
         for ev in run_events:
             batter = ev["batter"]
             hit_type = ev["hit_type"]
             rbi = ev["rbi"]
             if rbi == 1:
-                run_parts.append(random.choice([
-                    f"an RBI {hit_type} by {batter}",
-                    f"a {hit_type} from {batter} that plated a run",
-                    f"{batter}'s {hit_type} brought one in",
+                run_sentences.append(random.choice([
+                    f"An RBI {hit_type} by {batter} did the damage.",
+                    f"A {hit_type} from {batter} plated the run.",
+                    f"{batter} drove in the run with a {hit_type}.",
                 ]))
             else:
-                run_parts.append(random.choice([
-                    f"a {rbi}-run {hit_type} by {batter}",
-                    f"{batter}'s {hit_type} scored {number_word(rbi)}",
-                    f"a {hit_type} from {batter} that scored {number_word(rbi)}",
+                run_sentences.append(random.choice([
+                    f"A {rbi}-run {hit_type} by {batter} did the damage.",
+                    f"{batter} hit a {hit_type} that scored {number_word(rbi)}.",
+                    f"{batter}'s {hit_type} brought {number_word(rbi)} runs home.",
                 ]))
-        run_str = _name_list(run_parts) if len(run_parts) <= 2 else f"{number_word(er)} runs"
-        pieces.append(random.choice([
-            f"He allowed {run_str}.",
-            f"The damage came on {run_str}.",
-            f"{run_str.capitalize()} did the damage.",
-        ]))
+        pieces.extend(run_sentences)
     elif er == 0 and h == 0 and bb == 0:
         # perfect outing
         if outs_recorded == 1:
@@ -1143,6 +1174,13 @@ def build_context_phrase(context: dict) -> str:
         bits.append(context["entry_outs_text"])
     if context.get("entry_state_text"):
         bits.append(context["entry_state_text"])
+
+    # Inherited runners — append naturally if present and outs were already on
+    inherited = safe_int(context.get("inherited_runners", 0), 0)
+    entry_outs = safe_int(context.get("entry_outs", 0), 0)
+    if inherited > 0 and entry_outs > 0:
+        runner_text = "a runner on" if inherited == 1 else f"{number_word(inherited)} runners on"
+        bits.append(f"and {runner_text}")
 
     if not bits:
         return "in relief"
