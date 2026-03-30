@@ -2052,14 +2052,22 @@ def build_summary(name: str, team: str, s: dict, label: str, context: dict, stre
         win_score = max(pitcher_score, opp_score)
         lose_score = min(pitcher_score, opp_score)
         score_num = f"{win_score}-{lose_score}"
-        if opp:
-            if state_kind == "trailing":
+        tied_num = f"{pitcher_score}-{opp_score}"
+
+        # For SAVE, opponent is already in line1 — drop opp from score tail to avoid duplication
+        opp_in_score_tail = opp and label not in {"SAVE"}
+
+        if state_kind == "trailing":
+            if opp_in_score_tail:
                 score_tail = random.choice([
                     f"in a {score_num} loss to the {opp}",
                     f"as the {opp} won {score_num}",
                     f"with the {opp} taking it {score_num}",
                 ])
-            elif state_kind == "lead":
+            else:
+                score_tail = f"in a {score_num} loss"
+        elif state_kind == "lead":
+            if opp_in_score_tail:
                 score_tail = random.choice([
                     f"in a {score_num} win over the {opp}",
                     f"as his team held on {score_num} against the {opp}",
@@ -2067,16 +2075,17 @@ def build_summary(name: str, team: str, s: dict, label: str, context: dict, stre
                 ])
             else:
                 score_tail = random.choice([
-                    f"with the score tied {lose_score}-{lose_score} against the {opp}",
-                    f"in a {lose_score}-{lose_score} tie against the {opp}",
+                    f"in a {score_num} win",
+                    f"as his team held on {score_num}",
                 ])
-        else:
-            if state_kind == "trailing":
-                score_tail = f"in a {score_num} loss"
-            elif state_kind == "lead":
-                score_tail = f"in a {score_num} win"
+        else:  # tie — entry context already says "in a tie game", just add the number
+            if opp_in_score_tail:
+                score_tail = random.choice([
+                    f"with the score {tied_num} against the {opp}",
+                    f"in a {tied_num} tie against the {opp}",
+                ])
             else:
-                score_tail = f"with the score tied {lose_score}-{lose_score}"
+                score_tail = f"with the score {tied_num}"
 
     # opp_in_line1: True for labels where opponent belongs in line1
     # False for HOLD/DOM/CLEAN/TRAFFIC/RELIEF — opponent woven in later
