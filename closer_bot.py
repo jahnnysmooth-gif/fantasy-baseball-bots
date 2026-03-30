@@ -620,22 +620,24 @@ def grade_outing(s: dict) -> str:
     outs = baseball_ip_to_outs(s["ip"])
     baserunners = baserunner_count(s)
 
-    if outs <= 1:
-        return "MICRO"
-
+    # Check run outcomes first regardless of IP length
     if s["er"] >= 3:
         return "ROUGH"
 
     if s["er"] in {1, 2}:
         return "SHAKY"
 
-    if s["er"] == 0 and baserunners == 0 and outs >= 6:
+    # From here er == 0
+    if outs <= 1:
+        return "MICRO"
+
+    if baserunners == 0 and outs >= 6:
         return "DOMINANT"
 
-    if s["er"] == 0 and baserunners == 0 and outs >= 3:
+    if baserunners == 0 and outs >= 3:
         return "CLEAN"
 
-    if s["er"] == 0 and baserunners >= 1 and outs >= 3:
+    if baserunners >= 1 and outs >= 3:
         return "TRAFFIC"
 
     return "NEUTRAL"
@@ -951,6 +953,10 @@ def get_pitcher_outing_detail(feed: dict, pitcher_id: int) -> dict:
         "runners_left_on": 0,
         "heart_of_order_retired": [],
         "heart_of_order_faced": [],
+        "finished_inning": True,
+        "departure_outs": 0,
+        "departure_runners": 0,
+        "replaced_by": "",
     }
 
     if not feed or pitcher_id is None:
@@ -966,12 +972,14 @@ def get_pitcher_outing_detail(feed: dict, pitcher_id: int) -> dict:
     runners_left_on = 0
     heart_faced = []
     heart_retired = []
+    pitcher_play_indices = []
 
-    for play in plays:
+    for idx, play in enumerate(plays):
         matchup = play.get("matchup", {})
         if matchup.get("pitcher", {}).get("id") != pitcher_id:
             continue
 
+        pitcher_play_indices.append(idx)
         about = play.get("about", {})
         result = play.get("result", {})
         batter = matchup.get("batter", {})
@@ -998,14 +1006,11 @@ def get_pitcher_outing_detail(feed: dict, pitcher_id: int) -> dict:
                 "slot": slot,
             })
 
-        # runners left on base — use end-of-play runner count when out ends inning
-        # MLB API: runners left on base in `result.isOut` + runners on base at end
+        # runners left on base — count when 3rd out ends the inning
         runners_on = len(play.get("runners", []))
         is_out = result.get("isOut", False)
-        # Count LOB: runners stranded when the 3rd out is recorded
         end_outs = safe_int(about.get("endOuts", about.get("outs", 0)), 0)
         if is_out and end_outs == 3:
-            # end of inning — runners on base at that moment are stranded
             runners_left_on += runners_on
 
         # heart of order (slots 3-5)
@@ -1014,6 +1019,40 @@ def get_pitcher_outing_detail(feed: dict, pitcher_id: int) -> dict:
             if event in OUT_EVENTS or event == "Strikeout":
                 heart_retired.append(last_name)
 
+    # Determine if pitcher finished the inning
+    # He finished if his last play ended with 3 outs in the same half-inning
+    finished_inning = True
+    departure_outs = 0
+    departure_runners = 0
+    replaced_by = ""
+
+    if pitcher_play_indices:
+        last_idx = pitcher_play_indices[-1]
+        last_play = plays[last_idx]
+        last_about = last_play.get("about", {})
+        last_result = last_play.get("result", {})
+        last_end_outs = safe_int(last_about.get("endOuts", last_about.get("outs", 0)), 0)
+
+        # Check if the next play (if any) is in the same half-inning with a different pitcher
+        if last_idx + 1 < len(plays):
+            next_play = plays[last_idx + 1]
+            next_matchup = next_play.get("matchup", {})
+            next_pitcher_id = next_matchup.get("pitcher", {}).get("id")
+            next_about = next_play.get("about", {})
+            same_half = (
+                next_about.get("inning") == last_about.get("inning")
+                and next_about.get("halfInning") == last_about.get("halfInning")
+            )
+            if same_half and next_pitcher_id != pitcher_id:
+                finished_inning = False
+                departure_outs = last_end_outs
+                departure_runners = sum(
+                    1 for r in last_play.get("runners", [])
+                    if not r.get("movement", {}).get("isOut", False)
+                    and not r.get("details", {}).get("isScoringEvent", False)
+                )
+                replaced_by = str(next_matchup.get("pitcher", {}).get("fullName", "") or "").strip()
+
     return {
         "strikeouts": strikeouts,
         "notable_ks": notable_ks,
@@ -1021,6 +1060,10 @@ def get_pitcher_outing_detail(feed: dict, pitcher_id: int) -> dict:
         "runners_left_on": runners_left_on,
         "heart_of_order_retired": heart_retired,
         "heart_of_order_faced": heart_faced,
+        "finished_inning": finished_inning,
+        "departure_outs": departure_outs,
+        "departure_runners": departure_runners,
+        "replaced_by": replaced_by,
     }
 
 
@@ -1075,6 +1118,14 @@ def build_line2_from_detail(s: dict, detail: dict, ip_text: str) -> str:
                     f"{batter}'s {hit_type} brought {number_word(rbi)} runs home.",
                 ]))
         pieces.extend(run_sentences)
+    elif s["er"] > 0:
+        # Runs scored but no RBI play found — inherited runners scored on walks/wild pitches/etc.
+        run_text = stat_phrase(s["er"], "run")
+        pieces.append(random.choice([
+            f"He allowed {run_text} to score, likely inherited runners crossing on walks or wild pitches.",
+            f"{run_text.capitalize()} scored during his appearance.",
+            f"He let {run_text} cross the plate during his time on the mound.",
+        ]))
     elif er == 0 and h == 0 and bb == 0:
         # perfect outing
         if outs_recorded == 1:
@@ -1153,6 +1204,29 @@ def build_line2_from_detail(s: dict, detail: dict, ip_text: str) -> str:
             f"He also left {lob_text} stranded.",
             f"He stranded {lob_text} in addition to the runs that crossed.",
         ]))
+
+    # --- pulled mid-inning ---
+    finished_inning = detail.get("finished_inning", True)
+    departure_outs = safe_int(detail.get("departure_outs", 0), 0)
+    departure_runners = safe_int(detail.get("departure_runners", 0), 0)
+    replaced_by = str(detail.get("replaced_by", "") or "").strip()
+
+    if not finished_inning:
+        outs_text = {0: "no outs", 1: "one out", 2: "two outs"}.get(departure_outs, f"{departure_outs} outs")
+        replacer = f" with {replaced_by} coming on to finish the inning" if replaced_by else ""
+        if departure_runners > 0:
+            runner_text = "a runner on" if departure_runners == 1 else f"{number_word(departure_runners)} runners on"
+            pieces.append(random.choice([
+                f"He was pulled with {outs_text} recorded and {runner_text}{replacer}.",
+                f"He did not finish the inning, exiting with {outs_text} and {runner_text}{replacer}.",
+                f"The manager pulled him with {outs_text} and {runner_text}, bringing in {replaced_by} to clean up." if replaced_by else f"The manager went to the bullpen with {outs_text} and {runner_text} still on base.",
+            ]))
+        else:
+            pieces.append(random.choice([
+                f"He was pulled after recording {outs_text}{replacer}.",
+                f"He did not finish the inning, exiting after {outs_text}{replacer}.",
+                f"The manager went to the bullpen after {outs_text} from him{', turning to ' + replaced_by if replaced_by else ''}.",
+            ]))
 
     if not pieces:
         # absolute fallback to stat-based prose
@@ -1617,6 +1691,25 @@ def build_analysis(p: dict, s: dict, label: str, context: dict, tracked_info: di
     )
 
     if outing_grade == "MICRO":
+        # Even brief outings can be damaging — check label/er first
+        if label == "SHAKY_HOLD":
+            return random.choice([
+                "He was in a save situation and could not get through even one out cleanly.",
+                "One out in the ninth while allowing a run in a save spot is not what you want from this role.",
+                "The lead survived, but he made a single out feel like a lot of work.",
+            ])
+        if label == "BLOWN":
+            return random.choice([
+                "He could not record an out without letting the lead go.",
+                "A brief, damaging appearance that cost the team the lead.",
+                "He did not get through even one hitter without giving up the lead.",
+            ])
+        if s["er"] > 0:
+            return random.choice([
+                "He was only in for a batter, but the damage was real.",
+                "Brief and costly — he allowed a run without even finishing the inning.",
+                "He got through one out but not without giving something up.",
+            ])
         if role == "closer" and early_closer_usage:
             return random.choice([
                 "He was called on early for a leverage pocket and got the out.",
