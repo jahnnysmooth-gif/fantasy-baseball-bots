@@ -1020,7 +1020,6 @@ def get_pitcher_outing_detail(feed: dict, pitcher_id: int) -> dict:
                 heart_retired.append(last_name)
 
     # Determine if pitcher finished the inning
-    # He finished if his last play ended with 3 outs in the same half-inning
     finished_inning = True
     departure_outs = 0
     departure_runners = 0
@@ -1031,9 +1030,16 @@ def get_pitcher_outing_detail(feed: dict, pitcher_id: int) -> dict:
         last_play = plays[last_idx]
         last_about = last_play.get("about", {})
         last_result = last_play.get("result", {})
-        last_end_outs = safe_int(last_about.get("endOuts", last_about.get("outs", 0)), 0)
 
-        # Check if the next play (if any) is in the same half-inning with a different pitcher
+        # Use the maximum endOuts seen across all his plays — a walk/HBP on his
+        # last play won't advance the out count, so last play alone can undercount.
+        max_end_outs = 0
+        for idx in pitcher_play_indices:
+            about_i = plays[idx].get("about", {})
+            end_outs_i = safe_int(about_i.get("endOuts", about_i.get("outs", 0)), 0)
+            if end_outs_i > max_end_outs:
+                max_end_outs = end_outs_i
+
         if last_idx + 1 < len(plays):
             next_play = plays[last_idx + 1]
             next_matchup = next_play.get("matchup", {})
@@ -1045,7 +1051,7 @@ def get_pitcher_outing_detail(feed: dict, pitcher_id: int) -> dict:
             )
             if same_half and next_pitcher_id != pitcher_id:
                 finished_inning = False
-                departure_outs = last_end_outs
+                departure_outs = max_end_outs
                 departure_runners = sum(
                     1 for r in last_play.get("runners", [])
                     if not r.get("movement", {}).get("isOut", False)
@@ -1732,11 +1738,11 @@ def build_analysis(p: dict, s: dict, label: str, context: dict, tracked_info: di
         traffic = s["h"] + s["bb"]
         if label == "SHAKY_HOLD":
             return random.choice([
-                "He technically held the lead, but this was a save situation and he let it get away from him.",
-                "The hold is there on paper, but he was protecting a lead in the ninth and let runs score. That is not the outcome you want.",
+                "He technically kept the lead, but this was a save situation and he let it get away from him.",
+                "He was protecting a lead in the ninth and let runs score. That is not the outcome you want.",
                 "He escaped without officially blowing the save, but the lead shrank and the damage was real.",
-                "A hold in a save spot with runs allowed is not a win. He made it harder than it needed to be.",
                 "The lead survived, but he made a mess of a situation that called for a shutdown inning.",
+                "He made it harder than it needed to be in a spot that should have been closed out cleanly.",
             ])
         if label == "SAVE":
             return random.choice([
