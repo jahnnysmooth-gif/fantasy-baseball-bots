@@ -939,7 +939,7 @@ def _batting_order_slot(about: dict) -> int:
         return 0
 
 
-def get_pitcher_outing_detail(feed: dict, pitcher_id: int) -> dict:
+def get_pitcher_outing_detail(feed: dict, pitcher_id: int, ip: str = "0.0") -> dict:
     """
     Parse play-by-play for a pitcher's outing and return structured detail:
     - strikeouts: list of {name, slot} for batters K'd
@@ -1054,7 +1054,11 @@ def get_pitcher_outing_detail(feed: dict, pitcher_id: int) -> dict:
             )
             if same_half and next_pitcher_id != pitcher_id:
                 finished_inning = False
-                departure_outs = max_end_outs
+                # Use IP-derived outs from the pitcher's box score stat line as the
+                # authoritative out count — endOuts can be 0 on walks/non-out plays
+                # and max_end_outs will undercount when all his plays are walks.
+                ip_outs = baseball_ip_to_outs(ip) if ip else max_end_outs
+                departure_outs = max(ip_outs, max_end_outs)
                 departure_runners = sum(
                     1 for r in last_play.get("runners", [])
                     if not r.get("movement", {}).get("isOut", False)
@@ -2739,7 +2743,7 @@ async def post_card(channel, p: dict, matchup: str, score: str, context: dict, s
     }
 
     label = classify(s)
-    detail = get_pitcher_outing_detail(feed, p.get("id")) if feed else None
+    detail = get_pitcher_outing_detail(feed, p.get("id"), ip=str(p["stats"].get("inningsPitched", "0.0"))) if feed else None
 
     # Reclassify: a hold in the 9th or later with a margin <= 3 and runs allowed
     # is a save situation where the pitcher let damage happen — treat as SHAKY_HOLD
