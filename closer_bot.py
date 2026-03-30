@@ -1102,7 +1102,7 @@ def _name_list(names: list) -> str:
     return ", ".join(names[:-1]) + f", and {names[-1]}"
 
 
-def build_line2_from_detail(s: dict, detail: dict, ip_text: str) -> str:
+def build_line2_from_detail(s: dict, detail: dict, ip_text: str, opp: str = "") -> str:
     """
     Build the outing detail sentence using play-by-play data.
     Falls back to stat-based prose if detail is sparse.
@@ -1183,26 +1183,46 @@ def build_line2_from_detail(s: dict, detail: dict, ip_text: str) -> str:
         if outs_recorded == 1:
             pieces.append("He retired the lone batter he faced.")
         else:
-            pieces.append(random.choice([
-                f"He retired all hitters he faced over {ip_text}.",
-                f"He was spotless over {ip_text}, getting through the inning without allowing a baserunner.",
-            ]))
+            if opp:
+                pieces.append(random.choice([
+                    f"He retired the {opp} in order over {ip_text}.",
+                    f"He was spotless over {ip_text}, keeping the {opp} off the bases entirely.",
+                    f"He set the {opp} down in order.",
+                ]))
+            else:
+                pieces.append(random.choice([
+                    f"He retired all hitters he faced over {ip_text}.",
+                    f"He was spotless over {ip_text}, getting through the inning without allowing a baserunner.",
+                ]))
     elif er == 0:
         # runners on but none scored
         if lob > 0:
             lob_text = "a runner" if lob == 1 else f"{number_word(lob)} runners"
-            pieces.append(random.choice([
-                f"He stranded {lob_text} and kept the inning scoreless.",
-                f"He left {lob_text} on base but held the line.",
-                f"There were baserunners, but he kept {lob_text} stranded.",
-            ]))
+            if opp:
+                pieces.append(random.choice([
+                    f"He stranded {lob_text} and kept the {opp} off the board.",
+                    f"He left {lob_text} on base but held the {opp} scoreless.",
+                    f"There were baserunners, but he kept the {opp} from scoring.",
+                ]))
+            else:
+                pieces.append(random.choice([
+                    f"He stranded {lob_text} and kept the inning scoreless.",
+                    f"He left {lob_text} on base but held the line.",
+                    f"There were baserunners, but he kept {lob_text} stranded.",
+                ]))
         else:
             hit_text = stat_phrase(h, "hit", use_article=True)
             walk_text = stat_phrase(bb, "walk", use_article=True)
-            pieces.append(random.choice([
-                f"He worked around {hit_text} and {walk_text} to keep the inning scoreless.",
-                f"He allowed {hit_text} and {walk_text} but held the damage at zero.",
-            ]))
+            if opp:
+                pieces.append(random.choice([
+                    f"He worked around {hit_text} and {walk_text} to keep the {opp} off the board.",
+                    f"He allowed {hit_text} and {walk_text} but kept the {opp} scoreless.",
+                ]))
+            else:
+                pieces.append(random.choice([
+                    f"He worked around {hit_text} and {walk_text} to keep the inning scoreless.",
+                    f"He allowed {hit_text} and {walk_text} but held the damage at zero.",
+                ]))
 
     # --- strikeouts ---
     if notable_k_names:
@@ -1999,7 +2019,7 @@ def build_analysis(p: dict, s: dict, label: str, context: dict, tracked_info: di
 
 
 
-def build_summary(name: str, team: str, s: dict, label: str, context: dict, streak_count: int, tracked_info: dict, recent_appearances, usage_note: str = "", velocity_alert: dict = None, detail: dict = None):
+def build_summary(name: str, team: str, s: dict, label: str, context: dict, streak_count: int, tracked_info: dict, recent_appearances, usage_note: str = "", velocity_alert: dict = None, detail: dict = None, opp_name: str = "", final_score: str = ""):
     ip_text = format_ip_for_summary(s["ip"])
     outs_recorded = baseball_ip_to_outs(s["ip"])
     er = s["er"]
@@ -2020,8 +2040,24 @@ def build_summary(name: str, team: str, s: dict, label: str, context: dict, stre
     inherited = safe_int(context.get("inherited_runners", 0), 0)
     relieved_pitcher = str(context.get("relieved_pitcher", "") or "").strip()
 
+    # Opponent name phrase
+    opp = str(opp_name or "").strip()
+    opp_phrase = f"against the {opp}" if opp else ""
+
+    # Score phrase — only for close games (margin <= 2)
+    margin = safe_int(context.get("entry_margin", 0), 0)
+    state_kind = context.get("entry_state_kind", "")
+    score_phrase = ""
+    if final_score and margin <= 2 and state_kind in {"lead", "trailing", "tie"}:
+        score_phrase = f"in a {final_score} game" if state_kind == "tie" else f"final {final_score}"
+
+    # opp_in_line1: True for labels where opponent belongs in line1
+    # False for HOLD/DOM/CLEAN/TRAFFIC/RELIEF — opponent woven in later
+    opp_in_line1 = label in {"SAVE", "BLOWN", "SHAKY_HOLD", "ROUGH"}
+
     if label == "SAVE":
         if inherited > 0:
+            # Skip opponent in line1 for inherited runner saves — sentence is already complex
             runner_text = "a runner" if inherited == 1 else f"{number_word(inherited)} runners"
             relieved_str = f" relieving {relieved_pitcher}" if relieved_pitcher else ""
             line1 = random.choice([
@@ -2032,35 +2068,77 @@ def build_summary(name: str, team: str, s: dict, label: str, context: dict, stre
         elif early_closer_usage and finished_game:
             line1 = f"{name} was called on {ctx} before the ninth in a high-leverage spot and finished the game for the save."
         elif outs_recorded >= 6:
-            line1 = f"{name} entered {ctx} and covered the final {ip_text} to earn the save."
+            opp_str = f" {opp_phrase}" if opp_phrase else ""
+            line1 = f"{name} entered {ctx}{opp_str} and covered the final {ip_text} to earn the save."
         elif finished_game and context.get("entry_inning") == 9:
-            line1 = f"{name} entered {ctx} and shut the door for the save."
+            line1 = random.choice([
+                f"{name} entered {ctx} and shut the door {opp_phrase} for the save." if opp_phrase else f"{name} entered {ctx} and shut the door for the save.",
+                f"{name} entered {ctx} and locked down the save {opp_phrase}." if opp_phrase else f"{name} entered {ctx} and locked down the save.",
+                f"{name} slammed the door {opp_phrase} to earn the save." if opp_phrase else f"{name} entered {ctx} and slammed the door for the save.",
+            ])
         else:
-            line1 = f"{name} entered {ctx} and locked down the save."
+            line1 = random.choice([
+                f"{name} entered {ctx} and locked down the save {opp_phrase}." if opp_phrase else f"{name} entered {ctx} and locked down the save.",
+                f"{name} came on {ctx} and closed it out {opp_phrase}." if opp_phrase else f"{name} came on {ctx} and closed it out.",
+                f"{name} entered {ctx} and got the job done for the save {opp_phrase}." if opp_phrase else f"{name} entered {ctx} and got the job done for the save.",
+            ])
     elif label == "BLOWN":
-        line1 = f"{name} entered {ctx} but could not hold the lead and was charged with a blown save."
-    elif label == "SHAKY_HOLD":
+        # Always in line1
+        opp_str = f" {opp_phrase}" if opp_phrase else ""
         line1 = random.choice([
-            f"{name} entered {ctx} in a save situation but quickly got into a jam.",
-            f"{name} entered {ctx} in a save situation but could not keep the inning clean.",
-            f"{name} entered {ctx} in a save situation and struggled to hold things together.",
+            f"{name} entered {ctx}{opp_str} but could not hold the lead and was charged with a blown save.",
+            f"{name} entered {ctx}{opp_str} and could not keep things together, blowing the save.",
+            f"{name} came on {ctx}{opp_str} but the lead slipped away for the blown save.",
+        ])
+    elif label == "SHAKY_HOLD":
+        opp_str = f" {opp_phrase}" if opp_phrase else ""
+        line1 = random.choice([
+            f"{name} entered {ctx}{opp_str} in a save situation but quickly got into a jam.",
+            f"{name} entered {ctx}{opp_str} in a save situation but could not keep the inning clean.",
+            f"{name} entered {ctx}{opp_str} in a save situation and struggled to hold things together.",
         ])
     elif label == "HOLD":
-        line1 = f"{name} entered {ctx} and held the line to earn the hold."
+        # Opponent deferred to line2/analysis — clean line1
+        line1 = random.choice([
+            f"{name} entered {ctx} and held the line to earn the hold.",
+            f"{name} came on {ctx} and kept things intact for the hold.",
+            f"{name} entered {ctx} and bridged the gap with a clean hold.",
+        ])
     elif label == "DOM":
-        line1 = f"{name} entered {ctx} and dominated."
+        # Opponent deferred
+        line1 = random.choice([
+            f"{name} entered {ctx} and dominated.",
+            f"{name} came on {ctx} and was lights out.",
+            f"{name} entered {ctx} and was untouchable.",
+        ])
     elif label == "TRAFFIC":
         line1 = f"{name} entered {ctx} and navigated traffic to keep things under control."
     elif label == "ROUGH":
-        line1 = f"{name} entered {ctx} but was hit hard in a rough outing."
+        # In line1
+        opp_str = f" {opp_phrase}" if opp_phrase else ""
+        line1 = random.choice([
+            f"{name} entered {ctx}{opp_str} but was hit hard in a rough outing.",
+            f"{name} entered {ctx}{opp_str} but could not get through the inning cleanly.",
+            f"{name} entered {ctx}{opp_str} and the {opp} tagged him for a rough inning." if opp else f"{name} entered {ctx} and was tagged for a rough inning.",
+        ])
     elif label == "CLEAN":
-        line1 = f"{name} entered {ctx} and turned in a clean outing."
+        # Opponent deferred
+        line1 = random.choice([
+            f"{name} entered {ctx} and turned in a clean outing.",
+            f"{name} came on {ctx} and handled the inning without issue.",
+        ])
     else:
         line1 = f"{name} entered {ctx} in relief."
 
+    # Append close-game score to line1 when relevant
+    if score_phrase:
+        line1 = line1.rstrip(".") + f", {score_phrase}."
+
     # line2 — use play-by-play detail when available, fall back to stat prose
     if detail:
-        line2 = build_line2_from_detail(s, detail, ip_text)
+        # Pass opponent name for labels where it belongs in line2
+        line2_opp = opp if label in {"HOLD", "DOM", "CLEAN", "TRAFFIC"} else ""
+        line2 = build_line2_from_detail(s, detail, ip_text, opp=line2_opp)
     else:
         hit_text = stat_phrase(h, "hit")
         walk_text = stat_phrase(bb, "walk")
@@ -2741,7 +2819,7 @@ def get_pitchers(feed: dict):
 
 # ---------------- POST ----------------
 
-async def post_card(channel, p: dict, matchup: str, score: str, context: dict, streak_count: int, tracked_info: dict, recent_appearances, usage_note: str = "", velocity_alert: dict = None, feed: dict = None):
+async def post_card(channel, p: dict, matchup: str, score: str, context: dict, streak_count: int, tracked_info: dict, recent_appearances, usage_note: str = "", velocity_alert: dict = None, feed: dict = None, away_team_name: str = "", home_team_name: str = "", away_score: int = 0, home_score: int = 0):
     s = {
         "ip": str(p["stats"].get("inningsPitched", "0.0")),
         "h": safe_int(p["stats"].get("hits", 0), 0),
@@ -2767,17 +2845,25 @@ async def post_card(channel, p: dict, matchup: str, score: str, context: dict, s
     ):
         label = "SHAKY_HOLD"
 
+    # Determine opponent team name from pitcher's side
+    if p["side"] == "home":
+        opp_name = away_team_name or ""
+    else:
+        opp_name = home_team_name or ""
+
+    # Final score for summary context
+    final_score = score
+
     embed = discord.Embed(
         color=TEAM_COLORS.get(normalize_team_abbr(p["team"]), 0x2ECC71),
         timestamp=datetime.now(timezone.utc),
     )
     apply_player_card_chrome(embed, p["name"], p["team"])
 
+    # Layout: impact tag → matchup → game line → summary → pitch count → season
     embed.add_field(name="", value=f"**{impact_tag(label, s)}**", inline=False)
     embed.add_field(name="⚾ Matchup", value=matchup, inline=False)
     embed.add_field(name="Game Line", value=format_game_line(s), inline=False)
-    embed.add_field(name="Pitch Count", value=format_pitch_count(p["stats"]), inline=False)
-    embed.add_field(name="Season", value=format_season_line(p.get("season_stats", {})), inline=False)
     embed.add_field(
         name="Summary",
         value=build_summary(
@@ -2792,9 +2878,13 @@ async def post_card(channel, p: dict, matchup: str, score: str, context: dict, s
             usage_note=usage_note,
             velocity_alert=velocity_alert,
             detail=detail,
+            opp_name=opp_name,
+            final_score=final_score,
         ),
         inline=False,
     )
+    embed.add_field(name="Pitch Count", value=format_pitch_count(p["stats"]), inline=False)
+    embed.add_field(name="Season", value=format_season_line(p.get("season_stats", {})), inline=False)
 
     await channel.send(embed=embed)
 
@@ -2840,6 +2930,8 @@ async def loop():
                 game_teams = feed.get("gameData", {}).get("teams", {})
                 away_abbr = game_teams.get("away", {}).get("abbreviation") or g.get("teams", {}).get("away", {}).get("team", {}).get("abbreviation") or "AWAY"
                 home_abbr = game_teams.get("home", {}).get("abbreviation") or g.get("teams", {}).get("home", {}).get("team", {}).get("abbreviation") or "HOME"
+                away_team_name = game_teams.get("away", {}).get("teamName") or away_abbr
+                home_team_name = game_teams.get("home", {}).get("teamName") or home_abbr
                 away_score = safe_int(g.get("teams", {}).get("away", {}).get("score", 0), 0)
                 home_score = safe_int(g.get("teams", {}).get("home", {}).get("score", 0), 0)
                 matchup = f"{away_abbr} @ {home_abbr}"
@@ -2901,6 +2993,10 @@ async def loop():
                         usage_note=usage_note,
                         velocity_alert=velocity_alert if is_tracked else None,
                         feed=feed,
+                        away_team_name=away_team_name,
+                        home_team_name=home_team_name,
+                        away_score=away_score,
+                        home_score=home_score,
                     )
 
                     if (not is_tracked) and should_post_velocity_alert(state, pitcher_id, game_id, velocity_alert, now_et):
