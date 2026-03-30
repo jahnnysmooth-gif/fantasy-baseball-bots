@@ -6,6 +6,7 @@ STATE_FILE = "state/closers/closer_depth_chart.json"
 DEFAULT_OVERRIDE_FILENAME = "depth_chart_override.json"
 
 TEAM_ALIASES = {
+    "AZ": "ARI",
     "WSN": "WSH",
     "WAS": "WSH",
     "WSH": "WSH",
@@ -13,6 +14,10 @@ TEAM_ALIASES = {
     "CWS": "CWS",
     "TBR": "TB",
     "TB": "TB",
+    "KCR": "KC",
+    "SDP": "SD",
+    "SFG": "SF",
+    "OAK": "ATH",
 }
 
 VALID_ROLE_KEYS = {"closer", "co_closer", "committee", "setup", "leverage_arm"}

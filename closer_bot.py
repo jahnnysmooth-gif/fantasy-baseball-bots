@@ -629,7 +629,7 @@ def grade_outing(s: dict) -> str:
     if s["er"] in {1, 2}:
         return "SHAKY"
 
-    if s["er"] == 0 and baserunners == 0 and outs >= 3:
+    if s["er"] == 0 and baserunners == 0 and outs >= 6:
         return "DOMINANT"
 
     if s["er"] == 0 and baserunners == 0 and outs >= 3:
@@ -746,10 +746,6 @@ def infer_role_from_tracked_info(tracked_info: dict) -> str:
     if "setup" in combined:
         return "setup"
     return "relief"
-
-    # Conservative fallback:
-    # tracked, but role not explicit -> setup mix language is safer than closer language.
-    return "setup"
 
 
 # ---------------- ENTRY CONTEXT ----------------
@@ -879,28 +875,23 @@ def build_context_phrase(context: dict) -> str:
 
 # ---------------- RECENT APPEARANCES / TRENDS ----------------
 
-def get_pitching_stats_for_date(target_date):
+async def get_pitching_stats_for_date(target_date):
     if target_date in pitching_stats_cache:
         return pitching_stats_cache[target_date]
 
     stats_by_pitcher = {}
 
     try:
-        r = requests.get(f"{SCHEDULE_URL}&date={target_date.isoformat()}", timeout=30)
-        r.raise_for_status()
-        data = r.json()
+        loop = asyncio.get_event_loop()
+        day_games = await loop.run_in_executor(None, _fetch_schedule_sync, target_date.isoformat())
 
-        games = []
-        for date_block in data.get("dates", []):
-            games.extend(date_block.get("games", []))
-
-        for game in games:
+        for game in day_games:
             game_id = game.get("gamePk")
             if not game_id:
                 continue
 
             try:
-                feed = get_feed(game_id)
+                feed = await get_feed(game_id)
             except Exception:
                 continue
 
@@ -938,24 +929,6 @@ def get_pitching_stats_for_date(target_date):
     return stats_by_pitcher
 
 
-def get_recent_appearances(pitcher_id: int, game_date_et, limit=5, max_days=21):
-    appearances = []
-    if pitcher_id is None or game_date_et is None:
-        return appearances
-
-    check_date = game_date_et - timedelta(days=1)
-
-    for _ in range(max_days):
-        stats_by_pitcher = get_pitching_stats_for_date(check_date)
-        if pitcher_id in stats_by_pitcher:
-            appearances.append(stats_by_pitcher[pitcher_id])
-            if len(appearances) >= limit:
-                break
-        check_date -= timedelta(days=1)
-
-    return appearances
-
-
 def get_recent_trend(recent_appearances):
     if len(recent_appearances) < 3:
         return "NONE"
@@ -982,14 +955,14 @@ def get_recent_trend(recent_appearances):
 
 # ---------------- STREAK TRACKING ----------------
 
-def get_pitcher_ids_for_date(target_date):
+async def get_pitcher_ids_for_date(target_date):
     if target_date in appearance_cache:
         return appearance_cache[target_date]
 
     pitcher_ids = set()
 
     try:
-        stats_by_pitcher = get_pitching_stats_for_date(target_date)
+        stats_by_pitcher = await get_pitching_stats_for_date(target_date)
         pitcher_ids = set(stats_by_pitcher.keys())
     except Exception as e:
         log(f"Appearance cache load failed for {target_date}: {e}")
@@ -998,15 +971,33 @@ def get_pitcher_ids_for_date(target_date):
     return pitcher_ids
 
 
-def get_streak_count(pitcher_id: int, game_date_et):
+async def get_recent_appearances(pitcher_id: int, game_date_et, limit=5, max_days=21):
+    appearances = []
+    if pitcher_id is None or game_date_et is None:
+        return appearances
+
+    check_date = game_date_et - timedelta(days=1)
+
+    for _ in range(max_days):
+        stats_by_pitcher = await get_pitching_stats_for_date(check_date)
+        if pitcher_id in stats_by_pitcher:
+            appearances.append(stats_by_pitcher[pitcher_id])
+            if len(appearances) >= limit:
+                break
+        check_date -= timedelta(days=1)
+
+    return appearances
+
+
+async def get_streak_count(pitcher_id: int, game_date_et):
     if pitcher_id is None or game_date_et is None:
         return 0
 
     yesterday = game_date_et - timedelta(days=1)
     two_days_ago = game_date_et - timedelta(days=2)
 
-    yesterday_ids = get_pitcher_ids_for_date(yesterday)
-    two_days_ids = get_pitcher_ids_for_date(two_days_ago)
+    yesterday_ids = await get_pitcher_ids_for_date(yesterday)
+    two_days_ids = await get_pitcher_ids_for_date(two_days_ago)
 
     if pitcher_id in yesterday_ids and pitcher_id in two_days_ids:
         return 3
@@ -1017,17 +1008,49 @@ def get_streak_count(pitcher_id: int, game_date_et):
     return 0
 
 
-def count_recent_appearances_in_window(pitcher_id: int, game_date_et, days: int = 15) -> int:
+async def count_recent_appearances_in_window(pitcher_id: int, game_date_et, days: int = 15) -> int:
     if pitcher_id is None or game_date_et is None:
         return 0
 
     count = 1
     check_date = game_date_et - timedelta(days=1)
     for _ in range(max(days - 1, 0)):
-        if pitcher_id in get_pitcher_ids_for_date(check_date):
+        if pitcher_id in await get_pitcher_ids_for_date(check_date):
             count += 1
         check_date -= timedelta(days=1)
     return count
+
+
+async def get_recent_usage_snapshot(pitcher_id: int, game_date_et):
+    if pitcher_id is None or game_date_et is None:
+        return {"pitched_yesterday": False, "pitched_two_days_ago": False, "apps_last4": 1, "apps_last6": 1}
+
+    yesterday = game_date_et - timedelta(days=1)
+    two_days_ago = game_date_et - timedelta(days=2)
+
+    pitched_yesterday = pitcher_id in await get_pitcher_ids_for_date(yesterday)
+    pitched_two_days_ago = pitcher_id in await get_pitcher_ids_for_date(two_days_ago)
+
+    apps_last4 = 1
+    check_date = yesterday
+    for _ in range(3):
+        if pitcher_id in await get_pitcher_ids_for_date(check_date):
+            apps_last4 += 1
+        check_date -= timedelta(days=1)
+
+    apps_last6 = 1
+    check_date = yesterday
+    for _ in range(5):
+        if pitcher_id in await get_pitcher_ids_for_date(check_date):
+            apps_last6 += 1
+        check_date -= timedelta(days=1)
+
+    return {
+        "pitched_yesterday": pitched_yesterday,
+        "pitched_two_days_ago": pitched_two_days_ago,
+        "apps_last4": apps_last4,
+        "apps_last6": apps_last6,
+    }
 
 
 def get_streak_sentence(streak_count: int) -> str:
@@ -1047,38 +1070,6 @@ def get_streak_sentence(streak_count: int) -> str:
 def ordinal_word(n: int) -> str:
     mapping = {1: "first", 2: "second", 3: "third", 4: "fourth", 5: "fifth"}
     return mapping.get(n, f"{number_word(n)}th")
-
-
-def get_recent_usage_snapshot(pitcher_id: int, game_date_et):
-    if pitcher_id is None or game_date_et is None:
-        return {"pitched_yesterday": False, "pitched_two_days_ago": False, "apps_last4": 1, "apps_last6": 1}
-
-    yesterday = game_date_et - timedelta(days=1)
-    two_days_ago = game_date_et - timedelta(days=2)
-
-    pitched_yesterday = pitcher_id in get_pitcher_ids_for_date(yesterday)
-    pitched_two_days_ago = pitcher_id in get_pitcher_ids_for_date(two_days_ago)
-
-    apps_last4 = 1
-    check_date = yesterday
-    for _ in range(3):
-        if pitcher_id in get_pitcher_ids_for_date(check_date):
-            apps_last4 += 1
-        check_date -= timedelta(days=1)
-
-    apps_last6 = 1
-    check_date = yesterday
-    for _ in range(5):
-        if pitcher_id in get_pitcher_ids_for_date(check_date):
-            apps_last6 += 1
-        check_date -= timedelta(days=1)
-
-    return {
-        "pitched_yesterday": pitched_yesterday,
-        "pitched_two_days_ago": pitched_two_days_ago,
-        "apps_last4": apps_last4,
-        "apps_last6": apps_last6,
-    }
 
 
 def build_usage_sentence(usage: dict) -> str:
@@ -1162,7 +1153,7 @@ def build_velocity_inline_sentence(velocity_alert: dict) -> str:
 def trend_window_for_code(code: str) -> int:
     if code in {"scoreless5", "scoreless4of5", "ks10last5", "runs3of5"}:
         return 5
-    if code == "k_3_of_4":
+    if code in {"scoreless4", "k_3_of_4"}:
         return 4
     if code == "saves2":
         return 2
@@ -1220,14 +1211,14 @@ def build_trend_stat_sentence(name: str, code: str, span_stats: dict):
     ip_text = f"{span_stats.get('ip', '0.0')} innings"
     window = span_stats.get("window", 3)
 
-    if code in {"scoreless3", "scoreless5", "scoreless4of5"}:
+    if code in {"scoreless4", "scoreless5", "scoreless4of5"}:
         return random.choice([
             f"During that {window}-appearance stretch, he has {k_text} against {bb_text}.",
             f"He has covered {ip_text} during that run, with {k_text} and {bb_text}.",
             f"The stretch has come with {k_text} over {ip_text}, and only {bb_text}.",
         ])
 
-    if code in {"ks10last5", "ks7last3", "k_streak3", "dominant_last3", "dominant_k_combo", "no_walk3", "k_3_of_4"}:
+    if code in {"ks10last5", "ks7last3", "dominant_last3", "dominant_k_combo", "no_walk3", "k_3_of_4"}:
         return random.choice([
             f"That run has also come with {bb_text} over {ip_text}.",
             f"He has paired the swing-and-miss with {bb_text} over {ip_text} in that span.",
@@ -1600,25 +1591,43 @@ def recent_window_summary(recent_appearances):
     if not apps:
         return {}
     last3 = apps[:3]
+    last4 = apps[:4]
     last5 = apps[:5]
+
+    # IP floor: 3-game codes only fire if the window covers at least 3 total innings (9 outs)
+    last3_outs = sum(baseball_ip_to_outs(a.get("ip", "0.0")) for a in last3)
+    last3_meets_ip_floor = last3_outs >= 9
+
+    # ER totals for strikeout combo gate
+    er_last3 = sum(safe_int(a.get("er", 0), 0) for a in last3)
+    er_last5 = sum(safe_int(a.get("er", 0), 0) for a in last5)
+
     return {
         "last3": last3,
+        "last4": last4,
         "last5": last5,
-        "scoreless3": len(last3) == 3 and all(a.get("er", 0) == 0 for a in last3),
+        "last3_meets_ip_floor": last3_meets_ip_floor,
+        # scoreless streaks
+        "scoreless4": len(last4) == 4 and all(a.get("er", 0) == 0 for a in last4),
         "scoreless5": len(last5) == 5 and all(a.get("er", 0) == 0 for a in last5),
         "scoreless4of5": len(last5) == 5 and sum(1 for a in last5 if a.get("er", 0) == 0) >= 4,
-        "runs2of3": len(last3) == 3 and sum(1 for a in last3 if a.get("er", 0) > 0) >= 2,
+        # rough trends
+        "runs2of3": last3_meets_ip_floor and len(last3) == 3 and sum(1 for a in last3 if a.get("er", 0) > 0) >= 2,
         "runs3of5": len(last5) == 5 and sum(1 for a in last5 if a.get("er", 0) > 0) >= 3,
+        # strikeout trends — require at most 1 ER across the window
         "ks_last3": sum(safe_int(a.get("k", 0), 0) for a in last3),
         "ks_last5": sum(safe_int(a.get("k", 0), 0) for a in last5),
-        "k_streak3": len(last3) == 3 and all(safe_int(a.get("k", 0), 0) >= 1 for a in last3),
-        "dominant_last3": sum(1 for a in last3 if grade_outing(a) == "DOMINANT") >= 2,
-        "dominant_k_combo": len(last3) == 3 and sum(1 for a in last3 if a.get("er",0)==0 and safe_int(a.get("k",0),0)>=2) >= 2,
-        "no_walk3": len(last3) == 3 and all(safe_int(a.get("bb", 0), 0) == 0 for a in last3),
-        "k_3_of_4": len(apps[:4]) == 4 and sum(1 for a in apps[:4] if safe_int(a.get("k", 0), 0) >= 1) >= 3,
+        "ks7last3_clean": last3_meets_ip_floor and er_last3 <= 1,
+        "ks10last5_clean": len(last5) == 5 and er_last5 <= 1,
+        # command / dominance — subject to IP floor
+        "dominant_last3": last3_meets_ip_floor and sum(1 for a in last3 if grade_outing(a) in {"DOMINANT", "CLEAN"}) >= 2,
+        "dominant_k_combo": last3_meets_ip_floor and len(last3) == 3 and sum(1 for a in last3 if a.get("er", 0) == 0 and safe_int(a.get("k", 0), 0) >= 2) >= 2,
+        "no_walk3": last3_meets_ip_floor and len(last3) == 3 and all(safe_int(a.get("bb", 0), 0) == 0 for a in last3),
+        "k_3_of_4": len(last4) == 4 and sum(1 for a in last4 if safe_int(a.get("k", 0), 0) >= 1) >= 3,
+        # role codes — saves2/holds3 exempt from IP floor (stat itself implies meaningful usage)
         "saves2": len(last3) >= 2 and sum(1 for a in last3[:2] if safe_int(a.get("saves", 0), 0) > 0) == 2,
         "holds3": len(last3) == 3 and all(safe_int(a.get("holds", 0), 0) > 0 for a in last3),
-        "multi_inning3": len(last3) == 3 and all(baseball_ip_to_outs(a.get("ip", "0.0")) >= 4 and a.get("er", 0) == 0 for a in last3),
+        "multi_inning3": last3_meets_ip_floor and len(last3) == 3 and all(baseball_ip_to_outs(a.get("ip", "0.0")) >= 4 and a.get("er", 0) == 0 for a in last3),
         "inherit_zero3": False,
     }
 
@@ -1637,24 +1646,26 @@ def build_trend_candidates(current_app: dict, recent_appearances, tracked_info, 
     current_hold = safe_int(current_app.get("holds", 0), 0) > 0
     prev = recent_appearances[1] if len(recent_appearances) > 1 else None
     prev2 = recent_appearances[2] if len(recent_appearances) > 2 else None
+    last3_meets_ip_floor = info.get("last3_meets_ip_floor", False)
 
     def add(code, subject, emoji, priority, family, detail=None):
         candidates.append({"code": code, "subject": subject, "emoji": emoji, "priority": priority, "family": family, "detail": detail or {}})
 
+    # --- scoreless streaks (priority ladder: scoreless5 > scoreless4 > scoreless4of5) ---
     if info.get("scoreless5"):
         add("scoreless5", "Scoreless Streak: 5 Straight", "🔥", 100, "scoreless")
-    elif info.get("scoreless3"):
-        add("scoreless3", "Scoreless Streak: 3 Straight", "🔥", 80, "scoreless")
+    elif info.get("scoreless4"):
+        add("scoreless4", "Scoreless Streak: 4 Straight", "🔥", 88, "scoreless")
     elif info.get("scoreless4of5"):
         add("scoreless4of5", "Strong Recent Run", "🔥", 72, "scoreless")
 
-    if info.get("ks_last5", 0) >= 10:
+    # --- strikeout trends — only fire when window is mostly clean (at most 1 ER) ---
+    if info.get("ks10last5_clean") and info.get("ks_last5", 0) >= 10:
         add("ks10last5", "Bat-Missing Run", "⚡", 96, "strikeout", {"ks": info.get("ks_last5", 0), "window": 5})
-    elif info.get("ks_last3", 0) >= 7:
+    elif info.get("ks7last3_clean") and info.get("ks_last3", 0) >= 7:
         add("ks7last3", "Strikeout Surge", "⚡", 86, "strikeout", {"ks": info.get("ks_last3", 0), "window": 3})
 
-    if info.get("k_streak3"):
-        add("k_streak3", "Strikeout in 3 Straight", "⚡", 70, "strikeout")
+    # --- command / dominance — guarded by IP floor ---
     if info.get("dominant_last3"):
         add("dominant_last3", "Dominant Stretch", "⚡", 78, "dominance")
     if info.get("dominant_k_combo"):
@@ -1664,6 +1675,7 @@ def build_trend_candidates(current_app: dict, recent_appearances, tracked_info, 
     if info.get("k_3_of_4"):
         add("k_3_of_4", "Steady Swing-and-Miss", "⚡", 62, "strikeout")
 
+    # --- role codes (saves2/holds3 exempt from IP floor) ---
     if current_save and info.get("saves2"):
         add("saves2", "Back-to-Back Saves", "📈", 90, "role")
     if current_hold and info.get("holds3"):
@@ -1671,31 +1683,34 @@ def build_trend_candidates(current_app: dict, recent_appearances, tracked_info, 
     if info.get("multi_inning3"):
         add("multi_inning3", "Multi-Inning Success", "📈", 66, "usage")
 
-    if prev and safe_int(prev.get("blownSaves", 0), 0) > 0 and current_app.get("er", 0) == 0:
-        add("bounce_blown", "Bounce-Back Outing", "🔁", 74, "bounce")
-    if prev and prev.get("er", 0) > 0 and current_app.get("er", 0) == 0:
-        add("bounce_rough", "Rebound Performance", "🔁", 60, "bounce")
-    if prev and prev2 and prev.get("er", 0) > 0 and prev2.get("er", 0) > 0 and current_app.get("er", 0) == 0:
-        add("clean_rebound_2bad", "Steadier After Trouble", "🔁", 76, "bounce")
+    # --- bounce-back codes — guarded by IP floor on the 3-game window ---
+    if last3_meets_ip_floor:
+        if prev and safe_int(prev.get("blownSaves", 0), 0) > 0 and current_app.get("er", 0) == 0:
+            add("bounce_blown", "Bounce-Back Outing", "🔁", 74, "bounce")
+        if prev and prev.get("er", 0) > 0 and current_app.get("er", 0) == 0:
+            add("bounce_rough", "Rebound Performance", "🔁", 60, "bounce")
+        if prev and prev2 and prev.get("er", 0) > 0 and prev2.get("er", 0) > 0 and current_app.get("er", 0) == 0:
+            add("clean_rebound_2bad", "Steadier After Trouble", "🔁", 76, "bounce")
 
+    # --- rough trends ---
     if info.get("runs2of3"):
         add("runs2of3", "Recent Form Trending Down", "⚠️", 64, "rough")
     if info.get("runs3of5"):
         add("runs3of5", "Rough Stretch", "⚠️", 69, "rough")
-    if prev and info.get("scoreless3") is False and prev.get("er",0) == 0 and prev2 and prev2.get("er",0)==0 and current_app.get("er",0) > 0:
-        add("scoreless_snapped", "Scoreless Run Snapped", "⚠️", 58, "rough")
-    if prev and prev.get("er",0)==0 and prev2 and prev2.get("er",0)==0 and current_app.get("er",0) > 0:
-        add("first_rough_after_hot", "First Rough Turn After Hot Stretch", "⚠️", 61, "rough")
+    if last3_meets_ip_floor:
+        if prev and info.get("scoreless4") is False and prev.get("er", 0) == 0 and prev2 and prev2.get("er", 0) == 0 and current_app.get("er", 0) > 0:
+            add("scoreless_snapped", "Scoreless Run Snapped", "⚠️", 58, "rough")
+        if prev and prev.get("er", 0) == 0 and prev2 and prev2.get("er", 0) == 0 and current_app.get("er", 0) > 0:
+            add("first_rough_after_hot", "First Rough Turn After Hot Stretch", "⚠️", 61, "rough")
 
-    if context.get("entry_inning") is not None and safe_int(context.get("entry_inning"), 0) >= 7 and current_app.get("er",0) == 0:
+    # --- usage / leverage signals ---
+    if context.get("entry_inning") is not None and safe_int(context.get("entry_inning"), 0) >= 7 and current_app.get("er", 0) == 0:
         add("late_inning_clean", "Late-Inning Look", "📈", 63, "usage")
-    if context.get("entry_inning") is not None and safe_int(context.get("entry_inning"), 0) >= 8 and current_app.get("er",0) == 0:
+    if context.get("entry_inning") is not None and safe_int(context.get("entry_inning"), 0) >= 8 and current_app.get("er", 0) == 0:
         add("higher_leverage_usage", "More Meaningful Work", "📈", 67, "usage")
-
     if context.get("finished_game") and current_save:
         add("save_conversion", "Emerging Late-Inning Option", "📈", 73, "role")
 
-    # choose strongest family per family will happen later; return all candidates
     return candidates
 
 
@@ -1733,15 +1748,15 @@ def build_trend_analysis(name: str, team: str, trend: dict, recent_appearances, 
     span_stats = summarize_trend_span(recent_appearances, code)
 
     templates = {
-        "scoreless3": [
-            f"{name} has now strung together three straight scoreless outings, and the recent form has been sharp.",
-            f"{name} has put together three straight scoreless appearances and keeps stacking clean work.",
-            f"Three straight scoreless outings have started to put {name} on the radar in this bullpen.",
-        ],
         "scoreless5": [
             f"{name} has now turned in five straight scoreless outings, one of the better recent runs in this bullpen.",
             f"{name} has now logged five straight scoreless outings, giving him one of the stronger recent runs in this bullpen.",
             f"Five straight scoreless appearances have put {name} firmly on the radar in this bullpen.",
+        ],
+        "scoreless4": [
+            f"{name} has now strung together four straight scoreless outings and is building real momentum.",
+            f"Four straight scoreless appearances have {name} on a run that is starting to stand out.",
+            f"{name} has been locked in lately, putting up four straight scoreless outings.",
         ],
         "scoreless4of5": [
             f"{name} has been scoreless in four of his last five outings and is building real momentum.",
@@ -1754,9 +1769,6 @@ def build_trend_analysis(name: str, team: str, trend: dict, recent_appearances, 
         "ks7last3": [
             f"{name} has piled up {number_word(info.get('ks_last3', 0))} strikeouts across his last three outings and is missing bats at a high rate.",
             f"Strikeouts are starting to pile up for {name}, who has {number_word(info.get('ks_last3', 0))} over his last three appearances.",
-        ],
-        "k_streak3": [
-            f"{name} has recorded a strikeout in three straight outings and keeps bringing swing-and-miss to the mound.",
         ],
         "dominant_last3": [
             f"{name} has delivered multiple dominant appearances over his last three turns and is clearly in a strong stretch.",
@@ -2071,7 +2083,7 @@ def mark_velocity_posted(state, pitcher_id: int, game_id: int, velocity_alert: d
 
 
 
-def gather_trend_candidates_from_recent_games(tracked: dict, processed_pitchers_by_game):
+async def gather_trend_candidates_from_recent_games(tracked: dict, processed_pitchers_by_game):
     tracked_names = get_all_tracked_names(tracked)
     candidates = []
     for item in processed_pitchers_by_game:
@@ -2084,7 +2096,7 @@ def gather_trend_candidates_from_recent_games(tracked: dict, processed_pitchers_
             continue
 
         game_date_et = item.get("game_date_et")
-        appearance_count_15 = count_recent_appearances_in_window(pid, game_date_et, days=15)
+        appearance_count_15 = await count_recent_appearances_in_window(pid, game_date_et, days=15)
         if appearance_count_15 < 4:
             continue
 
@@ -2107,29 +2119,41 @@ def gather_trend_candidates_from_recent_games(tracked: dict, processed_pitchers_
 
 # ---------------- CORE ----------------
 
-def get_games():
-    today = datetime.now(ET).date()
-    yesterday = today - timedelta(days=1)
-
+def _fetch_schedule_sync(date_str: str) -> list:
+    """Blocking schedule fetch — run via executor only."""
+    r = requests.get(f"{SCHEDULE_URL}&date={date_str}", timeout=30)
+    r.raise_for_status()
+    data = r.json()
     games = []
-
-    for d in [today, yesterday]:
-        try:
-            r = requests.get(f"{SCHEDULE_URL}&date={d.isoformat()}", timeout=30)
-            r.raise_for_status()
-            data = r.json()
-            for date_block in data.get("dates", []):
-                games.extend(date_block.get("games", []))
-        except Exception as e:
-            log(f"Schedule fetch error for {d}: {e}")
-
+    for date_block in data.get("dates", []):
+        games.extend(date_block.get("games", []))
     return games
 
 
-def get_feed(game_id):
+def _fetch_feed_sync(game_id) -> dict:
+    """Blocking live feed fetch — run via executor only."""
     r = requests.get(LIVE_URL.format(game_id), timeout=30)
     r.raise_for_status()
     return r.json()
+
+
+async def get_games() -> list:
+    today = datetime.now(ET).date()
+    yesterday = today - timedelta(days=1)
+    loop = asyncio.get_event_loop()
+    games = []
+    for d in [today, yesterday]:
+        try:
+            day_games = await loop.run_in_executor(None, _fetch_schedule_sync, d.isoformat())
+            games.extend(day_games)
+        except Exception as e:
+            log(f"Schedule fetch error for {d}: {e}")
+    return games
+
+
+async def get_feed(game_id) -> dict:
+    loop = asyncio.get_event_loop()
+    return await loop.run_in_executor(None, _fetch_feed_sync, game_id)
 
 
 def get_pitchers(feed: dict):
@@ -2249,7 +2273,7 @@ async def loop():
                 tracked = await refresh_tracked_pitchers()
                 last_refresh_date = current_date
 
-            games = get_games()
+            games = await get_games()
             log(f"Checking {len(games)} games")
             processed_pitchers_by_game = []
 
@@ -2261,7 +2285,7 @@ async def loop():
                 if not game_id:
                     continue
 
-                feed = get_feed(game_id)
+                feed = await get_feed(game_id)
                 pitchers = get_pitchers(feed)
                 game_date_et = parse_game_date_et(g)
 
@@ -2279,7 +2303,7 @@ async def loop():
                         continue
 
                     context = get_pitcher_entry_context(feed, pitcher_id, p["side"])
-                    recent_appearances = get_recent_appearances(pitcher_id, game_date_et, limit=5, max_days=21)
+                    recent_appearances = await get_recent_appearances(pitcher_id, game_date_et, limit=5, max_days=21)
                     current_app = {
                         "ip": str(p["stats"].get("inningsPitched", "0.0")),
                         "h": safe_int(p["stats"].get("hits", 0), 0),
@@ -2312,8 +2336,8 @@ async def loop():
                     if not (is_save or is_tracked):
                         continue
 
-                    streak_count = get_streak_count(pitcher_id, game_date_et)
-                    usage_note = build_usage_sentence(get_recent_usage_snapshot(pitcher_id, game_date_et))
+                    streak_count = await get_streak_count(pitcher_id, game_date_et)
+                    usage_note = build_usage_sentence(await get_recent_usage_snapshot(pitcher_id, game_date_et))
                     velocity_alert = build_velocity_alert(current_app, recent_for_trend)
 
                     log(f"Posting {p['name']} | {p['team']} | {matchup}")
@@ -2347,7 +2371,7 @@ async def loop():
 
             # trend blurbs use the same channel, but only for non-depth-chart relievers
             if can_post_trend_now(state, now_et):
-                trend_candidates = gather_trend_candidates_from_recent_games(tracked, processed_pitchers_by_game)
+                trend_candidates = await gather_trend_candidates_from_recent_games(tracked, processed_pitchers_by_game)
                 for candidate in trend_candidates:
                     pid = candidate["pitcher_id"]
                     sig = appearance_signature(candidate["recent_appearances"])

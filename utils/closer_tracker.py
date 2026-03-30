@@ -14,10 +14,15 @@ ROLE_CONFIG = [
 ]
 
 TEAM_ALIASES = {
+    "AZ": "ARI",
     "WSN": "WSH",
     "WAS": "WSH",
     "CHW": "CWS",
     "TBR": "TB",
+    "KCR": "KC",
+    "SDP": "SD",
+    "SFG": "SF",
+    "OAK": "ATH",
 }
 
 

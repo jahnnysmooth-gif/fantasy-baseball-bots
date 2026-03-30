@@ -222,12 +222,14 @@ def get_games() -> list:
 
     for d in [today_et, yesterday_et]:
         url = f"{MLB_SCHEDULE_URL}&date={d.isoformat()}"
-        r = requests.get(url, timeout=30)
-        r.raise_for_status()
-        data = r.json()
-
-        for date_block in data.get("dates", []):
-            games.extend(date_block.get("games", []))
+        try:
+            r = requests.get(url, timeout=30)
+            r.raise_for_status()
+            data = r.json()
+            for date_block in data.get("dates", []):
+                games.extend(date_block.get("games", []))
+        except Exception as e:
+            log(f"Schedule fetch error for {d}: {e}")
 
     return games
 
