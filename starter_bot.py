@@ -776,10 +776,34 @@ def build_contact_profile(feed: dict, pitcher_id: int) -> dict:
     """
     Scan play results to classify the quality of contact allowed.
     Returns counts: home_runs, extra_base_hits, singles, weak_contact (K+GB outs).
+    Also captures HR hitter names + their season HR total for notable homer detection.
     """
-    profile = {"home_runs": 0, "extra_base_hits": 0, "singles": 0, "total_batted_balls": 0}
+    profile = {
+        "home_runs": 0, "extra_base_hits": 0, "singles": 0, "total_batted_balls": 0,
+        "hr_hitters": [],   # list of {"name": str, "season_hrs": int}
+    }
     if not feed or pitcher_id is None:
         return profile
+
+    # Build a quick lookup: player_id -> season HR total from boxscore
+    season_hr_lookup = {}
+    box = feed.get("liveData", {}).get("boxscore", {}).get("teams", {})
+    for side in ("home", "away"):
+        for player in box.get(side, {}).get("players", {}).values():
+            pid = player.get("person", {}).get("id")
+            if pid is None:
+                continue
+            season_stats = player.get("seasonStats", {})
+            batting = (
+                season_stats.get("batting")
+                if isinstance(season_stats.get("batting"), dict)
+                else season_stats
+            )
+            hrs = safe_int(batting.get("homeRuns", 0), 0)
+            season_hr_lookup[pid] = {
+                "name": player.get("person", {}).get("fullName", ""),
+                "season_hrs": hrs,
+            }
 
     plays = feed.get("liveData", {}).get("plays", {}).get("allPlays", [])
     for play in plays:
@@ -793,13 +817,21 @@ def build_contact_profile(feed: dict, pitcher_id: int) -> dict:
         result = play.get("result", {}) if isinstance(play, dict) else {}
         event = str(result.get("event") or "").strip()
 
-        if event in ("Home Run",):
+        if event == "Home Run":
             profile["home_runs"] += 1
             profile["total_batted_balls"] += 1
+            batter = matchup.get("batter", {}) if isinstance(matchup, dict) else {}
+            batter_id = batter.get("id")
+            if batter_id and batter_id in season_hr_lookup:
+                info = season_hr_lookup[batter_id]
+                profile["hr_hitters"].append({
+                    "name": info["name"] or batter.get("fullName", ""),
+                    "season_hrs": info["season_hrs"],
+                })
         elif event in ("Double", "Triple"):
             profile["extra_base_hits"] += 1
             profile["total_batted_balls"] += 1
-        elif event in ("Single",):
+        elif event == "Single":
             profile["singles"] += 1
             profile["total_batted_balls"] += 1
         elif event in ("Groundout", "Flyout", "Pop Out", "Lineout", "Forceout",
@@ -1320,7 +1352,7 @@ def build_starter_overview(name: str, label: str, stats: dict, seed: int, team_n
         "SHORT": [
             f"{name} did not last as long as his team needed, getting through only {ip_text}.",
             f"{name} was out earlier than expected, and the outing never found much rhythm.",
-            f"{name} came up short on length, which changed the shape of the game pretty quickly.",
+            f"{name} came up short on innings, which changed the shape of the game pretty quickly.",
             f"{name} could not give the {team_name} enough innings, even if the damage stayed somewhat limited.",
         ],
         "ROUGH": [
@@ -1973,42 +2005,43 @@ def build_starter_kbb_sentence(p: dict, label: str, seed: int) -> str:
     # --- Elite command: BB = 0 ---
     if bb == 0 and k >= 5:
         choices = [
-            f"He did not walk a single batter, which made every inning feel like it belonged to him.",
-            f"No walks in the book for him — when he needed a strikeout he found one, and when he needed a groundball he got that too.",
-            f"He went the whole way without issuing a free pass, and that kind of command changes the entire shape of a start.",
-            f"Zero walks is the cleanest command story you can write, and he earned every bit of that line.",
-            f"The walk column stayed empty all night, and you could feel the lineup's frustration building around it.",
-            f"He never gave anyone a free base, which is the kind of discipline that makes everything else downstream easier.",
-            f"Not a single walk the entire time he was out there — the zone was his property all night.",
-            f"Walking nobody is the ultimate form of working ahead, and he made it look almost routine.",
+            "He did not walk a single batter, which made every inning feel like it belonged to him.",
+            "No walks in the book for him — when he needed a strikeout he found one, and when he needed a groundball he got that too.",
+            "He went the whole way without issuing a free pass, and that kind of command changes the entire shape of a start.",
+            "Zero walks is the cleanest command story you can write, and he earned every bit of that line.",
+            "The walk column stayed empty all night, and you could feel the lineup's frustration building around it.",
+            "He never gave anyone a free base, which is the kind of discipline that makes everything else downstream easier.",
+            "Not a single walk the entire time he was out there — the zone was his property all night.",
+            "Walking nobody is the ultimate form of working ahead, and he made it look almost routine.",
         ]
         if k >= 10:
             choices.extend([
                 f"He struck out {number_word(k)} and walked nobody — that is the cleanest version of a dominant outing.",
-                f"Double-digit strikeouts and not one walk is the kind of line that does not need any further explanation.",
+                "Double-digit strikeouts and not one walk is the kind of line that does not need any further explanation.",
             ])
         return choices[(seed // 43) % len(choices)]
 
+    ratio_text = f"{k}:{bb} K/BB"
+
     # --- Great ratio: K >= 3x BB, at least 2 BB ---
     if bb >= 2 and k >= bb * 3:
-        ratio_text = f"{k}-to-{bb}"
         choices = [
-            f"His strikeout-to-walk ratio tells the command story well — {ratio_text} is a really clean number.",
-            f"He finished with a {ratio_text} strikeout-to-walk mark, which is exactly the kind of dominance-to-mistake balance you want from a starter.",
-            f"A {ratio_text} K-to-BB ratio is hard to argue with, and it explains why the lineup never found much traction.",
-            f"He punched out {number_word(k)} and walked only {number_word(bb)}, and that gap alone tells you how much he was in control.",
-            f"The {ratio_text} strikeout-to-walk split was the clearest sign he had his best stuff working tonight.",
-            f"Striking out {number_word(k)} while only walking {number_word(bb)} is efficient, aggressive pitching — he was hunting outs all night.",
+            f"The {ratio_text} ratio tells the command story well — he was in control of counts from the first inning on.",
+            f"He finished with a {ratio_text} ratio, which is exactly the kind of dominance-to-mistake balance you want from a starter.",
+            f"A {ratio_text} mark is hard to argue with, and it explains why the lineup never found much traction.",
+            f"He punched out {number_word(k)} and walked only {number_word(bb)} — that {ratio_text} split alone tells you how much he was in control.",
+            f"The {ratio_text} ratio was the clearest sign he had his best stuff working tonight.",
+            f"Striking out {number_word(k)} while only walking {number_word(bb)} is efficient, aggressive pitching — and the {ratio_text} shows it.",
         ]
         return choices[(seed // 43) % len(choices)]
 
     # --- Decent ratio: 2:1 or better, but not 3:1 ---
     if bb >= 1 and k >= bb * 2 and label in GOOD_STARTER_LABELS:
         choices = [
-            f"He struck out {number_word(k)} and walked {number_word(bb)}, and that ratio kept the damage from getting out of hand.",
-            f"The {k}-to-{bb} K-to-walk split shows he was ahead in counts more often than not.",
-            f"He punched out {number_word(k)} against {number_word(bb)} walks — not perfectly clean, but efficient enough to stay in control.",
-            f"Finishing with {number_word(k)} strikeouts against {number_word(bb)} walks is a solid command line for a long outing.",
+            f"He struck out {number_word(k)} and walked {number_word(bb)}, and that {ratio_text} ratio kept the damage from getting out of hand.",
+            f"The {ratio_text} split shows he was ahead in counts more often than not.",
+            f"He punched out {number_word(k)} against {number_word(bb)} walks — not perfectly clean, but that {ratio_text} is efficient enough.",
+            f"Finishing with a {ratio_text} ratio is a solid command line for a long outing.",
         ]
         return choices[(seed // 43) % len(choices)]
 
@@ -2016,22 +2049,22 @@ def build_starter_kbb_sentence(p: dict, label: str, seed: int) -> str:
     if bb >= 3 and k <= bb * 1.5 and label in SUBPAR_STARTER_LABELS | {"NO_COMMAND"}:
         choices = [
             f"He struck out {number_word(k)} but walked {number_word(bb)}, and those free passes kept every inning more stressful than it needed to be.",
-            f"The {k}-to-{bb} strikeout-to-walk split is the kind of ratio that makes a long night feel even longer.",
-            f"He only had {number_word(k)} strikeouts against {number_word(bb)} walks, which means he was giving away too many at-bats.",
+            f"The {ratio_text} ratio is the kind of split that makes a long night feel even longer.",
+            f"He only had {number_word(k)} strikeouts against {number_word(bb)} walks — a {ratio_text} mark that meant too many counts went the wrong way.",
             f"Punching out {number_word(k)} while walking {number_word(bb)} is hard to sustain — and eventually it caught up with him.",
-            f"The walk total was too close to the strikeout total, and that math almost never works out well over a full start.",
+            f"The walk total was too close to the strikeout total, and that {ratio_text} math almost never works out well over a full start.",
             f"He struck out {number_word(k)} but the {number_word(bb)} walks bled into every inning and kept the pressure building.",
-            f"When you walk {number_word(bb)} and only strike out {number_word(k)}, too many counts are going the wrong direction.",
+            f"When your K/BB is {ratio_text}, too many counts are going the wrong direction — and the line shows it.",
         ]
         return choices[(seed // 43) % len(choices)]
 
-    # --- High BB even with good K: he's a wild strikeout arm ---
+    # --- High BB even with good K: wild strikeout arm ---
     if bb >= 4 and k >= 7 and label in {"STRIKEOUT", "UNEVEN"}:
         choices = [
-            f"He struck out {number_word(k)} but the {number_word(bb)} walks kept offsetting everything — the stuff was there, the command was not consistent enough.",
-            f"The strikeout total was impressive but the {number_word(bb)} walks were always waiting in the background to make things complicated.",
-            f"He had {number_word(k)} punchouts to his name but {number_word(bb)} walks alongside them, which is the definition of a hard night to manage.",
-            f"Big strikeout total, big walk total — he was electric in spots and loose in others, and both showed up in the line.",
+            f"He struck out {number_word(k)} but the {number_word(bb)} walks kept offsetting everything — a {ratio_text} night that was electric in spots and loose in others.",
+            f"The strikeout total was impressive but the {number_word(bb)} walks were always waiting in the background, and the {ratio_text} ratio shows the tension.",
+            f"He had {number_word(k)} punchouts to his name but {number_word(bb)} walks alongside them — a {ratio_text} split that is the definition of a hard night to manage.",
+            f"Big strikeout total, big walk total — {ratio_text} — he was electric in spots and loose in others, and both showed up in the line.",
         ]
         return choices[(seed // 43) % len(choices)]
 
@@ -2378,6 +2411,55 @@ def build_starter_contact_sentence(p: dict, label: str, seed: int) -> str:
         return choices[(seed // 71) % len(choices)]
 
     return ""
+
+
+def build_starter_hr_hitter_sentence(p: dict, label: str, seed: int) -> str:
+    """
+    Name a notable hitter who went deep — fires when a batter with 15+ season HRs
+    hit a home run against this pitcher. Only surfaces for one batter (the most
+    notable). Does not fire if the pitcher allowed 3+ HRs total (contact_sentence
+    already covers that story).
+    """
+    contact = p.get("contact_profile") or {}
+    total_hrs = safe_int(contact.get("home_runs", 0), 0)
+    hr_hitters = contact.get("hr_hitters", [])
+
+    # Don't double-up with contact_sentence when it's a multi-HR blowup
+    if total_hrs >= 3 or not hr_hitters:
+        return ""
+
+    # Find the most notable hitter (highest season HR total above threshold)
+    NOTABLE_HR_THRESHOLD = 15
+    notable = [h for h in hr_hitters if safe_int(h.get("season_hrs", 0), 0) >= NOTABLE_HR_THRESHOLD]
+    if not notable:
+        return ""
+
+    # Pick the one with the most season HRs
+    top = max(notable, key=lambda h: safe_int(h.get("season_hrs", 0), 0))
+    name = top.get("name", "")
+    season_hrs = safe_int(top.get("season_hrs", 0), 0)
+    if not name:
+        return ""
+
+    # Shorten to last name for readability in sentences
+    last_name = name.split()[-1] if name else name
+
+    if label in GOOD_STARTER_LABELS:
+        choices = [
+            f"{last_name} got him with a home run, but that was about as much as the lineup could manage against him.",
+            f"He ran into {last_name}, who has {season_hrs} home runs on the year, but that was a rare win for the offense against him tonight.",
+            f"{last_name}'s homer was the one real damage pitch of the night — outside of that, he kept the ball in the park.",
+            f"He gave up a home run to {last_name}, who has been one of the more dangerous bats in the league, but it was the only real mistake he made.",
+        ]
+    else:
+        choices = [
+            f"{last_name} made him pay with a home run — and with {season_hrs} on the year, that is exactly the kind of at-bat you cannot afford to lose.",
+            f"He gave up a home run to {last_name}, who came in with {season_hrs} on the season, and that swing changed the shape of the outing.",
+            f"{last_name} got him for a long ball, and against a hitter with that kind of power, there is very little margin for a mistake.",
+            f"A home run from {last_name} was one of the louder moments — you know coming in that a hitter with {season_hrs} home runs can end an inning in one swing.",
+        ]
+
+    return choices[(seed // 103) % len(choices)]
 
 
 def build_starter_run_support_sentence(p: dict, label: str, game_context: dict, seed: int) -> str:
@@ -2754,7 +2836,7 @@ def build_starter_subject_line(p: dict, label: str, game_context: dict, seed: in
             f"✅ {name} keeps the game under control",
             f"✅ {name} holds the line with a clean effort",
         ]
-        if k >= 7:
+        if k >= 7 and outs >= 21:
             choices.append(f"✅ {name} pairs length with {number_word(k)} strikeouts")
         elif er == 0:
             choices.append(f"✅ {name} keeps the board clean through {ip_text}")
@@ -2872,6 +2954,7 @@ def build_starter_summary(
     inherited_sentence = build_starter_inherited_sentence(p, label, seed)
     streak_sentence    = build_starter_scoreless_streak_sentence(p, label, seed)
     contact_sentence   = build_starter_contact_sentence(p, label, seed)
+    hr_hitter_sentence = build_starter_hr_hitter_sentence(p, label, seed)
     support_sentence   = build_starter_run_support_sentence(p, label, game_context, seed)
     daynight_sentence  = build_starter_day_night_sentence(p, label, game_context, seed)
     rivalry_sentence   = build_starter_rivalry_sentence(p, label, game_context, seed)
@@ -2883,29 +2966,29 @@ def build_starter_summary(
 
     if is_bad_starter_label(label):
         order_options = [
-            [overview, flow_sentence, contact_sentence, stat_sentence, positive_sentence, pressure_sentence, leverage_sentence, kbb_sentence, pitch_sentence, team_sentence, support_sentence, velocity_sentence, csw_sentence, opp_sentence, inherited_sentence, rivalry_sentence, trend_sentence, next_start_sentence],
-            [overview, pressure_sentence, stat_sentence, positive_sentence, flow_sentence, contact_sentence, kbb_sentence, leverage_sentence, pitch_sentence, team_sentence, velocity_sentence, csw_sentence, opp_sentence, season_sentence, trend_sentence, rivalry_sentence, next_start_sentence],
-            [overview, stat_sentence, flow_sentence, contact_sentence, positive_sentence, leverage_sentence, csw_sentence, pitch_sentence, team_sentence, support_sentence, velocity_sentence, opp_sentence, kbb_sentence, inherited_sentence, debut_sentence, next_start_sentence],
-            [overview, stat_sentence, pitch_sentence, flow_sentence, contact_sentence, pressure_sentence, positive_sentence, kbb_sentence, team_sentence, velocity_sentence, opp_sentence, leverage_sentence, rivalry_sentence, trend_sentence, next_start_sentence],
+            [overview, flow_sentence, contact_sentence, hr_hitter_sentence, stat_sentence, positive_sentence, pressure_sentence, leverage_sentence, kbb_sentence, pitch_sentence, team_sentence, support_sentence, velocity_sentence, csw_sentence, opp_sentence, inherited_sentence, rivalry_sentence, trend_sentence, next_start_sentence],
+            [overview, pressure_sentence, stat_sentence, positive_sentence, flow_sentence, contact_sentence, hr_hitter_sentence, kbb_sentence, leverage_sentence, pitch_sentence, team_sentence, velocity_sentence, csw_sentence, opp_sentence, season_sentence, trend_sentence, rivalry_sentence, next_start_sentence],
+            [overview, stat_sentence, flow_sentence, contact_sentence, hr_hitter_sentence, positive_sentence, leverage_sentence, csw_sentence, pitch_sentence, team_sentence, support_sentence, velocity_sentence, opp_sentence, kbb_sentence, inherited_sentence, debut_sentence, next_start_sentence],
+            [overview, stat_sentence, pitch_sentence, flow_sentence, contact_sentence, hr_hitter_sentence, pressure_sentence, positive_sentence, kbb_sentence, team_sentence, velocity_sentence, opp_sentence, leverage_sentence, rivalry_sentence, trend_sentence, next_start_sentence],
         ]
     elif label == "STRIKEOUT":
         order_options = [
-            [overview, csw_sentence, kbb_sentence, stat_sentence, flow_sentence, contact_sentence, pressure_sentence, fp_sentence, pitch_sentence, team_sentence, velocity_sentence, season_sentence, nd_sentence, opp_sentence, trend_sentence, rivalry_sentence, next_start_sentence],
-            [overview, flow_sentence, csw_sentence, kbb_sentence, stat_sentence, team_sentence, contact_sentence, fp_sentence, pitch_sentence, velocity_sentence, pressure_sentence, season_sentence, opp_sentence, trend_sentence, next_start_sentence],
-            [overview, stat_sentence, csw_sentence, flow_sentence, kbb_sentence, contact_sentence, team_sentence, velocity_sentence, pressure_sentence, fp_sentence, pitch_sentence, nd_sentence, opp_sentence, trend_sentence, debut_sentence, next_start_sentence],
+            [overview, csw_sentence, kbb_sentence, stat_sentence, flow_sentence, contact_sentence, hr_hitter_sentence, pressure_sentence, fp_sentence, pitch_sentence, team_sentence, velocity_sentence, season_sentence, nd_sentence, opp_sentence, trend_sentence, rivalry_sentence, next_start_sentence],
+            [overview, flow_sentence, csw_sentence, kbb_sentence, stat_sentence, team_sentence, contact_sentence, hr_hitter_sentence, fp_sentence, pitch_sentence, velocity_sentence, pressure_sentence, season_sentence, opp_sentence, trend_sentence, next_start_sentence],
+            [overview, stat_sentence, csw_sentence, flow_sentence, kbb_sentence, contact_sentence, hr_hitter_sentence, team_sentence, velocity_sentence, pressure_sentence, fp_sentence, pitch_sentence, nd_sentence, opp_sentence, trend_sentence, debut_sentence, next_start_sentence],
         ]
     elif label in {"GEM", "DOMINANT"}:
         order_options = [
-            [overview, flow_sentence, streak_sentence, csw_sentence, kbb_sentence, contact_sentence, pressure_sentence, stat_sentence, stranded_sentence, support_sentence, team_sentence, velocity_sentence, fp_sentence, pitch_sentence, season_sentence, nd_sentence, opp_sentence, rivalry_sentence, trend_sentence, debut_sentence, next_start_sentence],
-            [overview, pressure_sentence, kbb_sentence, stat_sentence, flow_sentence, streak_sentence, contact_sentence, csw_sentence, stranded_sentence, team_sentence, fp_sentence, support_sentence, pitch_sentence, velocity_sentence, season_sentence, opp_sentence, trend_sentence, rivalry_sentence, next_start_sentence],
-            [overview, csw_sentence, kbb_sentence, stat_sentence, contact_sentence, flow_sentence, streak_sentence, team_sentence, pressure_sentence, stranded_sentence, velocity_sentence, fp_sentence, support_sentence, pitch_sentence, nd_sentence, opp_sentence, trend_sentence, debut_sentence, next_start_sentence],
+            [overview, flow_sentence, streak_sentence, csw_sentence, kbb_sentence, contact_sentence, hr_hitter_sentence, pressure_sentence, stat_sentence, stranded_sentence, support_sentence, team_sentence, velocity_sentence, fp_sentence, pitch_sentence, season_sentence, nd_sentence, opp_sentence, rivalry_sentence, trend_sentence, debut_sentence, next_start_sentence],
+            [overview, pressure_sentence, kbb_sentence, stat_sentence, flow_sentence, streak_sentence, contact_sentence, hr_hitter_sentence, csw_sentence, stranded_sentence, team_sentence, fp_sentence, support_sentence, pitch_sentence, velocity_sentence, season_sentence, opp_sentence, trend_sentence, rivalry_sentence, next_start_sentence],
+            [overview, csw_sentence, kbb_sentence, stat_sentence, contact_sentence, hr_hitter_sentence, flow_sentence, streak_sentence, team_sentence, pressure_sentence, stranded_sentence, velocity_sentence, fp_sentence, support_sentence, pitch_sentence, nd_sentence, opp_sentence, trend_sentence, debut_sentence, next_start_sentence],
         ]
     else:
         order_options = [
-            [overview, flow_sentence, streak_sentence, stat_sentence, pressure_sentence, kbb_sentence, contact_sentence, team_sentence, pitch_sentence, csw_sentence, fp_sentence, stranded_sentence, support_sentence, velocity_sentence, season_sentence, nd_sentence, opp_sentence, pitch_mix_sentence, rivalry_sentence, trend_sentence, debut_sentence, next_start_sentence],
-            [overview, pitch_sentence, flow_sentence, kbb_sentence, stat_sentence, contact_sentence, pressure_sentence, team_sentence, csw_sentence, fp_sentence, streak_sentence, support_sentence, velocity_sentence, season_sentence, opp_sentence, trend_sentence, rivalry_sentence, next_start_sentence],
-            [overview, pressure_sentence, stat_sentence, flow_sentence, kbb_sentence, contact_sentence, csw_sentence, team_sentence, velocity_sentence, pitch_sentence, stranded_sentence, nd_sentence, opp_sentence, streak_sentence, pitch_mix_sentence, support_sentence, debut_sentence, trend_sentence, next_start_sentence],
-            [overview, stat_sentence, team_sentence, flow_sentence, kbb_sentence, contact_sentence, pressure_sentence, pitch_sentence, fp_sentence, velocity_sentence, csw_sentence, stranded_sentence, support_sentence, season_sentence, opp_sentence, rivalry_sentence, trend_sentence, next_start_sentence],
+            [overview, flow_sentence, streak_sentence, stat_sentence, pressure_sentence, kbb_sentence, contact_sentence, hr_hitter_sentence, team_sentence, pitch_sentence, csw_sentence, fp_sentence, stranded_sentence, support_sentence, velocity_sentence, season_sentence, nd_sentence, opp_sentence, pitch_mix_sentence, rivalry_sentence, trend_sentence, debut_sentence, next_start_sentence],
+            [overview, pitch_sentence, flow_sentence, kbb_sentence, stat_sentence, contact_sentence, hr_hitter_sentence, pressure_sentence, team_sentence, csw_sentence, fp_sentence, streak_sentence, support_sentence, velocity_sentence, season_sentence, opp_sentence, trend_sentence, rivalry_sentence, next_start_sentence],
+            [overview, pressure_sentence, stat_sentence, flow_sentence, kbb_sentence, contact_sentence, hr_hitter_sentence, csw_sentence, team_sentence, velocity_sentence, pitch_sentence, stranded_sentence, nd_sentence, opp_sentence, streak_sentence, pitch_mix_sentence, support_sentence, debut_sentence, trend_sentence, next_start_sentence],
+            [overview, stat_sentence, team_sentence, flow_sentence, kbb_sentence, contact_sentence, hr_hitter_sentence, pressure_sentence, pitch_sentence, fp_sentence, velocity_sentence, csw_sentence, stranded_sentence, support_sentence, season_sentence, opp_sentence, rivalry_sentence, trend_sentence, next_start_sentence],
         ]
 
     ordered = [s for s in order_options[seed % len(order_options)] if s]
@@ -2929,7 +3012,7 @@ def build_starter_summary(
             csw_sentence, pitch_sentence, velocity_sentence, positive_sentence,
             pitch_mix_sentence, season_sentence, nd_sentence, opp_sentence,
             kbb_sentence, fp_sentence, leverage_sentence, stranded_sentence,
-            inherited_sentence, streak_sentence, contact_sentence, support_sentence,
+            inherited_sentence, streak_sentence, contact_sentence, hr_hitter_sentence, support_sentence,
             trend_sentence, rivalry_sentence, debut_sentence, next_start_sentence,
         ]
         for sentence in fillers:
