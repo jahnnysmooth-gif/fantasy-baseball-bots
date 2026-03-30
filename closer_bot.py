@@ -1137,18 +1137,18 @@ def build_line2_from_detail(s: dict, detail: dict, ip_text: str) -> str:
                 ]))
 
         if len(run_parts) == 1:
-            # Single event — full sentence with varied endings
             part = run_parts[0]
+            part_cap = part[0].upper() + part[1:] if part else part
             pieces.append(random.choice([
-                f"{part.capitalize()} did the damage.",
+                f"{part_cap} did the damage.",
                 f"The damage came on {part}.",
                 f"He gave up {part} to allow the run{'s' if er > 1 else ''}.",
             ]))
         else:
-            # Multiple events — join them naturally into one sentence
             joined = _name_list(run_parts)
+            joined_cap = joined[0].upper() + joined[1:] if joined else joined
             pieces.append(random.choice([
-                f"{joined.capitalize()} did the damage.",
+                f"{joined_cap} did the damage.",
                 f"The damage came on {joined}.",
             ]))
     elif s["er"] > 0:
