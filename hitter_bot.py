@@ -1472,24 +1472,26 @@ CONTEXT_FAMILY_POOL = [
 ]
 
 FANTASY_CLOSING_POOL = [
-    "Exactly what you want from him.",
     "He made every at-bat count.",
-    "He was locked in all game.",
     "Complete game from top to bottom.",
     "He gave the team everything it needed.",
-    "Clean performance start to finish.",
     "The production was consistent all night.",
     "He showed up when it counted.",
-    "Everything clicked for him tonight.",
     "One of his better all-around games of the year.",
     "He was a problem every time he came up.",
-    "You could see early this was going to be a good one for him.",
-    "He kept the line moving from the first inning to the last.",
     "There was nothing fluky about it.",
     "He earned every bit of that line.",
-    "A quiet but effective night — the numbers tell the story.",
     "The at-bats were quality from start to finish.",
     "He put the team on his back and delivered.",
+    "The numbers don't lie — that was a good night.",
+    "He did the work and the box score shows it.",
+    "Hard to find a complaint with that line.",
+    "He was at his best when the team needed him.",
+    "The production held up from start to finish.",
+    "He gave the pitching staff something to work with.",
+    "That's the version of him everyone wants to see.",
+    "He made pitchers work and it paid off.",
+    "The results matched the effort tonight.",
 ]
 
 EV_HIT_FAMILIES = [
@@ -3390,15 +3392,8 @@ def build_hitter_summary(
     standout = homers >= 2 or rbi >= 4 or hits >= 4 or steals >= 2 or (homers >= 1 and rbi >= 3)
     max_sentences = 5 if standout else 4
 
-    # Pad to minimum 3 sentences for non-quiet nights
-    while len(sentences) < 3:
-        filler = _pick_unique(SUMMARY_FILLER_POOL, "filler")
-        if filler:
-            sentences.append(filler)
-        else:
-            break
 
-    # --- Deduplicate key words across sentences ---
+        # --- Deduplicate key words across sentences ---
     KEY_SYNONYMS = {
         "homer": ["long ball", "blast", "shot", "home run"],
         "swing": ["cut", "at-bat", "knock", "hit"],
@@ -3461,6 +3456,17 @@ def build_hitter_summary(
             ])
         if callback and callback not in sentences:
             sentences.append(callback)
+
+    # Only pad with a closing sentence if we need it,
+    # and only ~40% of the time — don't force a generic closer onto every card
+    if len(sentences) < 2:
+        filler = _pick_unique(SUMMARY_FILLER_POOL, "filler")
+        if filler:
+            sentences.append(filler)
+    elif len(sentences) == 2 and random.random() < 0.4:
+        filler = _pick_unique(FANTASY_CLOSING_POOL, "closing")
+        if filler:
+            sentences.append(filler)
 
     final = " ".join(sentences[:max_sentences]).strip()
     # Bold the first occurrence of the player's full name in the summary
