@@ -356,13 +356,13 @@ def number_word(n: int) -> str:
     return NUMBER_WORDS.get(n, str(n))
 
 
-def stat_phrase(count: int, singular: str, plural_form: str | None = None, zero_text: str | None = None) -> str:
+def stat_phrase(count: int, singular: str, plural_form: str | None = None, zero_text: str | None = None, use_article: bool = False) -> str:
     if plural_form is None:
         plural_form = f"{singular}s"
     if count == 0:
         return zero_text or f"no {plural_form}"
     if count == 1:
-        return f"one {singular}"
+        return f"a {singular}" if use_article else f"one {singular}"
     return f"{number_word(count)} {plural_form}"
 
 
@@ -1163,8 +1163,8 @@ def build_line2_from_detail(s: dict, detail: dict, ip_text: str) -> str:
                 f"He put {number_word(bb)} on via walks and the damage came without a hit.",
             ]))
         elif bb > 0 and h > 0:
-            hit_text = stat_phrase(h, "hit")
-            walk_text = stat_phrase(bb, "walk")
+            hit_text = stat_phrase(h, "hit", use_article=True)
+            walk_text = stat_phrase(bb, "walk", use_article=True)
             pieces.append(random.choice([
                 f"He allowed {run_text} to score on {hit_text} and {walk_text}.",
                 f"A combination of {hit_text} and {walk_text} led to {run_text} scoring.",
@@ -1193,8 +1193,8 @@ def build_line2_from_detail(s: dict, detail: dict, ip_text: str) -> str:
                 f"There were baserunners, but he kept {lob_text} stranded.",
             ]))
         else:
-            hit_text = stat_phrase(h, "hit")
-            walk_text = stat_phrase(bb, "walk")
+            hit_text = stat_phrase(h, "hit", use_article=True)
+            walk_text = stat_phrase(bb, "walk", use_article=True)
             pieces.append(random.choice([
                 f"He worked around {hit_text} and {walk_text} to keep the inning scoreless.",
                 f"He allowed {hit_text} and {walk_text} but held the damage at zero.",
