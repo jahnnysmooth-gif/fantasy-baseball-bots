@@ -3320,7 +3320,9 @@ def build_hitter_summary(
         return lowered
 
     def _pick_unique(pool: list[str], fallback_sig: str | None = None) -> str:
-        for sentence in pool:
+        shuffled = list(pool)
+        random.shuffle(shuffled)
+        for sentence in shuffled:
             signature = _sig(sentence) if fallback_sig is None else fallback_sig
             if sentence and sentence not in sentences and signature not in used_signatures:
                 used_signatures.add(signature)
