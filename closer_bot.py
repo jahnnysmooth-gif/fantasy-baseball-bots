@@ -2044,12 +2044,37 @@ def build_summary(name: str, team: str, s: dict, label: str, context: dict, stre
     opp = str(opp_name or "").strip()
     opp_phrase = f"against the {opp}" if opp else ""
 
-    # Score phrase — only for close games (margin <= 2)
+    # Combined score + opponent tail phrase for close games (margin <= 2)
+    # Produces natural endings like "in a 6-3 loss to the Nationals" or "in a 3-3 tie against the Cardinals"
     margin = safe_int(context.get("entry_margin", 0), 0)
     state_kind = context.get("entry_state_kind", "")
-    score_phrase = ""
+    score_tail = ""
     if final_score and margin <= 2 and state_kind in {"lead", "trailing", "tie"}:
-        score_phrase = f"in a {final_score} game" if state_kind == "tie" else f"final {final_score}"
+        if opp:
+            if state_kind == "trailing":
+                score_tail = random.choice([
+                    f"in a {final_score} loss to the {opp}",
+                    f"as the {opp} pulled away {final_score}",
+                    f"with the {opp} winning {final_score}",
+                ])
+            elif state_kind == "lead":
+                score_tail = random.choice([
+                    f"in a {final_score} win over the {opp}",
+                    f"as his team held on {final_score} against the {opp}",
+                    f"with the final score {final_score} over the {opp}",
+                ])
+            else:  # tie
+                score_tail = random.choice([
+                    f"in a {final_score} tie against the {opp}",
+                    f"with the game tied {final_score} against the {opp}",
+                ])
+        else:
+            if state_kind == "trailing":
+                score_tail = f"in a {final_score} loss"
+            elif state_kind == "lead":
+                score_tail = f"in a {final_score} win"
+            else:
+                score_tail = f"with the game tied {final_score}"
 
     # opp_in_line1: True for labels where opponent belongs in line1
     # False for HOLD/DOM/CLEAN/TRAFFIC/RELIEF — opponent woven in later
@@ -2130,9 +2155,9 @@ def build_summary(name: str, team: str, s: dict, label: str, context: dict, stre
     else:
         line1 = f"{name} entered {ctx} in relief."
 
-    # Append close-game score to line1 when relevant
-    if score_phrase:
-        line1 = line1.rstrip(".") + f", {score_phrase}."
+    # Append close-game score+opponent tail to line1 when relevant
+    if score_tail:
+        line1 = line1.rstrip(".") + f", {score_tail}."
 
     # line2 — use play-by-play detail when available, fall back to stat prose
     if detail:
@@ -2860,9 +2885,8 @@ async def post_card(channel, p: dict, matchup: str, score: str, context: dict, s
     )
     apply_player_card_chrome(embed, p["name"], p["team"])
 
-    # Layout: impact tag → matchup → game line → summary → pitch count → season
+    # Layout: impact tag → game line → summary → pitch count → season
     embed.add_field(name="", value=f"**{impact_tag(label, s)}**", inline=False)
-    embed.add_field(name="⚾ Matchup", value=matchup, inline=False)
     embed.add_field(name="Game Line", value=format_game_line(s), inline=False)
     embed.add_field(
         name="Summary",
