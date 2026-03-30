@@ -921,8 +921,12 @@ OUT_EVENTS = {
 
 
 def _batter_display_name(full_name: str) -> str:
-    """Return full name for display in summaries."""
-    return str(full_name or "").strip()
+    """Return properly capitalized full name for display in summaries."""
+    name = str(full_name or "").strip()
+    if not name:
+        return name
+    # Title-case as safety net against API sending lowercase names
+    return " ".join(part.capitalize() for part in name.split())
 
 
 def _batting_order_slot(about: dict) -> int:
@@ -939,7 +943,7 @@ def _batting_order_slot(about: dict) -> int:
         return 0
 
 
-def get_pitcher_outing_detail(feed: dict, pitcher_id: int, ip: str = "0.0") -> dict:
+def get_pitcher_outing_detail(feed: dict, pitcher_id: int, ip: str = "0.0", er: int = 0) -> dict:
     """
     Parse play-by-play for a pitcher's outing and return structured detail:
     - strikeouts: list of {name, slot} for batters K'd
@@ -999,8 +1003,11 @@ def get_pitcher_outing_detail(feed: dict, pitcher_id: int, ip: str = "0.0") -> d
             if slot >= 1 and slot <= 6:
                 notable_ks.append(entry)
 
-        # runs scored on this play
-        if rbi > 0:
+        # runs scored on this play — only record if this pitcher was actually
+        # charged with runs (cross-reference against box score ER count).
+        # RBI can be credited to a batter while this pitcher faces them but the
+        # run was charged to a previous pitcher (inherited runner scenario).
+        if rbi > 0 and len(run_events) < er:
             hit_type = EVENT_TO_HIT_TYPE.get(event, "hit")
             run_events.append({
                 "batter": last_name,
@@ -2743,7 +2750,7 @@ async def post_card(channel, p: dict, matchup: str, score: str, context: dict, s
     }
 
     label = classify(s)
-    detail = get_pitcher_outing_detail(feed, p.get("id"), ip=str(p["stats"].get("inningsPitched", "0.0"))) if feed else None
+    detail = get_pitcher_outing_detail(feed, p.get("id"), ip=str(p["stats"].get("inningsPitched", "0.0")), er=safe_int(p["stats"].get("earnedRuns", 0), 0)) if feed else None
 
     # Reclassify: a hold in the 9th or later with a margin <= 3 and runs allowed
     # is a save situation where the pitcher let damage happen — treat as SHAKY_HOLD
