@@ -652,6 +652,9 @@ def impact_tag(label: str, s: dict) -> str:
     if label == "BLOWN":
         return "💥 Lead blown"
 
+    if label == "SHAKY_HOLD":
+        return "⚠️ Shaky in the ninth"
+
     if label == "HOLD":
         if s["er"] == 0:
             return "🧱 Held the line"
@@ -1634,6 +1637,14 @@ def build_analysis(p: dict, s: dict, label: str, context: dict, tracked_info: di
 
     if outing_grade in {"SHAKY", "ROUGH"}:
         traffic = s["h"] + s["bb"]
+        if label == "SHAKY_HOLD":
+            return random.choice([
+                "He technically held the lead, but this was a save situation and he let it get away from him.",
+                "The hold is there on paper, but he was protecting a lead in the ninth and let runs score. That is not the outcome you want.",
+                "He escaped without officially blowing the save, but the lead shrank and the damage was real.",
+                "A hold in a save spot with runs allowed is not a win. He made it harder than it needed to be.",
+                "The lead survived, but he made a mess of a situation that called for a shutdown inning.",
+            ])
         if label == "SAVE":
             return random.choice([
                 "He got the save, but this was shakier than you would want from a closer.",
@@ -1834,6 +1845,8 @@ def build_summary(name: str, team: str, s: dict, label: str, context: dict, stre
             line1 = f"{name} entered {ctx} and locked down the save."
     elif label == "BLOWN":
         line1 = f"{name} entered {ctx} but could not hold the lead and was charged with a blown save."
+    elif label == "SHAKY_HOLD":
+        line1 = f"{name} entered {ctx} in a save situation but allowed runs and let the lead shrink."
     elif label == "HOLD":
         line1 = f"{name} entered {ctx} and held the line to earn the hold."
     elif label == "DOM":
@@ -2544,6 +2557,17 @@ async def post_card(channel, p: dict, matchup: str, score: str, context: dict, s
 
     label = classify(s)
     detail = get_pitcher_outing_detail(feed, p.get("id")) if feed else None
+
+    # Reclassify: a hold in the 9th or later with a margin <= 3 and runs allowed
+    # is a save situation where the pitcher let damage happen — treat as SHAKY_HOLD
+    if (
+        label == "HOLD"
+        and s["er"] > 0
+        and safe_int(context.get("entry_inning"), 0) >= 9
+        and safe_int(context.get("entry_margin", 0), 0) <= 3
+        and context.get("entry_state_kind") == "lead"
+    ):
+        label = "SHAKY_HOLD"
 
     embed = discord.Embed(
         color=TEAM_COLORS.get(normalize_team_abbr(p["team"]), 0x2ECC71),
