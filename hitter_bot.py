@@ -576,7 +576,11 @@ def seconds_until_wake(current_dt: datetime) -> int:
 
 
 def get_random_awake_interval_seconds() -> int:
-    return 10 * 60
+    """Return a random interval in seconds between AWAKE_SCAN_MIN and MAX minutes."""
+    import random as _random
+    min_secs = max(AWAKE_SCAN_MIN_MINUTES, 1) * 60
+    max_secs = max(AWAKE_SCAN_MAX_MINUTES, AWAKE_SCAN_MIN_MINUTES) * 60
+    return _random.randint(min_secs, max_secs)
 
 
 
