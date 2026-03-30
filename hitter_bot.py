@@ -32,7 +32,7 @@ MAX_POSTS_PER_SCAN = int(os.getenv("HITTER_MAX_POSTS_PER_SCAN", "20"))
 MAX_POSTS_PER_GAME_PER_SCAN = int(os.getenv("HITTER_MAX_POSTS_PER_GAME_PER_SCAN", "18"))
 POST_DELAY_SECONDS = float(os.getenv("HITTER_POST_DELAY_SECONDS", "1.25"))
 AWAKE_SCAN_MIN_MINUTES = int(os.getenv("HITTER_AWAKE_SCAN_MIN_MINUTES", "10"))
-AWAKE_SCAN_MAX_MINUTES = int(os.getenv("HITTER_AWAKE_SCAN_MAX_MINUTES", "10"))
+AWAKE_SCAN_MAX_MINUTES = int(os.getenv("HITTER_AWAKE_SCAN_MAX_MINUTES", "8"))
 SLEEP_START_HOUR_ET = int(os.getenv("HITTER_SLEEP_START_HOUR_ET", "3"))
 SLEEP_END_HOUR_ET = int(os.getenv("HITTER_SLEEP_END_HOUR_ET", "13"))
 ESPN_PLAYER_IDS_PATH = os.getenv("ESPN_PLAYER_IDS_PATH", "shared/player_ids/espn_player_ids.json")
@@ -597,18 +597,16 @@ def parse_game_date_et(game: dict):
 
 def get_games() -> list[dict]:
     today = datetime.now(ET).date()
-    yesterday = today - timedelta(days=1)
     games: list[dict] = []
 
-    for target_date in [today, yesterday]:
-        try:
-            response = requests.get(f"{SCHEDULE_URL}&date={target_date.isoformat()}", timeout=REQUEST_TIMEOUT)
-            response.raise_for_status()
-            payload = response.json()
-            for date_block in payload.get("dates", []):
-                games.extend(date_block.get("games", []))
-        except Exception as exc:
-            log(f"Schedule fetch error for {target_date}: {exc}")
+    try:
+        response = requests.get(f"{SCHEDULE_URL}&date={today.isoformat()}", timeout=REQUEST_TIMEOUT)
+        response.raise_for_status()
+        payload = response.json()
+        for date_block in payload.get("dates", []):
+            games.extend(date_block.get("games", []))
+    except Exception as exc:
+        log(f"Schedule fetch error for {today}: {exc}")
     return games
 
 
@@ -1474,7 +1472,6 @@ CONTEXT_FAMILY_POOL = [
 ]
 
 FANTASY_CLOSING_POOL = [
-    "He was dialed in from the first at-bat.",
     "Exactly what you want from him.",
     "He made every at-bat count.",
     "He was locked in all game.",
@@ -3604,18 +3601,21 @@ def build_bad_night_summary(
 
     result = "the " + team_name + " win" if team_won else "a " + team_name + " loss"
 
-    # Build opener
-    parts = [f"{hits}-for-{ab}"]
+    # Build opener with "with" connector and word numbers
+    extras = []
     if strikeouts:
-        parts.append(f"{strikeouts} strikeout{'s' if strikeouts != 1 else ''}")
+        k_word = _word_or_number(strikeouts)
+        extras.append(f"{k_word} strikeout{'s' if strikeouts != 1 else ''}")
     if walks:
-        parts.append(f"a walk" if walks == 1 else f"{_word_or_number(walks)} walks")
+        extras.append("a walk" if walks == 1 else f"{_word_or_number(walks)} walks")
 
-    stat_str = ", ".join(parts[:-1]) + (" and " + parts[-1] if len(parts) > 1 else parts[0])
+    base = f"{hits}-for-{ab}"
+    stat_str = f"{base} with {_join_text(extras)}" if extras else base
+
     opener = random.choice([
-        f"Tough night for **{name}**, who finished {stat_str} in {result}.",
+        f"Tough night for **{name}**, who went {stat_str} in {result}.",
         f"**{name}** went {stat_str} in {result}.",
-        f"Not much going offensively for **{name}** — {stat_str} in {result}.",
+        f"Not much going offensively for **{name}**, going {stat_str} in {result}.",
         f"A quiet one for **{name}**: {stat_str} in {result}.",
     ])
 
@@ -3623,11 +3623,12 @@ def build_bad_night_summary(
 
     # Strikeout context
     if strikeouts >= 3:
+        k_word = _word_or_number(strikeouts)
         sentences.append(random.choice([
-            f"The strikeouts were the story — {last} punched out {strikeouts} times.",
-            f"He had trouble putting the ball in play, fanning {strikeouts} times.",
-            f"Contact was hard to come by, with {strikeouts} punchouts on the night.",
-            f"The bat was slow tonight — {strikeouts} strikeouts tells the story.",
+            f"The strikeouts were the story, with {last} punching out {k_word} times.",
+            f"He had trouble putting the ball in play, fanning {k_word} times.",
+            f"Contact was hard to come by, with {k_word} punchouts on the night.",
+            f"The bat was slow tonight, and {k_word} strikeouts tells the story.",
         ]))
 
     # Pitcher context — good pitcher makes a bad night more excusable
@@ -3664,11 +3665,12 @@ def build_bad_night_summary(
         total_hitless = hitless_streak + (1 if hits == 0 else 0)
 
         if total_hitless >= 3:
+            n_word = _word_or_number(total_hitless)
             sentences.append(random.choice([
-                f"This is now {total_hitless} straight games without a hit — a real cold stretch.",
-                f"He's now gone {total_hitless} straight without a hit. Worth monitoring.",
-                f"The cold stretch continues — {total_hitless} consecutive hitless games.",
-                f"That makes {total_hitless} games in a row without a hit.",
+                f"This is now {n_word} straight games without a hit, a real cold stretch.",
+                f"He's now gone {n_word} straight without a hit. Worth monitoring.",
+                f"The cold stretch continues with {n_word} consecutive hitless games.",
+                f"That makes {n_word} games in a row without a hit.",
             ]))
         elif total_hitless >= 2:
             sentences.append(random.choice([
@@ -3682,11 +3684,12 @@ def build_bad_night_summary(
 
 def build_slump_subject(name: str, hitless_streak: int) -> str:
     last = _last_name(name)
+    n_word = _word_or_number(hitless_streak)
     return random.choice([
-        f"{name} extends hitless streak to {hitless_streak} games",
-        f"The cold stretch continues for {name} — {hitless_streak} straight without a hit",
-        f"{name} still searching for a hit, now {hitless_streak} games deep",
-        f"No end in sight for {last} slump — {hitless_streak} games without a hit",
+        f"{name} extends hitless streak to {n_word} games",
+        f"The cold stretch continues for {name}, now {n_word} straight without a hit",
+        f"{name} still searching for a hit, now {n_word} games deep",
+        f"No end in sight for {last} slump, {n_word} games without a hit",
         f"{name} goes hitless for the {_ordinal(hitless_streak)} straight game",
     ])
 
@@ -3717,11 +3720,12 @@ def build_slump_summary(
         parts.append("a walk" if walks == 1 else f"{_word_or_number(walks)} walks")
     stat_str = ", ".join(parts[:-1]) + (" and " + parts[-1] if len(parts) > 1 else parts[0])
 
+    n_word = _word_or_number(hitless_streak)
     opener = random.choice([
-        f"**{name}** went {stat_str} in {result}, extending his hitless streak to {hitless_streak} games.",
-        f"Still no hits for **{name}** — {stat_str} in {result} makes it {hitless_streak} straight.",
-        f"**{name}** is now {hitless_streak} games without a hit after going {stat_str} in {result}.",
-        f"The drought continues for **{name}**: {stat_str} in {result}, now {hitless_streak} straight hitless.",
+        f"**{name}** went {stat_str} in {result}, extending his hitless streak to {n_word} games.",
+        f"Still no hits for **{name}**, going {stat_str} in {result} and making it {n_word} straight.",
+        f"**{name}** is now {n_word} games without a hit after going {stat_str} in {result}.",
+        f"The drought continues for **{name}**: {stat_str} in {result}, now {n_word} straight hitless.",
     ])
 
     sentences = [opener]
@@ -3729,10 +3733,13 @@ def build_slump_summary(
     # Recent slump context
     recent_ab = sum(g.get("ab", 0) for g in recent_games[:hitless_streak - 1])
     if recent_ab > 0:
+        total_ab = recent_ab + ab
+        ab_word = _word_or_number(total_ab) if total_ab <= 10 else str(total_ab)
+        g_word = _word_or_number(hitless_streak)
         sentences.append(random.choice([
-            f"He's gone {recent_ab + ab} at-bats without a hit over this stretch.",
-            f"Over the last {hitless_streak} games he's been held hitless across {recent_ab + ab} at-bats.",
-            f"That's {recent_ab + ab} consecutive at-bats without a knock.",
+            f"He's gone {ab_word} at-bats without a hit over this stretch.",
+            f"Over the last {g_word} games he's been held hitless across {ab_word} at-bats.",
+            f"That's {ab_word} consecutive at-bats without a knock.",
         ]))
 
     # Pitcher context — good arm softens the slump narrative
