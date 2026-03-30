@@ -1106,24 +1106,37 @@ def build_line2_from_detail(s: dict, detail: dict, ip_text: str) -> str:
 
     # --- runs allowed ---
     if run_events:
-        run_sentences = []
+        run_parts = []
         for ev in run_events:
             batter = ev["batter"]
             hit_type = ev["hit_type"]
             rbi = ev["rbi"]
             if rbi == 1:
-                run_sentences.append(random.choice([
-                    f"An RBI {hit_type} by {batter} did the damage.",
-                    f"A {hit_type} from {batter} plated the run.",
-                    f"{batter} drove in the run with a {hit_type}.",
+                run_parts.append(random.choice([
+                    f"an RBI {hit_type} by {batter}",
+                    f"a {hit_type} from {batter} that plated a run",
                 ]))
             else:
-                run_sentences.append(random.choice([
-                    f"A {rbi}-run {hit_type} by {batter} did the damage.",
-                    f"{batter} hit a {hit_type} that scored {number_word(rbi)}.",
-                    f"{batter}'s {hit_type} brought {number_word(rbi)} runs home.",
+                run_parts.append(random.choice([
+                    f"a {rbi}-run {hit_type} by {batter}",
+                    f"{batter}'s {hit_type} that scored {number_word(rbi)}",
                 ]))
-        pieces.extend(run_sentences)
+
+        if len(run_parts) == 1:
+            # Single event — full sentence with varied endings
+            part = run_parts[0]
+            pieces.append(random.choice([
+                f"{part.capitalize()} did the damage.",
+                f"The damage came on {part}.",
+                f"He gave up {part} to allow the run{'s' if er > 1 else ''}.",
+            ]))
+        else:
+            # Multiple events — join them naturally into one sentence
+            joined = _name_list(run_parts)
+            pieces.append(random.choice([
+                f"{joined.capitalize()} did the damage.",
+                f"The damage came on {joined}.",
+            ]))
     elif s["er"] > 0:
         # Runs scored but no RBI play found — inherited runners scored on walks/wild pitches/etc.
         run_text = stat_phrase(s["er"], "run")
@@ -1945,7 +1958,8 @@ def build_summary(name: str, team: str, s: dict, label: str, context: dict, stre
     elif label == "BLOWN":
         line1 = f"{name} entered {ctx} but could not hold the lead and was charged with a blown save."
     elif label == "SHAKY_HOLD":
-        line1 = f"{name} entered {ctx} in a save situation but allowed runs and let the lead shrink."
+        run_text = stat_phrase(er, "run")
+        line1 = f"{name} entered {ctx} in a save situation but allowed {run_text} and let the lead shrink."
     elif label == "HOLD":
         line1 = f"{name} entered {ctx} and held the line to earn the hold."
     elif label == "DOM":
