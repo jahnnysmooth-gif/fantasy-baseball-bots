@@ -852,6 +852,289 @@ def get_pitcher_entry_context(feed: dict, pitcher_id: int, pitcher_side: str):
 
 
 
+# ---------------- OUTING DETAIL ----------------
+
+# Common last names that appear for multiple active MLB players — first initial not needed
+# since we're always last-name only, but keeping a small set of genuinely ambiguous pairs
+# as a future hook. For now: always last name only per design decision.
+
+EVENT_TO_HIT_TYPE = {
+    "Single": "single",
+    "Double": "double",
+    "Triple": "triple",
+    "Home Run": "homer",
+    "Ground Rule Double": "ground-rule double",
+}
+
+# Result events that end an at-bat with an out recorded by the pitcher
+OUT_EVENTS = {
+    "Strikeout", "Groundout", "Flyout", "Pop Out", "Lineout",
+    "Forceout", "Double Play", "Triple Play", "Grounded Into DP",
+    "Bunt Groundout", "Bunt Pop Out", "Fielders Choice Out",
+    "Sac Fly", "Sac Bunt",
+}
+
+
+def _batter_last_name(full_name: str) -> str:
+    """Return last name from a full name string."""
+    parts = str(full_name or "").strip().split()
+    return parts[-1] if parts else full_name
+
+
+def _batting_order_slot(about: dict) -> int:
+    """
+    MLB API stores battingOrder as a 3-digit int: 100=1st, 200=2nd, ... 900=9th.
+    Returns 1-9, or 0 if not available.
+    """
+    raw = about.get("battingOrder")
+    if raw is None:
+        return 0
+    try:
+        return int(str(raw)[0])
+    except Exception:
+        return 0
+
+
+def get_pitcher_outing_detail(feed: dict, pitcher_id: int) -> dict:
+    """
+    Parse play-by-play for a pitcher's outing and return structured detail:
+    - strikeouts: list of {name, slot} for batters K'd
+    - notable_ks: subset where slot <= 6
+    - run_events: list of {batter, hit_type, rbi, slot} for plays that scored runs
+    - runners_left_on: total LOB across the outing
+    - heart_of_order_retired: list of last names retired in slots 3-5
+    - heart_of_order_faced: list of last names faced in slots 3-5
+    """
+    empty = {
+        "strikeouts": [],
+        "notable_ks": [],
+        "run_events": [],
+        "runners_left_on": 0,
+        "heart_of_order_retired": [],
+        "heart_of_order_faced": [],
+    }
+
+    if not feed or pitcher_id is None:
+        return empty
+
+    plays = feed.get("liveData", {}).get("plays", {}).get("allPlays", [])
+    if not plays:
+        return empty
+
+    strikeouts = []
+    notable_ks = []
+    run_events = []
+    runners_left_on = 0
+    heart_faced = []
+    heart_retired = []
+
+    for play in plays:
+        matchup = play.get("matchup", {})
+        if matchup.get("pitcher", {}).get("id") != pitcher_id:
+            continue
+
+        about = play.get("about", {})
+        result = play.get("result", {})
+        batter = matchup.get("batter", {})
+        batter_name = batter.get("fullName", "")
+        last_name = _batter_last_name(batter_name)
+        slot = _batting_order_slot(about)
+        event = result.get("event", "")
+        rbi = safe_int(result.get("rbi", 0), 0)
+
+        # strikeouts
+        if event == "Strikeout":
+            entry = {"name": last_name, "slot": slot}
+            strikeouts.append(entry)
+            if slot >= 1 and slot <= 6:
+                notable_ks.append(entry)
+
+        # runs scored on this play
+        if rbi > 0:
+            hit_type = EVENT_TO_HIT_TYPE.get(event, "hit")
+            run_events.append({
+                "batter": last_name,
+                "hit_type": hit_type,
+                "rbi": rbi,
+                "slot": slot,
+            })
+
+        # runners left on base — use end-of-play runner count when out ends inning
+        # MLB API: runners left on base in `result.isOut` + runners on base at end
+        runners_on = len(play.get("runners", []))
+        is_out = result.get("isOut", False)
+        # Count LOB: runners stranded when the 3rd out is recorded
+        end_outs = safe_int(about.get("endOuts", about.get("outs", 0)), 0)
+        if is_out and end_outs == 3:
+            # end of inning — runners on base at that moment are stranded
+            runners_left_on += runners_on
+
+        # heart of order (slots 3-5)
+        if slot >= 3 and slot <= 5:
+            heart_faced.append(last_name)
+            if event in OUT_EVENTS or event == "Strikeout":
+                heart_retired.append(last_name)
+
+    return {
+        "strikeouts": strikeouts,
+        "notable_ks": notable_ks,
+        "run_events": run_events,
+        "runners_left_on": runners_left_on,
+        "heart_of_order_retired": heart_retired,
+        "heart_of_order_faced": heart_faced,
+    }
+
+
+def _name_list(names: list) -> str:
+    """Format a list of last names naturally: 'Tatis', 'Tatis and Machado', 'Tatis, Machado, and Freeman'."""
+    if not names:
+        return ""
+    if len(names) == 1:
+        return names[0]
+    if len(names) == 2:
+        return f"{names[0]} and {names[1]}"
+    return ", ".join(names[:-1]) + f", and {names[-1]}"
+
+
+def build_line2_from_detail(s: dict, detail: dict, ip_text: str) -> str:
+    """
+    Build the outing detail sentence using play-by-play data.
+    Falls back to stat-based prose if detail is sparse.
+    """
+    er = s["er"]
+    h = s["h"]
+    bb = s["bb"]
+    k = s["k"]
+    outs_recorded = baseball_ip_to_outs(s["ip"])
+
+    notable_ks = detail.get("notable_ks", [])
+    notable_k_names = [e["name"] for e in notable_ks]
+    run_events = detail.get("run_events", [])
+    lob = detail.get("runners_left_on", 0)
+    heart_retired = detail.get("heart_of_order_retired", [])
+    heart_faced = detail.get("heart_of_order_faced", [])
+
+    pieces = []
+
+    # --- runs allowed ---
+    if run_events:
+        run_parts = []
+        for ev in run_events:
+            batter = ev["batter"]
+            hit_type = ev["hit_type"]
+            rbi = ev["rbi"]
+            if rbi == 1:
+                run_parts.append(random.choice([
+                    f"an RBI {hit_type} by {batter}",
+                    f"a {hit_type} from {batter} that plated a run",
+                    f"{batter}'s {hit_type} brought one in",
+                ]))
+            else:
+                run_parts.append(random.choice([
+                    f"a {rbi}-run {hit_type} by {batter}",
+                    f"{batter}'s {hit_type} scored {number_word(rbi)}",
+                    f"a {hit_type} from {batter} that scored {number_word(rbi)}",
+                ]))
+        run_str = _name_list(run_parts) if len(run_parts) <= 2 else f"{number_word(er)} runs"
+        pieces.append(random.choice([
+            f"He allowed {run_str}.",
+            f"The damage came on {run_str}.",
+            f"{run_str.capitalize()} did the damage.",
+        ]))
+    elif er == 0 and h == 0 and bb == 0:
+        # perfect outing
+        if outs_recorded == 1:
+            pieces.append("He retired the lone batter he faced.")
+        else:
+            pieces.append(random.choice([
+                f"He retired all hitters he faced over {ip_text}.",
+                f"He was spotless over {ip_text}, getting through the inning without allowing a baserunner.",
+            ]))
+    elif er == 0:
+        # runners on but none scored
+        if lob > 0:
+            lob_text = "a runner" if lob == 1 else f"{number_word(lob)} runners"
+            pieces.append(random.choice([
+                f"He stranded {lob_text} and kept the inning scoreless.",
+                f"He left {lob_text} on base but held the line.",
+                f"There were baserunners, but he kept {lob_text} stranded.",
+            ]))
+        else:
+            hit_text = stat_phrase(h, "hit")
+            walk_text = stat_phrase(bb, "walk")
+            pieces.append(random.choice([
+                f"He worked around {hit_text} and {walk_text} to keep the inning scoreless.",
+                f"He allowed {hit_text} and {walk_text} but held the damage at zero.",
+            ]))
+
+    # --- strikeouts ---
+    if notable_k_names:
+        k_list = _name_list(notable_k_names)
+        if len(notable_k_names) == k:
+            # all strikeouts were notable batters
+            pieces.append(random.choice([
+                f"He struck out {k_list}.",
+                f"His strikeouts came against {k_list}.",
+                f"He punched out {k_list}.",
+            ]))
+        else:
+            # mix of notable and non-notable
+            others = k - len(notable_k_names)
+            other_text = f"{number_word(others)} {'other' if others == 1 else 'others'}"
+            pieces.append(random.choice([
+                f"He struck out {k_list} among his {number_word(k)} punchouts.",
+                f"His strikeouts included {k_list}.",
+                f"He got {k_list}, plus {other_text}, on strikeouts.",
+            ]))
+    elif k > 0:
+        # strikeouts but no notable batters — just the count, no names
+        pieces.append(random.choice([
+            f"He struck out {number_word(k)}.",
+            f"He collected {stat_phrase(k, 'strikeout')} in the outing.",
+        ]))
+
+    # --- heart of order ---
+    if heart_faced:
+        if heart_retired and len(heart_retired) == len(heart_faced):
+            # retired all heart-of-order batters he faced
+            heart_list = _name_list(heart_retired)
+            pieces.append(random.choice([
+                f"He retired {heart_list} cleanly.",
+                f"He got through {heart_list} without issue.",
+                f"{heart_list} went down without doing any damage.",
+                f"He handled {heart_list} in the heart of their order.",
+            ]))
+        elif heart_retired:
+            # retired some but not all
+            heart_list = _name_list(heart_retired)
+            pieces.append(random.choice([
+                f"He got {heart_list} out of the middle of their order.",
+                f"{heart_list} couldn't do anything with him.",
+            ]))
+
+    # --- LOB when runs were scored (context for rough outings) ---
+    if run_events and lob > 0:
+        lob_text = "a runner" if lob == 1 else f"{number_word(lob)} runners"
+        pieces.append(random.choice([
+            f"He also left {lob_text} stranded.",
+            f"He stranded {lob_text} in addition to the runs that crossed.",
+        ]))
+
+    if not pieces:
+        # absolute fallback to stat-based prose
+        hit_text = stat_phrase(h, "hit")
+        walk_text = stat_phrase(bb, "walk")
+        run_text = stat_phrase(er, "run")
+        if er == 0:
+            line = f"He worked {ip_text}, allowing {hit_text} and {walk_text}"
+        else:
+            line = f"He allowed {run_text} over {ip_text} on {hit_text} and {walk_text}"
+        k_part = strikeout_phrase(k)
+        return line + (f" {k_part}." if k_part else ".")
+
+    return " ".join(pieces)
+
+
 def build_context_phrase(context: dict) -> str:
     bits = []
     if context.get("entry_phrase"):
@@ -1484,7 +1767,7 @@ def build_analysis(p: dict, s: dict, label: str, context: dict, tracked_info: di
 
 
 
-def build_summary(name: str, team: str, s: dict, label: str, context: dict, streak_count: int, tracked_info: dict, recent_appearances, usage_note: str = "", velocity_alert: dict = None):
+def build_summary(name: str, team: str, s: dict, label: str, context: dict, streak_count: int, tracked_info: dict, recent_appearances, usage_note: str = "", velocity_alert: dict = None, detail: dict = None):
     ip_text = format_ip_for_summary(s["ip"])
     outs_recorded = baseball_ip_to_outs(s["ip"])
     er = s["er"]
@@ -1526,30 +1809,33 @@ def build_summary(name: str, team: str, s: dict, label: str, context: dict, stre
     else:
         line1 = f"{name} entered {ctx} in relief."
 
-    hit_text = stat_phrase(h, "hit")
-    walk_text = stat_phrase(bb, "walk")
-    run_text = stat_phrase(er, "run")
-
-    if outs_recorded == 1:
-        if er == 0 and h == 0 and bb == 0:
-            line2 = "He retired the lone batter he faced."
-        elif er == 0:
-            line2 = f"He got the out he was asked to get, allowing {hit_text} and {walk_text}."
-        else:
-            line2 = f"He recorded one out while allowing {run_text} on {hit_text} and {walk_text}."
-    elif er == 0 and h == 0 and bb == 0:
-        if k > 0:
-            line2 = f"He retired all hitters he faced over {ip_text} {strikeout_phrase(k).replace('while ', '')}."
-        else:
-            line2 = f"He retired all hitters he faced over {ip_text}."
-    elif er == 0:
-        line2 = f"He worked {ip_text}, allowing {hit_text} and {walk_text}"
-        k_part = strikeout_phrase(k)
-        line2 += f" {k_part}." if k_part else "."
+    # line2 — use play-by-play detail when available, fall back to stat prose
+    if detail:
+        line2 = build_line2_from_detail(s, detail, ip_text)
     else:
-        line2 = f"He allowed {run_text} over {ip_text} on {hit_text} and {walk_text}"
-        k_part = strikeout_phrase(k)
-        line2 += f" {k_part}." if k_part else "."
+        hit_text = stat_phrase(h, "hit")
+        walk_text = stat_phrase(bb, "walk")
+        run_text = stat_phrase(er, "run")
+        if outs_recorded == 1:
+            if er == 0 and h == 0 and bb == 0:
+                line2 = "He retired the lone batter he faced."
+            elif er == 0:
+                line2 = f"He got the out he was asked to get, allowing {hit_text} and {walk_text}."
+            else:
+                line2 = f"He recorded one out while allowing {run_text} on {hit_text} and {walk_text}."
+        elif er == 0 and h == 0 and bb == 0:
+            if k > 0:
+                line2 = f"He retired all hitters he faced over {ip_text} {strikeout_phrase(k).replace('while ', '')}."
+            else:
+                line2 = f"He retired all hitters he faced over {ip_text}."
+        elif er == 0:
+            line2 = f"He worked {ip_text}, allowing {hit_text} and {walk_text}"
+            k_part = strikeout_phrase(k)
+            line2 += f" {k_part}." if k_part else "."
+        else:
+            line2 = f"He allowed {run_text} over {ip_text} on {hit_text} and {walk_text}"
+            k_part = strikeout_phrase(k)
+            line2 += f" {k_part}." if k_part else "."
 
     analysis = build_analysis(
         p={"name": name, "team": team},
@@ -2206,7 +2492,7 @@ def get_pitchers(feed: dict):
 
 # ---------------- POST ----------------
 
-async def post_card(channel, p: dict, matchup: str, score: str, context: dict, streak_count: int, tracked_info: dict, recent_appearances, usage_note: str = "", velocity_alert: dict = None):
+async def post_card(channel, p: dict, matchup: str, score: str, context: dict, streak_count: int, tracked_info: dict, recent_appearances, usage_note: str = "", velocity_alert: dict = None, feed: dict = None):
     s = {
         "ip": str(p["stats"].get("inningsPitched", "0.0")),
         "h": safe_int(p["stats"].get("hits", 0), 0),
@@ -2219,6 +2505,7 @@ async def post_card(channel, p: dict, matchup: str, score: str, context: dict, s
     }
 
     label = classify(s)
+    detail = get_pitcher_outing_detail(feed, p.get("id")) if feed else None
 
     embed = discord.Embed(
         color=TEAM_COLORS.get(normalize_team_abbr(p["team"]), 0x2ECC71),
@@ -2244,6 +2531,7 @@ async def post_card(channel, p: dict, matchup: str, score: str, context: dict, s
             recent_appearances,
             usage_note=usage_note,
             velocity_alert=velocity_alert,
+            detail=detail,
         ),
         inline=False,
     )
@@ -2352,6 +2640,7 @@ async def loop():
                         recent_appearances,
                         usage_note=usage_note,
                         velocity_alert=velocity_alert if is_tracked else None,
+                        feed=feed,
                     )
 
                     if (not is_tracked) and should_post_velocity_alert(state, pitcher_id, game_id, velocity_alert, now_et):
