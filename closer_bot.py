@@ -2019,7 +2019,7 @@ def build_analysis(p: dict, s: dict, label: str, context: dict, tracked_info: di
 
 
 
-def build_summary(name: str, team: str, s: dict, label: str, context: dict, streak_count: int, tracked_info: dict, recent_appearances, usage_note: str = "", velocity_alert: dict = None, detail: dict = None, opp_name: str = "", final_score: str = ""):
+def build_summary(name: str, team: str, s: dict, label: str, context: dict, streak_count: int, tracked_info: dict, recent_appearances, usage_note: str = "", velocity_alert: dict = None, detail: dict = None, opp_name: str = "", pitcher_score: int = 0, opp_score: int = 0):
     ip_text = format_ip_for_summary(s["ip"])
     outs_recorded = baseball_ip_to_outs(s["ip"])
     er = s["er"]
@@ -2045,36 +2045,38 @@ def build_summary(name: str, team: str, s: dict, label: str, context: dict, stre
     opp_phrase = f"against the {opp}" if opp else ""
 
     # Combined score + opponent tail phrase for close games (margin <= 2)
-    # Produces natural endings like "in a 6-3 loss to the Nationals" or "in a 3-3 tie against the Cardinals"
     margin = safe_int(context.get("entry_margin", 0), 0)
     state_kind = context.get("entry_state_kind", "")
     score_tail = ""
-    if final_score and margin <= 2 and state_kind in {"lead", "trailing", "tie"}:
+    if (pitcher_score > 0 or opp_score > 0) and margin <= 2 and state_kind in {"lead", "trailing", "tie"}:
+        win_score = max(pitcher_score, opp_score)
+        lose_score = min(pitcher_score, opp_score)
+        score_num = f"{win_score}-{lose_score}"
         if opp:
             if state_kind == "trailing":
                 score_tail = random.choice([
-                    f"in a {final_score} loss to the {opp}",
-                    f"as the {opp} pulled away {final_score}",
-                    f"with the {opp} winning {final_score}",
+                    f"in a {score_num} loss to the {opp}",
+                    f"as the {opp} won {score_num}",
+                    f"with the {opp} taking it {score_num}",
                 ])
             elif state_kind == "lead":
                 score_tail = random.choice([
-                    f"in a {final_score} win over the {opp}",
-                    f"as his team held on {final_score} against the {opp}",
-                    f"with the final score {final_score} over the {opp}",
+                    f"in a {score_num} win over the {opp}",
+                    f"as his team held on {score_num} against the {opp}",
+                    f"to help seal a {score_num} win over the {opp}",
                 ])
-            else:  # tie
+            else:
                 score_tail = random.choice([
-                    f"in a {final_score} tie against the {opp}",
-                    f"with the game tied {final_score} against the {opp}",
+                    f"with the score tied {lose_score}-{lose_score} against the {opp}",
+                    f"in a {lose_score}-{lose_score} tie against the {opp}",
                 ])
         else:
             if state_kind == "trailing":
-                score_tail = f"in a {final_score} loss"
+                score_tail = f"in a {score_num} loss"
             elif state_kind == "lead":
-                score_tail = f"in a {final_score} win"
+                score_tail = f"in a {score_num} win"
             else:
-                score_tail = f"with the game tied {final_score}"
+                score_tail = f"with the score tied {lose_score}-{lose_score}"
 
     # opp_in_line1: True for labels where opponent belongs in line1
     # False for HOLD/DOM/CLEAN/TRAFFIC/RELIEF — opponent woven in later
@@ -2873,11 +2875,12 @@ async def post_card(channel, p: dict, matchup: str, score: str, context: dict, s
     # Determine opponent team name from pitcher's side
     if p["side"] == "home":
         opp_name = away_team_name or ""
+        pitcher_score = home_score
+        opp_score = away_score
     else:
         opp_name = home_team_name or ""
-
-    # Final score for summary context
-    final_score = score
+        pitcher_score = away_score
+        opp_score = home_score
 
     embed = discord.Embed(
         color=TEAM_COLORS.get(normalize_team_abbr(p["team"]), 0x2ECC71),
@@ -2903,7 +2906,8 @@ async def post_card(channel, p: dict, matchup: str, score: str, context: dict, s
             velocity_alert=velocity_alert,
             detail=detail,
             opp_name=opp_name,
-            final_score=final_score,
+            pitcher_score=pitcher_score,
+            opp_score=opp_score,
         ),
         inline=False,
     )
