@@ -85,6 +85,7 @@ pitching_stats_cache = {}
 player_meta_cache = {}
 team_hitting_cache = {}   # (team_abbr, season) -> hitting stats dict or None
 team_id_cache = {}        # abbr -> mlb team id
+next_start_cache = {}     # pitcher_id -> next start info dict or None
 
 ESPN_PLAYER_IDS_PATH = os.getenv("ESPN_PLAYER_IDS_PATH", "shared/player_ids/espn_player_ids.json")
 player_headshot_index = None
@@ -2878,7 +2879,7 @@ def build_starter_summary(
     debut_sentence     = build_starter_debut_sentence(p, label, seed, recent_appearances)
     next_start_sentence = build_starter_next_start_sentence(p, label, seed, next_start, season)
 
-    cap = 5 if label in {"GEM", "DOMINANT"} else 4
+    cap = 6 if label in {"GEM", "DOMINANT"} else 5
 
     if is_bad_starter_label(label):
         order_options = [
@@ -2922,7 +2923,7 @@ def build_starter_summary(
         if len(final_sentences) >= cap:
             break
 
-    if len(final_sentences) < 3:
+    if len(final_sentences) < 4:
         fillers = [
             flow_sentence, stat_sentence, pressure_sentence, team_sentence,
             csw_sentence, pitch_sentence, velocity_sentence, positive_sentence,
@@ -3284,13 +3285,11 @@ async def loop():
 
                     key = f"{game_id}_{pid}"
                     if key in posted:
-                        continue
-
-                    score = starter_score(p["stats"])
-                    if score < MIN_STARTER_SCORE:
+                        log(f"Skipping {p['name']} | {p['team']} — already posted")
                         continue
 
                     if posted_this_game >= MAX_STARTER_CARDS_PER_GAME:
+                        log(f"Skipping {p['name']} | {p['team']} — per-game cap ({MAX_STARTER_CARDS_PER_GAME}) reached")
                         break
 
                     # Opponent hitting is the other team's stats from this pitcher's perspective
@@ -3302,7 +3301,7 @@ async def loop():
                     next_start = await asyncio.to_thread(
                         get_next_start, pid, p.get("team", ""), game_date_et
                     )
-                    log(f"Posting {p['name']} | {p['team']} | {score_value} | score={score}")
+                    log(f"Posting {p['name']} | {p['team']} | {score_value}")
                     await post_card(
                         channel, p, game_context, score_value,
                         recent_appearances=recent_appearances,
