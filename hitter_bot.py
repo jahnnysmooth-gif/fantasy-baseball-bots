@@ -1471,7 +1471,7 @@ CONTEXT_FAMILY_POOL = [
     "He {event_text} {inning_text} and that was the ballgame.",
     "The offense really got going {inning_text}, with him leading the way.",
     "He made it count {inning_text} when he {event_text}.",
-    "That {inning_text} at-bat was the one that defined his night.",
+    "That {inning_short} at-bat was the one that defined his night.",
     "He stepped up {inning_text} and {event_text}.",
 ]
 
@@ -3105,10 +3105,21 @@ def _event_text_from_context(context: dict) -> tuple[str, str]:
             rbi_desc = random.choice(["went deep", "left the yard", "hit a homer"])
 
         # Weave in pitch type ~60% of the time if available
+        # Build a clean location string for attaching to rbi_desc
+        # Strip "a fly ball/line drive" prefix since rbi_desc already names the hit
+        clean_loc = ""
+        if loc_phrase:
+            if loc_phrase.startswith("a "):
+                # "a fly ball to left" → "to left"
+                parts = loc_phrase.split(" to ", 1)
+                clean_loc = "to " + parts[1] if len(parts) == 2 else ""
+            else:
+                clean_loc = loc_phrase  # already plain like "to left field"
+
         if pitch_phrase and random.random() < 0.6:
             hr_text = f"{rbi_desc} off {pitch_phrase}"
-        elif loc_phrase and random.random() < 0.5:
-            hr_text = f"{rbi_desc} {loc_phrase}"
+        elif clean_loc and random.random() < 0.5:
+            hr_text = f"{rbi_desc} {clean_loc}"
         else:
             hr_text = rbi_desc
 
@@ -3118,10 +3129,19 @@ def _event_text_from_context(context: dict) -> tuple[str, str]:
         inning = safe_int(xbh[0].get("inning", 0), 0)
         rbi = safe_int(xbh[0].get("rbi", 0), 0)
         rbi_piece = f", driving in {_word_or_number(rbi)}" if rbi else ""
+        loc_xbh = ""
+        xbh_location = xbh[0].get("location", "")
+        xbh_trajectory = xbh[0].get("trajectory", "")
+        if xbh_location == "left":
+            loc_xbh = " to left"
+        elif xbh_location == "right":
+            loc_xbh = " to right"
+        elif xbh_location == "center":
+            loc_xbh = " to center"
         xbh_text = random.choice([
-            f"ripped a {hit_type}{rbi_piece}",
+            f"ripped a {hit_type}{loc_xbh}{rbi_piece}",
             f"drove a {hit_type} into the gap{rbi_piece}",
-            f"lined a {hit_type}{rbi_piece}",
+            f"lined a {hit_type}{loc_xbh}{rbi_piece}",
             f"punched a {hit_type} the other way{rbi_piece}",
         ])
         return xbh_text, f"in the {_ordinal(inning)}" if inning else ""
@@ -3233,10 +3253,19 @@ def build_hitter_summary(
     used_signatures: set[str] = {"opening"}
 
     event_text, inning_text = _event_text_from_context(context)
+    # inning_short strips "in the " for templates like "That 5th at-bat..."
+    inning_short = inning_text.replace("in the ", "").strip() if inning_text else ""
     context_pool: list[str] = []
     if event_text:
         for template in SUMMARY_CONTEXT_FAMILIES:
-            context_pool.append(template.format(event_text=event_text, inning_text=inning_text or ""))
+            try:
+                context_pool.append(template.format(
+                    event_text=event_text,
+                    inning_text=inning_text or "",
+                    inning_short=inning_short or "",
+                ))
+            except KeyError:
+                context_pool.append(template.format(event_text=event_text, inning_text=inning_text or ""))
 
     fantasy_key = "general"
     if homers >= 2:
