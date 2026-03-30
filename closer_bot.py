@@ -767,6 +767,7 @@ def get_pitcher_entry_context(feed: dict, pitcher_id: int, pitcher_side: str):
             "entry_margin": 0,
             "entry_inning": None,
             "inherited_runners": 0,
+            "relieved_pitcher": "",
             "finished_game": False,
         }
 
@@ -786,6 +787,7 @@ def get_pitcher_entry_context(feed: dict, pitcher_id: int, pitcher_side: str):
             "entry_margin": 0,
             "entry_inning": None,
             "inherited_runners": 0,
+            "relieved_pitcher": "",
             "finished_game": False,
         }
 
@@ -802,15 +804,15 @@ def get_pitcher_entry_context(feed: dict, pitcher_id: int, pitcher_side: str):
     # If this pitcher started the inning (first_idx == 0 or previous play was a different inning),
     # outs at entry = 0.
     entry_outs = 0
+    relieved_pitcher = ""
     if first_idx > 0:
         prev_play = plays[first_idx - 1]
         prev_about = prev_play.get("about", {})
         prev_inning = prev_about.get("inning")
         prev_half = prev_about.get("halfInning", "")
         if prev_inning == inning and prev_half == half:
-            # same inning half — outs at entry = outs at end of previous at-bat
             entry_outs = safe_int(prev_about.get("endOuts", prev_about.get("outs", 0)), 0)
-        # different inning half means this pitcher started the inning — entry_outs stays 0
+            relieved_pitcher = str(prev_play.get("matchup", {}).get("pitcher", {}).get("fullName", "") or "").strip()
 
     entry_phrase = ""
     if inning is not None and half:
@@ -889,6 +891,7 @@ def get_pitcher_entry_context(feed: dict, pitcher_id: int, pitcher_side: str):
         "entry_margin": abs_diff,
         "entry_inning": inning,
         "inherited_runners": inherited_count,
+        "relieved_pitcher": relieved_pitcher,
         "finished_game": (last_idx == len(plays) - 1),
     }
 
@@ -1138,13 +1141,28 @@ def build_line2_from_detail(s: dict, detail: dict, ip_text: str) -> str:
                 f"The damage came on {joined}.",
             ]))
     elif s["er"] > 0:
-        # Runs scored but no RBI play found — inherited runners scored on walks/wild pitches/etc.
+        # Runs scored but no RBI play detected — score via walks, wild pitches, passed balls, etc.
+        # Use the box score stats to describe what happened as specifically as possible.
         run_text = stat_phrase(s["er"], "run")
-        pieces.append(random.choice([
-            f"He allowed {run_text} to score, likely inherited runners crossing on walks or wild pitches.",
-            f"{run_text.capitalize()} scored during his appearance.",
-            f"He let {run_text} cross the plate during his time on the mound.",
-        ]))
+        if bb > 0 and h == 0:
+            walk_text = stat_phrase(bb, "walk")
+            pieces.append(random.choice([
+                f"He allowed {run_text} to score after issuing {walk_text} and loading the bases.",
+                f"The {run_text} scored after he walked {number_word(bb)} — no hits required.",
+                f"He put {number_word(bb)} on via walks and the damage came without a hit.",
+            ]))
+        elif bb > 0 and h > 0:
+            hit_text = stat_phrase(h, "hit")
+            walk_text = stat_phrase(bb, "walk")
+            pieces.append(random.choice([
+                f"He allowed {run_text} to score on {hit_text} and {walk_text}.",
+                f"A combination of {hit_text} and {walk_text} led to {run_text} scoring.",
+            ]))
+        else:
+            pieces.append(random.choice([
+                f"{run_text.capitalize()} scored during his appearance.",
+                f"He allowed {run_text} to cross the plate.",
+            ]))
     elif er == 0 and h == 0 and bb == 0:
         # perfect outing
         if outs_recorded == 1:
@@ -1806,6 +1824,23 @@ def build_analysis(p: dict, s: dict, label: str, context: dict, tracked_info: di
         ])
 
     if role == "closer":
+        if label == "SAVE" and safe_int(context.get("inherited_runners", 0), 0) > 0:
+            inherited = safe_int(context.get("inherited_runners", 0), 0)
+            runner_text = "an inherited runner" if inherited == 1 else f"{number_word(inherited)} inherited runners"
+            prev_pitcher = str(context.get("relieved_pitcher", "") or "").strip()
+            relieved_str = f" relieving {prev_pitcher}" if prev_pitcher else ""
+            if outing_grade in {"DOMINANT", "CLEAN"}:
+                return random.choice([
+                    f"Coming in{relieved_str} to handle {runner_text} and still closing it out is exactly what you want from this role.",
+                    f"He walked into a tough spot{relieved_str} with {runner_text} on base and got through it cleanly. That is a meaningful save.",
+                    f"Inheriting {runner_text}{relieved_str} and still getting the save says something. He handled the situation.",
+                ])
+            else:
+                return random.choice([
+                    f"He came in{relieved_str} with {runner_text} already on base and still got the job done.",
+                    f"It was not spotless, but he inherited a problem situation{relieved_str} and came away with the save.",
+                    f"Getting the save after inheriting {runner_text}{relieved_str} is a win even if the line was not clean.",
+                ])
         if early_closer_usage and leverage in {"high", "medium"} and label in {"SAVE", "HOLD"}:
             return random.choice([
                 "The early usage shows this was one of the biggest spots in the game, and he answered it.",
@@ -1838,6 +1873,16 @@ def build_analysis(p: dict, s: dict, label: str, context: dict, tracked_info: di
 
     if role == "committee":
         if label == "SAVE":
+            if safe_int(context.get("inherited_runners", 0), 0) > 0:
+                inherited = safe_int(context.get("inherited_runners", 0), 0)
+                runner_text = "an inherited runner" if inherited == 1 else f"{number_word(inherited)} inherited runners"
+                prev_pitcher = str(context.get("relieved_pitcher", "") or "").strip()
+                relieved_str = f" relieving {prev_pitcher}" if prev_pitcher else ""
+                return random.choice([
+                    f"He came in{relieved_str} with {runner_text} already on base and still closed it out. That is a meaningful save.",
+                    f"Inheriting {runner_text}{relieved_str} and earning the save anyway says something about how he handled the situation.",
+                    f"He walked into a live mess{relieved_str} — {runner_text} on base — and got the job done.",
+                ])
             return random.choice([
                 "This keeps him firmly in the save mix.",
                 "In a fluid bullpen, this outing helps his case for the next chance.",
@@ -1850,6 +1895,17 @@ def build_analysis(p: dict, s: dict, label: str, context: dict, tracked_info: di
         ])
 
     if role in {"setup", "leverage_arm"}:
+        if label == "SAVE":
+            if safe_int(context.get("inherited_runners", 0), 0) > 0:
+                inherited = safe_int(context.get("inherited_runners", 0), 0)
+                runner_text = "an inherited runner" if inherited == 1 else f"{number_word(inherited)} inherited runners"
+                prev_pitcher = str(context.get("relieved_pitcher", "") or "").strip()
+                relieved_str = f" relieving {prev_pitcher}" if prev_pitcher else ""
+                return random.choice([
+                    f"He came in{relieved_str} with {runner_text} on base and still locked down the save. That is not easy to do.",
+                    f"Getting the save after inheriting {runner_text}{relieved_str} is a meaningful result. He answered when it counted.",
+                    f"He was handed a problem{relieved_str} and solved it — {runner_text} on base and he still closed the door.",
+                ])
         if leverage == "high":
             if outing_grade == "DOMINANT":
                 return random.choice([
@@ -1946,8 +2002,19 @@ def build_summary(name: str, team: str, s: dict, label: str, context: dict, stre
         and context.get("entry_state_kind") in {"lead", "tie"}
     )
 
+    inherited = safe_int(context.get("inherited_runners", 0), 0)
+    relieved_pitcher = str(context.get("relieved_pitcher", "") or "").strip()
+
     if label == "SAVE":
-        if early_closer_usage and finished_game:
+        if inherited > 0:
+            runner_text = "a runner" if inherited == 1 else f"{number_word(inherited)} runners"
+            relieved_str = f" relieving {relieved_pitcher}" if relieved_pitcher else ""
+            line1 = random.choice([
+                f"{name} entered {ctx}{relieved_str} to inherit {runner_text} and still closed it out for the save.",
+                f"{name} came in{relieved_str} with {runner_text} on base and shut the door for the save.",
+                f"{name} was handed a mess{relieved_str} — {runner_text} on base — and still earned the save.",
+            ])
+        elif early_closer_usage and finished_game:
             line1 = f"{name} was called on {ctx} before the ninth in a high-leverage spot and finished the game for the save."
         elif outs_recorded >= 6:
             line1 = f"{name} entered {ctx} and covered the final {ip_text} to earn the save."
@@ -1958,8 +2025,11 @@ def build_summary(name: str, team: str, s: dict, label: str, context: dict, stre
     elif label == "BLOWN":
         line1 = f"{name} entered {ctx} but could not hold the lead and was charged with a blown save."
     elif label == "SHAKY_HOLD":
-        run_text = stat_phrase(er, "run")
-        line1 = f"{name} entered {ctx} in a save situation but allowed {run_text} and let the lead shrink."
+        line1 = random.choice([
+            f"{name} entered {ctx} in a save situation but quickly got into a jam.",
+            f"{name} entered {ctx} in a save situation but could not keep the inning clean.",
+            f"{name} entered {ctx} in a save situation and struggled to hold things together.",
+        ])
     elif label == "HOLD":
         line1 = f"{name} entered {ctx} and held the line to earn the hold."
     elif label == "DOM":
