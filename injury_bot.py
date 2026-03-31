@@ -528,13 +528,14 @@ def build_embed(item: dict) -> discord.Embed:
         status_title = "🚨 IL PLACEMENT"
 
     embed = discord.Embed(
-        title=f"{item['player']} | {team} | {position}",
         color=color,
         timestamp=datetime.now(ET)
     )
 
     if logo_url:
-        embed.set_author(name=f"{item['team_name']}", icon_url=logo_url)
+        embed.set_author(name=f"{item['player']} | {team}", icon_url=logo_url)
+    else:
+        embed.set_author(name=f"{item['player']} | {team}")
 
     embed.description = f"**{status_title}**"
 
