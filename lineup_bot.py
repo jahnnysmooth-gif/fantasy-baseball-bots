@@ -140,9 +140,19 @@ def save_state(state):
 
 def within_run_window():
     now = datetime.now(ET)
-    start = now.replace(hour=10, minute=0, second=0, microsecond=0)
+    start = now.replace(hour=7, minute=0, second=0, microsecond=0)
     end = now.replace(hour=23, minute=0, second=0, microsecond=0)
     return start <= now <= end
+
+
+def seconds_until_window_open():
+    """Return seconds until 7 AM ET tomorrow if currently outside the run window."""
+    from datetime import timedelta
+    now = datetime.now(ET)
+    next_open = now.replace(hour=7, minute=0, second=0, microsecond=0)
+    if now >= next_open:
+        next_open += timedelta(days=1)
+    return max(0, (next_open - now).total_seconds())
 
 
 def fetch_page():
@@ -338,6 +348,11 @@ def build_embed(item, is_update=False):
         f"**Date:** {date_str}",
     ]
 
+    if lineup_type == "Confirmed Lineup":
+        lines.append("**Status:** ✅ Confirmed")
+    else:
+        lines.append("**Status:** 🟡 Projected")
+
     if time_et:
         lines.append(f"**Game Time:** {time_et}")
 
@@ -505,8 +520,12 @@ async def background_loop():
                 save_state(state)
 
             if not within_run_window():
-                log("Outside run window (10AM–11PM ET). Sleeping 10 minutes.")
-                await asyncio.sleep(600)
+                secs = seconds_until_window_open()
+                from datetime import timedelta
+                wake_dt = datetime.now(ET) + timedelta(seconds=secs)
+                wake_time = wake_dt.strftime("%I:%M %p ET")
+                log(f"Outside run window (7AM–11PM ET). Sleeping until {wake_time} ({int(secs)}s).")
+                await asyncio.sleep(secs)
                 continue
 
             await run_once()
