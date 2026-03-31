@@ -146,7 +146,7 @@ def within_run_window():
 
 
 def seconds_until_window_open():
-    """Return seconds until 7 AM ET tomorrow if currently outside the run window."""
+    """Return seconds until 7 AM ET if currently outside the run window."""
     from datetime import timedelta
     now = datetime.now(ET)
     next_open = now.replace(hour=7, minute=0, second=0, microsecond=0)
@@ -348,11 +348,6 @@ def build_embed(item, is_update=False):
         f"**Date:** {date_str}",
     ]
 
-    if lineup_type == "Confirmed Lineup":
-        lines.append("**Status:** ✅ Confirmed")
-    else:
-        lines.append("**Status:** 🟡 Projected")
-
     if time_et:
         lines.append(f"**Game Time:** {time_et}")
 
@@ -364,6 +359,11 @@ def build_embed(item, is_update=False):
 
     if rain not in (None, "", 0, "0"):
         lines.append(f"**Rain Risk:** {rain}%")
+
+    if lineup_type == "Confirmed Lineup":
+        lines.append("**Status:** ✅ Confirmed")
+    else:
+        lines.append("**Status:** 🟡 Projected")
 
     lines.append("")
 
