@@ -32,6 +32,9 @@ HEADERS = {
     )
 }
 
+ESPN_PLAYER_IDS_PATH = os.getenv("ESPN_PLAYER_IDS_PATH", "shared/player_ids/espn_player_ids.json")
+player_headshot_index = None
+
 # Use Render persistent disk so duplicate protection survives redeploys/restarts
 STATE_DIR = Path("state/injury")
 STATE_FILE = STATE_DIR / "posted_injuries.json"
@@ -161,7 +164,150 @@ COMMENT_DATE_RE = re.compile(r"^([A-Z][a-z]{2}\s+\d{1,2}):")
 PAGE_HEADER_TOKENS = {"NAME", "POS", "EST. RETURN DATE", "STATUS", "COMMENT"}
 
 
-def log(msg: str) -> None:
+def normalize_team_abbr(team: str) -> str:
+    key = str(team or "").strip().upper()
+    alias_map = {
+        "AZ": "ARI", "ARI": "ARI", "CHW": "CWS", "CWS": "CWS",
+        "WAS": "WSH", "WSN": "WSH", "WSH": "WSH", "TBR": "TB", "TB": "TB",
+        "KCR": "KC", "KC": "KC", "SDP": "SD", "SD": "SD",
+        "SFG": "SF", "SF": "SF", "OAK": "ATH", "ATH": "ATH",
+    }
+    return alias_map.get(key, key)
+
+
+def normalize_lookup_name(name: str) -> str:
+    if not name:
+        return ""
+    cleaned = name.lower()
+    for ch in [".", ",", "'", "`", "-", "_", "(", ")", "[", "]"]:
+        cleaned = cleaned.replace(ch, " ")
+    return " ".join(cleaned.split())
+
+
+def load_player_headshot_index() -> dict:
+    global player_headshot_index
+    if player_headshot_index is not None:
+        return player_headshot_index
+
+    player_headshot_index = {}
+    if not os.path.exists(ESPN_PLAYER_IDS_PATH):
+        log(f"Player ID file not found: {ESPN_PLAYER_IDS_PATH}")
+        return player_headshot_index
+
+    try:
+        with open(ESPN_PLAYER_IDS_PATH, "r", encoding="utf-8") as f:
+            raw = json.load(f)
+    except Exception as e:
+        log(f"Could not load player ID file: {e}")
+        return player_headshot_index
+
+    if not isinstance(raw, dict):
+        log("Player ID file is not a dict mapping of names to ids/headshots")
+        return player_headshot_index
+
+    for raw_name, raw_value in raw.items():
+        entries = raw_value if isinstance(raw_value, list) else [raw_value]
+        for entry in entries:
+            if not isinstance(entry, dict):
+                continue
+            headshot_url = entry.get("headshot_url")
+            espn_id = entry.get("espn_id")
+            if not headshot_url and espn_id:
+                headshot_url = f"https://a.espncdn.com/i/headshots/mlb/players/full/{espn_id}.png"
+            if not headshot_url:
+                continue
+            team = entry.get("team")
+            payload = {
+                "name": raw_name,
+                "team": normalize_team_abbr(team),
+                "headshot_url": headshot_url,
+                "espn_id": entry.get("espn_id"),
+            }
+            player_headshot_index.setdefault(raw_name, []).append(payload)
+            normalized = normalize_lookup_name(raw_name)
+            if normalized:
+                player_headshot_index.setdefault(normalized, []).append(payload)
+
+    log(f"Loaded player headshot index from {ESPN_PLAYER_IDS_PATH}")
+    return player_headshot_index
+
+
+def choose_headshot_entry(entries, team: str = None):
+    if not entries:
+        return None
+    normalized_team = normalize_team_abbr(team) if team else None
+    if normalized_team:
+        for entry in entries:
+            if isinstance(entry, dict) and normalize_team_abbr(entry.get("team")) == normalized_team:
+                return entry
+    for entry in entries:
+        if isinstance(entry, dict) and entry.get("headshot_url"):
+            return entry
+    return None
+
+
+def find_headshot_entry_by_last_name(index: dict, name: str, team: str = None):
+    normalized_name = normalize_lookup_name(name)
+    if not normalized_name:
+        return None
+
+    parts = normalized_name.split()
+    if not parts:
+        return None
+
+    last_name = parts[-1]
+    matches = []
+    seen_urls = set()
+    for key, entries in index.items():
+        key_parts = normalize_lookup_name(key).split()
+        if not key_parts or key_parts[-1] != last_name:
+            continue
+        for entry in entries if isinstance(entries, list) else []:
+            if not isinstance(entry, dict):
+                continue
+            url = entry.get("headshot_url")
+            if not url or url in seen_urls:
+                continue
+            seen_urls.add(url)
+            matches.append(entry)
+
+    if not matches:
+        return None
+
+    normalized_team = normalize_team_abbr(team) if team else None
+    if normalized_team:
+        team_matches = [e for e in matches if normalize_team_abbr(e.get("team")) == normalized_team]
+        if team_matches:
+            return team_matches[0]
+
+    if len(matches) == 1:
+        return matches[0]
+
+    return None
+
+
+def get_player_headshot(name: str, team: str = None) -> str | None:
+    index = load_player_headshot_index()
+    if not index or not name:
+        return None
+
+    exact = choose_headshot_entry(index.get(name), team)
+    if exact:
+        return exact.get("headshot_url")
+
+    normalized = normalize_lookup_name(name)
+    normalized_match = choose_headshot_entry(index.get(normalized), team)
+    if normalized_match:
+        return normalized_match.get("headshot_url")
+
+    last_name_match = find_headshot_entry_by_last_name(index, name, team)
+    if last_name_match:
+        return last_name_match.get("headshot_url")
+
+    return None
+
+
+
     print(f"[INJURY] {msg}", flush=True)
 
 
@@ -383,6 +529,9 @@ def build_embed(item: dict) -> discord.Embed:
         timestamp=datetime.now(ET)
     )
 
+    if logo_url:
+        embed.set_author(name=f"{item['team_name']}", icon_url=logo_url)
+
     embed.description = f"**{status_title}**"
 
     embed.add_field(name="Status", value=f"`{item['status']}`", inline=True)
@@ -390,7 +539,10 @@ def build_embed(item: dict) -> discord.Embed:
     embed.add_field(name="Source", value="`ESPN`", inline=True)
     embed.add_field(name="Update", value=clamp_update(item["comment"]), inline=False)
 
-    if logo_url:
+    headshot_url = get_player_headshot(item["player"], team)
+    if headshot_url:
+        embed.set_thumbnail(url=headshot_url)
+    elif logo_url:
         embed.set_thumbnail(url=logo_url)
 
     embed.set_footer(text="ESPN MLB Injuries")
