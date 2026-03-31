@@ -164,6 +164,14 @@ COMMENT_DATE_RE = re.compile(r"^([A-Z][a-z]{2}\s+\d{1,2}):")
 PAGE_HEADER_TOKENS = {"NAME", "POS", "EST. RETURN DATE", "STATUS", "COMMENT"}
 
 
+def log(msg: str) -> None:
+    print(f"[INJURY] {msg}", flush=True)
+
+
+def clean_text(text: str) -> str:
+    return " ".join(text.split()).strip()
+
+
 def normalize_team_abbr(team: str) -> str:
     key = str(team or "").strip().upper()
     alias_map = {
@@ -309,10 +317,6 @@ def get_player_headshot(name: str, team: str = None) -> str | None:
 
 
     print(f"[INJURY] {msg}", flush=True)
-
-
-def clean_text(text: str) -> str:
-    return " ".join(text.split()).strip()
 
 
 def clamp_update(text: str, max_len: int = MAX_UPDATE_LEN) -> str:
