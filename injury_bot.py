@@ -132,10 +132,15 @@ MAX_UPDATE_LEN = 220
 MAX_STORED_IDS = 5000
 
 INJURY_KEYWORDS = {
-    "injured", "il", "day-to-day", "dtd", "placed on", "activated",
-    "out for", "fracture", "strain", "sprain", "surgery", "torn",
+    "injured", "day-to-day", "dtd", "placed on il", "placed on the il",
+    "10-day il", "15-day il", "60-day il", "7-day il",
+    "activated from", "reinstated from",
+    "fracture", "strain", "sprain", "surgery", "torn",
     "inflammation", "concussion", "suspension", "bereavement", "paternity",
+    "out for the season", "out indefinitely",
 }
+
+INJURY_CATEGORY_TYPES = {"injury", "transaction", "injuries", "transactions"}
 
 
 def log(msg: str) -> None:
@@ -364,12 +369,11 @@ def make_update_id(item: dict) -> str:
 
 
 def is_injury_item(article: dict) -> bool:
-    """Return True if the news article looks injury/transaction related."""
+    """Return True if the news article is an injury or transaction update."""
     categories = article.get("categories", [])
     for cat in categories:
         ctype = str(cat.get("type", "")).lower()
-        desc = str(cat.get("description", "")).lower()
-        if ctype in ("injury", "transaction") or "injur" in desc or "transaction" in desc:
+        if ctype in INJURY_CATEGORY_TYPES:
             return True
     headline = str(article.get("headline", "")).lower()
     description = str(article.get("description", "")).lower()
@@ -530,6 +534,7 @@ def build_embed(item: dict) -> discord.Embed:
 intents = discord.Intents.default()
 client = discord.Client(intents=intents)
 background_task_started = False
+test_mode_posted_ids: set[str] = set()  # in-memory dedup for test mode
 
 
 async def post_allowed_updates() -> None:
@@ -551,11 +556,14 @@ async def post_allowed_updates() -> None:
         return
 
     if TEST_MODE:
-        log(f"TEST MODE: bypassing dedup, posting all {len(items)} items from last 6 hours")
-        for item in items:
+        new_test_items = [i for i in items if make_update_id(i) not in test_mode_posted_ids]
+        log(f"TEST MODE: {len(new_test_items)} new items from last 6 hours (skipping {len(items) - len(new_test_items)} already posted this session)")
+        for item in new_test_items:
             try:
+                uid = make_update_id(item)
                 embed = build_embed(item)
                 await channel.send(embed=embed)
+                test_mode_posted_ids.add(uid)
                 log(f"[TEST] Posted: {item.get('player') or item.get('headline')} | {item.get('team')} | {item.get('published_dt')}")
                 await asyncio.sleep(1.0)
             except Exception as e:
