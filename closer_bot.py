@@ -29,21 +29,25 @@ POST_STAGGER_SECONDS = 45
 MAX_POSTS_PER_LOOP = 4
 GAME_RECENCY_HOURS = 15  # use start time as proxy; 15h covers a game starting at 10 PM + 3h game + buffer
 RESET_CLOSER_STATE = os.getenv("RESET_CLOSER_STATE", "").lower() in {"1", "true", "yes"}
-DEPTH_CHART_OVERRIDE_CHANNEL_ID = int(os.getenv("DEPTH_CHART_OVERRIDE_CHANNEL_ID", "1484232761597366412"))
+ANTHROPIC_API_KEY = os.getenv("ANTHROPIC_API_KEY", "")
 TREND_STATE_FILE = "state/closer/trend_state.json"
 
 TREND_FAMILY_COOLDOWN_MINUTES = {
-    "scoreless": 180,
-    "strikeout": 90,
-    "role": 90,
-    "dominance": 90,
-    "usage": 90,
-    "command": 90,
-    "rough": 90,
-    "misc": 90,
+    "scoreless": 240,
+    "strikeout": 180,
+    "role": 180,
+    "dominance": 180,
+    "usage": 180,
+    "command": 120,
+    "rough": 120,
+    "bounce": 120,
+    "misc": 120,
 }
 TREND_RANDOM_INTERVAL_MIN_MINUTES = 6
 TREND_RANDOM_INTERVAL_MAX_MINUTES = 16
+TREND_HOURS_START = 2   # 2 AM ET
+TREND_HOURS_END = 14    # 2 PM ET
+TREND_MAX_PER_HOUR = 2
 VELOCITY_DELTA_THRESHOLD = 1.0
 VELOCITY_MIN_PITCHES = 10
 VELOCITY_MIN_FASTBALLS = 3
@@ -2506,6 +2510,18 @@ def get_next_trend_delay_minutes() -> int:
 
 
 def can_post_trend_now(state, now_et: datetime):
+    # Only post trend blurbs between 2 AM and 2 PM ET
+    hour = now_et.hour
+    if not (TREND_HOURS_START <= hour < TREND_HOURS_END):
+        return False
+
+    # Hourly cap — max 2 trend blurbs per hour
+    hour_key = now_et.strftime("%Y-%m-%d-%H")
+    posts_this_hour = safe_int(state.get("trend_post_count_by_hour", {}).get(hour_key, 0), 0)
+    if posts_this_hour >= TREND_MAX_PER_HOUR:
+        return False
+
+    # Random interval between blurbs
     next_eligible_at = state.get("trend_next_eligible_at")
     if not next_eligible_at:
         return True
@@ -2747,10 +2763,24 @@ async def gather_trend_candidates_from_recent_games(tracked: dict, processed_pit
         recent = item.get("recent_appearances") or []
         if not recent:
             continue
+
+        # 4-inning IP floor: total outs across the qualifying window must be >= 12
         trend_options = build_trend_candidates(item["current_app"], recent, None, item.get("context", {}))
+        if not trend_options:
+            continue
+
+        # Check IP floor against the window for the best candidate
         best = choose_best_trend(trend_options)
         if not best:
             continue
+
+        window = trend_window_for_code(best.get("code", ""))
+        window_apps = recent[:window]
+        total_outs = sum(baseball_ip_to_outs(a.get("ip", "0.0")) for a in window_apps)
+        if total_outs < 12:  # 4 innings = 12 outs
+            log(f"Trend suppressed for {p.get('name')} — only {total_outs} outs in window (need 12)")
+            continue
+
         candidates.append({
             "pitcher_id": pid,
             "meta": player_meta_cache.get(pid, {"name": p.get("name"), "team": p.get("team"), "season_stats": p.get("season_stats", {})}),
@@ -2785,14 +2815,24 @@ async def get_games() -> list:
     today = datetime.now(ET).date()
     yesterday = today - timedelta(days=1)
     loop = asyncio.get_event_loop()
-    games = []
-    for d in [today, yesterday]:
-        try:
-            day_games = await loop.run_in_executor(None, _fetch_schedule_sync, d.isoformat())
-            games.extend(day_games)
-        except Exception as e:
-            log(f"Schedule fetch error for {d}: {e}")
-    return games
+
+    # Today-first: once today has any games scheduled, don't fetch yesterday
+    try:
+        today_games = await loop.run_in_executor(None, _fetch_schedule_sync, today.isoformat())
+    except Exception as e:
+        log(f"Schedule fetch error for {today}: {e}")
+        today_games = []
+
+    if today_games:
+        return today_games
+
+    # No games today — fall back to yesterday
+    try:
+        yesterday_games = await loop.run_in_executor(None, _fetch_schedule_sync, yesterday.isoformat())
+        return yesterday_games
+    except Exception as e:
+        log(f"Schedule fetch error for {yesterday}: {e}")
+        return []
 
 
 async def get_feed(game_id) -> dict:
@@ -2848,6 +2888,149 @@ def get_pitchers(feed: dict):
     return result
 
 
+# ---------------- CLAUDE API SUMMARY ----------------
+
+async def build_summary_via_claude(
+    name: str,
+    team: str,
+    opp_name: str,
+    label: str,
+    s: dict,
+    context: dict,
+    detail: dict,
+    tracked_info: dict,
+    recent_appearances: list,
+    streak_count: int,
+    usage_note: str,
+    velocity_alert: dict,
+    pitcher_score: int,
+    opp_score: int,
+    score_tail: str,
+) -> str | None:
+    """
+    Call the Claude API to generate a natural-language summary for a pitcher card.
+    Returns the summary string, or None on failure (caller falls back to templates).
+    """
+    try:
+        if not ANTHROPIC_API_KEY:
+            return None
+
+        loop = asyncio.get_event_loop()
+
+        opp = str(opp_name or "").strip()
+        role = infer_role_from_tracked_info(tracked_info)
+        entry_ctx = build_context_phrase(context)
+        inherited = safe_int(context.get("inherited_runners", 0), 0)
+        relieved_pitcher = str(context.get("relieved_pitcher", "") or "").strip()
+        ip_text = format_ip_for_summary(s["ip"])
+
+        # Build structured context for the prompt
+        stat_line = f"{ip_text}, {s['h']} H, {s['er']} ER, {s['bb']} BB, {s['k']} K"
+
+        # Play-by-play detail
+        detail_parts = []
+        if detail:
+            for ev in detail.get("run_events", []):
+                rbi = ev["rbi"]
+                detail_parts.append(f"- {ev['batter']} hit a {ev['hit_type']} ({rbi} RBI)")
+            for ko in detail.get("notable_ks", []):
+                detail_parts.append(f"- Struck out {ko['name']} (bats {ko['slot']}th)")
+            if not detail.get("finished_inning", True):
+                d_outs = detail.get("departure_outs", 0)
+                d_runners = detail.get("departure_runners", 0)
+                replaced = detail.get("replaced_by", "")
+                pull_str = f"Pulled with {d_outs} out(s) recorded, {d_runners} runner(s) on"
+                if replaced:
+                    pull_str += f", replaced by {replaced}"
+                detail_parts.append(f"- {pull_str}")
+            if detail.get("heart_of_order_retired"):
+                detail_parts.append(f"- Retired heart of order: {', '.join(detail['heart_of_order_retired'])}")
+
+        # Recent form
+        recent_er = [a.get("er", 0) for a in recent_appearances[:5]]
+        recent_form = ", ".join(
+            f"{'0 ER' if er == 0 else str(er) + ' ER'}" for er in recent_er
+        ) if recent_er else "no recent data"
+
+        velocity_str = ""
+        if velocity_alert:
+            velocity_str = (
+                f"Fastball: {velocity_alert.get('current_velocity')} MPH this outing "
+                f"(baseline {velocity_alert.get('baseline_velocity')} MPH, "
+                f"delta {velocity_alert.get('delta'):+.1f} MPH)"
+            )
+
+        score_context = ""
+        if score_tail:
+            score_context = f"Final result: {score_tail}"
+        elif pitcher_score > 0 or opp_score > 0:
+            score_context = f"Final score: {pitcher_score}-{opp_score} (pitcher's team-opponent)"
+
+        prompt = f"""Write a ~250 word baseball summary for a Discord embed card about a relief pitcher's outing. Write in a direct, informed sports analyst voice — natural, specific, no fluff. Do NOT use bullet points, headers, or markdown. Write in flowing prose sentences only.
+
+PITCHER: {name} | {team}
+OPPONENT: {opp or 'unknown'}
+ROLE: {role}
+OUTING LABEL: {label}
+ENTRY SITUATION: {entry_ctx}
+STAT LINE: {stat_line}
+{'INHERITED RUNNERS: ' + str(inherited) + (' (relieved ' + relieved_pitcher + ')' if relieved_pitcher else '') if inherited > 0 else ''}
+{score_context}
+
+PLAY-BY-PLAY DETAIL:
+{chr(10).join(detail_parts) if detail_parts else 'No play-by-play detail available'}
+
+RECENT FORM (last 5 appearances, most recent first):
+{recent_form}
+
+{('VELOCITY NOTE: ' + velocity_str) if velocity_str else ''}
+{('USAGE NOTE: ' + usage_note) if usage_note else ''}
+{'CONSECUTIVE APPEARANCES: ' + str(streak_count) + ' straight days' if streak_count >= 2 else ''}
+
+Instructions:
+- Open with the pitcher's name, when he entered, and the game situation
+- Describe specifically what happened using the play-by-play detail
+- If he was pulled mid-inning, mention it naturally
+- Comment on the significance of the outing given his role and the game situation
+- If there is recent form context, weave it in naturally — don't just list the numbers
+- If there is a velocity note, include it as one sentence
+- End with a forward-looking or contextual sentence about his role/standing
+- Keep it tight and punchy — around 250 words
+- Do not start with 'In' or 'Tonight'"""
+
+        def _call_claude():
+            resp = requests.post(
+                "https://api.anthropic.com/v1/messages",
+                headers={
+                    "Content-Type": "application/json",
+                    "x-api-key": ANTHROPIC_API_KEY,
+                    "anthropic-version": "2023-06-01",
+                },
+                json={
+                    "model": "claude-sonnet-4-20250514",
+                    "max_tokens": 400,
+                    "messages": [{"role": "user", "content": prompt}],
+                },
+                timeout=20,
+            )
+            resp.raise_for_status()
+            data = resp.json()
+            return "".join(
+                block.get("text", "") for block in data.get("content", [])
+                if block.get("type") == "text"
+            ).strip()
+
+        summary = await loop.run_in_executor(None, _call_claude)
+        if summary:
+            log(f"Claude API summary generated for {name}")
+            return summary
+        return None
+
+    except Exception as e:
+        log(f"Claude API summary failed for {name}: {e}")
+        return None
+
+
 # ---------------- POST ----------------
 
 async def post_card(channel, p: dict, matchup: str, score: str, context: dict, streak_count: int, tracked_info: dict, recent_appearances, usage_note: str = "", velocity_alert: dict = None, feed: dict = None, away_team_name: str = "", home_team_name: str = "", away_score: int = 0, home_score: int = 0):
@@ -2892,29 +3075,63 @@ async def post_card(channel, p: dict, matchup: str, score: str, context: dict, s
     )
     apply_player_card_chrome(embed, p["name"], p["team"])
 
+    # Build the template-based summary first (used as fallback)
+    template_summary = build_summary(
+        p["name"],
+        p["team"],
+        s,
+        label,
+        context,
+        streak_count,
+        tracked_info,
+        recent_appearances,
+        usage_note=usage_note,
+        velocity_alert=velocity_alert,
+        detail=detail,
+        opp_name=opp_name,
+        pitcher_score=pitcher_score,
+        opp_score=opp_score,
+    )
+
+    # Compute score_tail for passing to Claude (same logic as build_summary)
+    margin = safe_int(context.get("entry_margin", 0), 0)
+    state_kind = context.get("entry_state_kind", "")
+    opp = str(opp_name or "").strip()
+    score_tail = ""
+    if (pitcher_score > 0 or opp_score > 0) and margin <= 2 and state_kind == "lead":
+        win_score = max(pitcher_score, opp_score)
+        lose_score = min(pitcher_score, opp_score)
+        score_num = f"{win_score}-{lose_score}"
+        opp_in_tail = opp and label not in {"SAVE"}
+        if opp_in_tail:
+            score_tail = f"{score_num} win over the {opp}"
+        else:
+            score_tail = f"{score_num} win"
+
+    # Try Claude API — fall back to template on failure
+    claude_summary = await build_summary_via_claude(
+        name=p["name"],
+        team=p["team"],
+        opp_name=opp_name,
+        label=label,
+        s=s,
+        context=context,
+        detail=detail,
+        tracked_info=tracked_info,
+        recent_appearances=recent_appearances,
+        streak_count=streak_count,
+        usage_note=usage_note,
+        velocity_alert=velocity_alert,
+        pitcher_score=pitcher_score,
+        opp_score=opp_score,
+        score_tail=score_tail,
+    )
+    summary_text = claude_summary if claude_summary else template_summary
+
     # Layout: impact tag → game line → summary → pitch count → season
     embed.add_field(name="", value=f"**{impact_tag(label, s)}**", inline=False)
     embed.add_field(name="Game Line", value=format_game_line(s), inline=False)
-    embed.add_field(
-        name="Summary",
-        value=build_summary(
-            p["name"],
-            p["team"],
-            s,
-            label,
-            context,
-            streak_count,
-            tracked_info,
-            recent_appearances,
-            usage_note=usage_note,
-            velocity_alert=velocity_alert,
-            detail=detail,
-            opp_name=opp_name,
-            pitcher_score=pitcher_score,
-            opp_score=opp_score,
-        ),
-        inline=False,
-    )
+    embed.add_field(name="Summary", value=summary_text, inline=False)
     embed.add_field(name="Pitch Count", value=format_pitch_count(p["stats"]), inline=False)
     embed.add_field(name="Season", value=format_season_line(p.get("season_stats", {})), inline=False)
 
