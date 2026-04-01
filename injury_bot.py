@@ -3,34 +3,22 @@ import asyncio
 import re
 import json
 import hashlib
-from datetime import datetime
+import random
+from datetime import datetime, timezone
 from pathlib import Path
 from zoneinfo import ZoneInfo
 
+import aiohttp
 import discord
-import requests
-from bs4 import BeautifulSoup
 
 DISCORD_TOKEN = os.getenv("INJURY_BOT_TOKEN")
 CHANNEL_ID = int(os.getenv("INJURY_CHANNEL_ID", "0"))
-POLL_INTERVAL = int(os.getenv("INJURY_POLL_INTERVAL", "900"))
+POLL_INTERVAL_MIN = 180   # 3 minutes
+POLL_INTERVAL_MAX = 300   # 5 minutes
 
-ESPN_URL = "https://www.espn.com/mlb/injuries"
+ESPN_NEWS_URL = "https://site.api.espn.com/apis/site/v2/sports/baseball/mlb/news?limit=50"
 ET = ZoneInfo("America/New_York")
-
-# Keep the same practical behavior as your current bot.
-# You can override this in Render later if you ever want:
-# CUTOFF_DATE_ET=2026-03-01
-CUTOFF_DATE_STR = os.getenv("CUTOFF_DATE_ET", "2026-03-01")
-CUTOFF_DATE_ET = datetime.strptime(CUTOFF_DATE_STR, "%Y-%m-%d").replace(tzinfo=ET)
-
-HEADERS = {
-    "User-Agent": (
-        "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
-        "AppleWebKit/537.36 (KHTML, like Gecko) "
-        "Chrome/145.0.0.0 Safari/537.36"
-    )
-}
+TEST_MODE = os.getenv("INJURY_TEST_MODE", "").lower() in ("1", "true", "yes")
 
 ESPN_PLAYER_IDS_PATH = os.getenv("ESPN_PLAYER_IDS_PATH", "shared/player_ids/espn_player_ids.json")
 player_headshot_index = None
@@ -139,29 +127,15 @@ TEAM_LOGOS = {
     "WSH": "https://a.espncdn.com/i/teamlogos/mlb/500/wsh.png",
 }
 
-VALID_POSITIONS = {
-    "SP", "RP", "P", "C", "1B", "2B", "3B", "SS",
-    "LF", "CF", "RF", "OF", "DH", "INF", "UTIL"
-}
-
-VALID_STATUSES = {
-    "60-Day-IL",
-    "15-Day-IL",
-    "10-Day-IL",
-    "7-Day-IL",
-    "Day-To-Day",
-    "Out",
-    "Suspension",
-    "Bereavement",
-    "Paternity",
-}
-
 DEFAULT_COLOR = 0x5865F2
 MAX_UPDATE_LEN = 220
 MAX_STORED_IDS = 5000
 
-COMMENT_DATE_RE = re.compile(r"^([A-Z][a-z]{2}\s+\d{1,2}):")
-PAGE_HEADER_TOKENS = {"NAME", "POS", "EST. RETURN DATE", "STATUS", "COMMENT"}
+INJURY_KEYWORDS = {
+    "injured", "il", "day-to-day", "dtd", "placed on", "activated",
+    "out for", "fracture", "strain", "sprain", "surgery", "torn",
+    "inflammation", "concussion", "suspension", "bereavement", "paternity",
+}
 
 
 def log(msg: str) -> None:
@@ -315,26 +289,12 @@ def get_player_headshot(name: str, team: str = None) -> str | None:
     return None
 
 
-
-    print(f"[INJURY] {msg}", flush=True)
-
-
 def clamp_update(text: str, max_len: int = MAX_UPDATE_LEN) -> str:
     text = clean_text(text)
     if len(text) <= max_len:
         return text
     return text[: max_len - 1].rstrip() + "…"
 
-
-def short_date(date_str: str) -> str:
-    now_year = datetime.now(ET).year
-    for fmt in ("%b %d", "%B %d"):
-        try:
-            dt = datetime.strptime(f"{date_str} {now_year}", f"{fmt} %Y")
-            return dt.strftime("%b %d")
-        except ValueError:
-            continue
-    return date_str
 
 
 def should_run_now() -> bool:
@@ -395,156 +355,169 @@ def normalize_posted_ids(posted_ids_list: list[str]) -> list[str]:
 
 def make_update_id(item: dict) -> str:
     raw = "|".join([
-        item["team"],
-        item["player"],
-        item["position"],
-        item["est_return"],
-        item["status"],
-        item["comment"],
+        item.get("team", ""),
+        item.get("player", ""),
+        item.get("headline", ""),
+        item.get("published", ""),
     ])
     return hashlib.sha256(raw.encode("utf-8")).hexdigest()
 
 
-def fetch_html() -> str:
-    response = requests.get(ESPN_URL, headers=HEADERS, timeout=30)
-    response.raise_for_status()
-    return response.text
+def is_injury_item(article: dict) -> bool:
+    """Return True if the news article looks injury/transaction related."""
+    categories = article.get("categories", [])
+    for cat in categories:
+        ctype = str(cat.get("type", "")).lower()
+        desc = str(cat.get("description", "")).lower()
+        if ctype in ("injury", "transaction") or "injur" in desc or "transaction" in desc:
+            return True
+    headline = str(article.get("headline", "")).lower()
+    description = str(article.get("description", "")).lower()
+    combined = headline + " " + description
+    return any(kw in combined for kw in INJURY_KEYWORDS)
 
 
-def parse_comment_date(comment: str) -> datetime | None:
-    match = COMMENT_DATE_RE.match(comment)
-    if not match:
+def parse_published(ts: str) -> datetime | None:
+    """Parse ESPN's ISO 8601 published timestamp to a timezone-aware datetime."""
+    if not ts:
+        return None
+    try:
+        # ESPN returns e.g. "2026-04-01T14:32:00Z"
+        dt = datetime.fromisoformat(ts.replace("Z", "+00:00"))
+        return dt.astimezone(ET)
+    except Exception:
         return None
 
-    month_day = match.group(1)
-    now_year = datetime.now(ET).year
 
-    for year in (now_year, now_year - 1):
-        try:
-            dt = datetime.strptime(f"{month_day} {year}", "%b %d %Y").replace(tzinfo=ET)
-            if dt > datetime.now(ET).replace(hour=23, minute=59, second=59, microsecond=0):
-                continue
-            return dt
-        except ValueError:
-            continue
-
-    return None
-
-
-def is_allowed_update(comment: str) -> bool:
-    comment_dt = parse_comment_date(comment)
-    if comment_dt is None:
-        return False
-    return comment_dt >= CUTOFF_DATE_ET
+def extract_team_from_article(article: dict) -> tuple[str, str]:
+    """Return (team_abbr, team_full_name) from the article's categories."""
+    for cat in article.get("categories", []):
+        if cat.get("type", "").lower() in ("team",):
+            name = cat.get("description", "")
+            abbr = TEAM_NAME_TO_ABBR.get(name, "")
+            if abbr:
+                return abbr, name
+    # Fall back: look in links for a team slug
+    for link in article.get("links", {}).get("web", {}).values() if isinstance(article.get("links"), dict) else []:
+        pass
+    return "", ""
 
 
-def looks_like_valid_row(player: str, position: str, est_return: str, status: str, comment: str, team_names: set[str]) -> bool:
-    if not player or player in team_names or player in PAGE_HEADER_TOKENS:
-        return False
-    if position not in VALID_POSITIONS:
-        return False
-    if status not in VALID_STATUSES:
-        return False
-    if not est_return or est_return in PAGE_HEADER_TOKENS:
-        return False
-    if ":" not in comment:
-        return False
-    if not is_allowed_update(comment):
-        return False
-    return True
+def extract_player_from_article(article: dict) -> str:
+    """Return player name from athletes category if present."""
+    for cat in article.get("categories", []):
+        if cat.get("type", "").lower() == "athlete":
+            return cat.get("description", "")
+    return ""
 
 
-def parse_espn_injuries(html: str) -> list[dict]:
-    soup = BeautifulSoup(html, "html.parser")
-    lines = [clean_text(x) for x in soup.get_text("\n").splitlines()]
-    lines = [x for x in lines if x]
+async def fetch_injury_items() -> list[dict]:
+    """Fetch ESPN MLB news feed and return injury/transaction items sorted by published time (newest first)."""
+    try:
+        async with aiohttp.ClientSession() as session:
+            async with session.get(ESPN_NEWS_URL, timeout=aiohttp.ClientTimeout(total=20)) as resp:
+                resp.raise_for_status()
+                data = await resp.json(content_type=None)
+    except Exception as e:
+        log(f"ESPN API fetch failed: {e}")
+        return []
 
+    articles = data.get("articles", [])
+    now_utc = datetime.now(timezone.utc)
+    cutoff_utc = now_utc.astimezone(ET) if not TEST_MODE else None
     items = []
-    team_names = set(TEAM_NAME_TO_ABBR.keys())
 
-    start_index = 0
-    for idx, line in enumerate(lines):
-        if line in team_names:
-            start_index = idx
-            break
-
-    i = start_index
-    current_team = None
-
-    while i < len(lines):
-        line = lines[i]
-
-        if line in team_names:
-            current_team = line
-            i += 1
-
-            while i < len(lines) and lines[i] in PAGE_HEADER_TOKENS:
-                i += 1
+    for article in articles:
+        if not is_injury_item(article):
             continue
 
-        if not current_team:
-            i += 1
-            continue
+        published_str = article.get("published", "")
+        published_dt = parse_published(published_str)
 
-        if i + 4 >= len(lines):
-            break
+        # In test mode: only include items from the last 6 hours
+        if TEST_MODE and published_dt:
+            age_hours = (now_utc - published_dt.astimezone(timezone.utc)).total_seconds() / 3600
+            if age_hours > 6:
+                continue
 
-        player = lines[i]
-        position = lines[i + 1]
-        est_return = lines[i + 2]
-        status = lines[i + 3]
-        comment = lines[i + 4]
+        team_abbr, team_name = extract_team_from_article(article)
+        player = extract_player_from_article(article)
+        headline = clean_text(article.get("headline", ""))
+        description = clean_text(article.get("description", "") or article.get("headline", ""))
 
-        if looks_like_valid_row(player, position, est_return, status, comment, team_names):
-            items.append({
-                "team_name": current_team,
-                "team": TEAM_NAME_TO_ABBR[current_team],
-                "player": player,
-                "position": position,
-                "est_return": est_return,
-                "status": status,
-                "comment": comment,
-            })
-            i += 5
-            continue
+        headshot_url = None
+        images = article.get("images", [])
+        if images and isinstance(images, list):
+            headshot_url = images[0].get("url")
 
-        i += 1
+        items.append({
+            "team": team_abbr,
+            "team_name": team_name,
+            "player": player,
+            "headline": headline,
+            "description": description,
+            "published": published_str,
+            "published_dt": published_dt,
+            "headshot_url": headshot_url,
+        })
 
+    # Sort newest first
+    items.sort(key=lambda x: x["published_dt"] or datetime.min.replace(tzinfo=timezone.utc), reverse=True)
     return items
 
 
+
+
 def build_embed(item: dict) -> discord.Embed:
-    team = item["team"]
+    team = item.get("team", "")
     color = TEAM_COLORS.get(team, DEFAULT_COLOR)
     logo_url = TEAM_LOGOS.get(team)
-    position = item["position"]
+    headline = item.get("headline", "MLB Injury Update")
 
-    status_title = "🚑 MLB INJURY UPDATE"
-    if item["status"] == "60-Day-IL":
+    # Derive a status emoji from the headline
+    hl_lower = headline.lower()
+    if "60-day" in hl_lower:
         status_title = "🧊 60-DAY IL"
-    elif item["status"] == "Day-To-Day":
-        status_title = "⚠️ DAY-TO-DAY"
-    elif "IL" in item["status"]:
+    elif "15-day" in hl_lower or "10-day" in hl_lower or "7-day" in hl_lower:
         status_title = "🚨 IL PLACEMENT"
+    elif "day-to-day" in hl_lower or "dtd" in hl_lower:
+        status_title = "⚠️ DAY-TO-DAY"
+    elif "activated" in hl_lower or "reinstated" in hl_lower:
+        status_title = "✅ ACTIVATED"
+    elif "suspend" in hl_lower:
+        status_title = "🔴 SUSPENSION"
+    else:
+        status_title = "🚑 MLB INJURY UPDATE"
 
-    embed = discord.Embed(
-        color=color,
-        timestamp=datetime.now(ET)
-    )
+    embed = discord.Embed(color=color, timestamp=datetime.now(ET))
+
+    author_name = item.get("player") or headline
+    if team:
+        author_name = f"{author_name} | {team}"
 
     if logo_url:
-        embed.set_author(name=f"{item['player']} | {team}", icon_url=logo_url)
+        embed.set_author(name=author_name, icon_url=logo_url)
     else:
-        embed.set_author(name=f"{item['player']} | {team}")
+        embed.set_author(name=author_name)
 
     embed.description = f"**{status_title}**"
+    embed.add_field(name="Update", value=clamp_update(item.get("description", headline)), inline=False)
 
-    embed.add_field(name="Status", value=f"`{item['status']}`", inline=True)
-    embed.add_field(name="Est. Return", value=f"`{short_date(item['est_return'])}`", inline=True)
+    # Reported time
+    published_dt = item.get("published_dt")
+    if published_dt:
+        reported_str = published_dt.strftime("%-I:%M %p ET")
+        embed.add_field(name="🕐 Reported", value=reported_str, inline=True)
+
     embed.add_field(name="Source", value="`ESPN`", inline=True)
-    embed.add_field(name="Update", value=clamp_update(item["comment"]), inline=False)
 
-    headshot_url = get_player_headshot(item["player"], team)
+    # Headshot: try player lookup first, then article image, then team logo
+    headshot_url = None
+    player = item.get("player")
+    if player:
+        headshot_url = get_player_headshot(player, team)
+    if not headshot_url:
+        headshot_url = item.get("headshot_url")
     if headshot_url:
         embed.set_thumbnail(url=headshot_url)
     elif logo_url:
@@ -570,28 +543,24 @@ async def post_allowed_updates() -> None:
     posted_ids_set = set(posted_ids_list)
     log(f"Loaded posted_ids: {len(posted_ids_list)}")
 
-    try:
-        html = fetch_html()
-        items = parse_espn_injuries(html)
-        log(f"Parsed {len(items)} allowed injury items")
-
-        for item in items[:5]:
-            log(f"Sample allowed item: {item}")
-    except Exception as e:
-        log(f"Failed to fetch/parse ESPN page: {e}")
-        return
+    items = await fetch_injury_items()
+    log(f"Fetched {len(items)} injury items from ESPN API")
 
     if not items:
-        log("No allowed items found.")
+        log("No injury items found.")
         return
 
-    items.sort(
-        key=lambda x: (
-            parse_comment_date(x["comment"]) or CUTOFF_DATE_ET,
-            x["team"],
-            x["player"]
-        )
-    )
+    if TEST_MODE:
+        log(f"TEST MODE: bypassing dedup, posting all {len(items)} items from last 6 hours")
+        for item in items:
+            try:
+                embed = build_embed(item)
+                await channel.send(embed=embed)
+                log(f"[TEST] Posted: {item.get('player') or item.get('headline')} | {item.get('team')} | {item.get('published_dt')}")
+                await asyncio.sleep(1.0)
+            except Exception as e:
+                log(f"[TEST] Failed to post item: {e}")
+        return
 
     current_ids = []
     new_items = []
@@ -604,17 +573,14 @@ async def post_allowed_updates() -> None:
         if update_id not in posted_ids_set:
             new_items.append(item)
 
-    # First-run safeguard:
-    # if the state file is empty, seed all current injuries without posting.
+    # First-run safeguard: seed without posting
     if not posted_ids_list:
         state["posted_ids"] = normalize_posted_ids(current_ids)
         save_state(state)
         log(f"First run detected. Seeded posted_ids with {len(state['posted_ids'])} existing injuries. No posts sent.")
         return
 
-    log(f"New items: {len(new_items)}")
-    for item in new_items[:5]:
-        log(f"Will post: {item['player']} {item['team']} {item['status']}")
+    log(f"New items to post: {len(new_items)}")
 
     for item in new_items:
         try:
@@ -626,10 +592,10 @@ async def post_allowed_updates() -> None:
             state["posted_ids"] = normalize_posted_ids(posted_ids_list)
             save_state(state)
 
-            log(f"Posted: {item['player']} | {item['team']} | {item['status']}")
+            log(f"Posted: {item.get('player') or item.get('headline')} | {item.get('team')} | {item.get('published_dt')}")
             await asyncio.sleep(1.0)
         except Exception as e:
-            log(f"Failed to post {item['player']}: {e}")
+            log(f"Failed to post item: {e}")
 
     state["posted_ids"] = normalize_posted_ids(posted_ids_list)
     save_state(state)
@@ -638,7 +604,7 @@ async def post_allowed_updates() -> None:
 
 async def background_loop() -> None:
     await client.wait_until_ready()
-    log("ESPN injury bot started")
+    log("ESPN injury bot started (API mode, 3–5 min random interval)")
 
     while not client.is_closed():
         if should_run_now():
@@ -647,7 +613,9 @@ async def background_loop() -> None:
         else:
             log("Outside allowed hours. Skipping check.")
 
-        await asyncio.sleep(POLL_INTERVAL)
+        interval = random.randint(POLL_INTERVAL_MIN, POLL_INTERVAL_MAX)
+        log(f"Next check in {interval}s ({interval // 60}m {interval % 60}s)")
+        await asyncio.sleep(interval)
 
 
 @client.event
@@ -666,5 +634,5 @@ async def start_injury_bot():
     if not CHANNEL_ID:
         raise RuntimeError("INJURY_CHANNEL_ID is not set")
 
-    log(f"Using cutoff date: {CUTOFF_DATE_ET.strftime('%Y-%m-%d')}")
+    log("Injury bot starting (ESPN API mode)")
     await client.start(DISCORD_TOKEN)
