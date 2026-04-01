@@ -2988,15 +2988,15 @@ RECENT FORM (last 5 appearances, most recent first):
 {'CONSECUTIVE APPEARANCES: ' + str(streak_count) + ' straight days' if streak_count >= 2 else ''}
 
 Instructions:
-- Open with the pitcher's name, when he entered, and the game situation
+- Target ~180 words. Stay under 900 characters total — this posts in a Discord embed.
+- VARY the opening structure. Do NOT always start with "[Name] entered in the [inning]". Options: lead with the result, lead with the situation, lead with what the pitcher did, use a short punchy scene-setter. Each card should feel different from the last.
+- Never end with an ellipsis or a mid-thought. Always end with a complete sentence.
 - Describe specifically what happened using the play-by-play detail
 - If he was pulled mid-inning, mention it naturally
-- Comment on the significance of the outing given his role and the game situation
-- If there is recent form context, weave it in naturally — don't just list the numbers
-- If there is a velocity note, include it as one sentence
-- End with a forward-looking or contextual sentence about his role/standing
-- Keep it tight and punchy — around 250 words
-- Keep it under 1000 characters total — this is a Discord embed field with a hard limit
+- Comment on the significance given his role and the game situation
+- Weave in recent form naturally if relevant — don't just list numbers
+- Include velocity note as one sentence if provided
+- Do not use headers, bullet points, or markdown
 - Do not start with 'In' or 'Tonight'"""
 
         def _call_claude():
@@ -3009,7 +3009,7 @@ Instructions:
                 },
                 json={
                     "model": "claude-sonnet-4-20250514",
-                    "max_tokens": 350,
+                    "max_tokens": 280,
                     "messages": [{"role": "user", "content": prompt}],
                 },
                 timeout=20,
@@ -3128,9 +3128,9 @@ async def post_card(channel, p: dict, matchup: str, score: str, context: dict, s
         score_tail=score_tail,
     )
     summary_text = claude_summary if claude_summary else template_summary
-    # Discord embed field limit is 1024 characters
-    if len(summary_text) > 1024:
-        summary_text = summary_text[:1021].rsplit(" ", 1)[0] + "..."
+    # Discord embed field limit is 1024 characters — target 900 in prompt for safety
+    if len(summary_text) > 950:
+        summary_text = summary_text[:947].rsplit(" ", 1)[0] + "."
 
     # Layout: impact tag → game line → summary → pitch count → season
     embed.add_field(name="", value=f"**{impact_tag(label, s)}**", inline=False)
