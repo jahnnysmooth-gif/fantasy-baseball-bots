@@ -29,7 +29,7 @@ POST_STAGGER_SECONDS = 45
 MAX_POSTS_PER_LOOP = 4
 GAME_RECENCY_HOURS = 15  # use start time as proxy; 15h covers a game starting at 10 PM + 3h game + buffer
 RESET_CLOSER_STATE = os.getenv("RESET_CLOSER_STATE", "").lower() in {"1", "true", "yes"}
-ANTHROPIC_API_KEY = os.getenv("ANTHROPIC_API_KEY", "")
+ANTHROPIC_API_KEY = os.getenv("bullpen_bot_summary", "")
 TREND_STATE_FILE = "state/closer/trend_state.json"
 
 TREND_FAMILY_COOLDOWN_MINUTES = {
