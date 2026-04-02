@@ -2922,10 +2922,11 @@ async def build_summary_via_claude(
     pitcher_score: int,
     opp_score: int,
     score_tail: str,
-) -> str | None:
+    season_stats: dict = None,
+) -> dict | None:
     """
-    Call the Claude API to generate a natural-language summary for a pitcher card.
-    Returns the summary string, or None on failure (caller falls back to templates).
+    Call the Claude API to generate a headline and summary for a pitcher card.
+    Returns {"headline": str, "summary": str} or None on failure.
     """
     try:
         if not ANTHROPIC_API_KEY:
@@ -2985,7 +2986,17 @@ async def build_summary_via_claude(
         elif pitcher_score > 0 or opp_score > 0:
             score_context = f"Final score: {pitcher_score}-{opp_score} (pitcher's team-opponent)"
 
-        prompt = f"""Write a ~250 word baseball summary for a Discord embed card about a relief pitcher's outing. Write in a direct, informed sports analyst voice — natural, specific, no fluff. Do NOT use bullet points, headers, or markdown. Write in flowing prose sentences only.
+        # Season stats
+        season = season_stats or {}
+        sv = safe_int(season.get("saves", 0), 0)
+        holds = safe_int(season.get("holds", 0), 0)
+        season_era = season.get("era") or season.get("earnedRunAverage") or "—"
+        season_k = safe_int(season.get("strikeOuts", 0), 0)
+        season_stats_str = f"{sv} SV, {holds} HLD, {season_era} ERA, {season_k} K (season totals — use only these numbers)"
+
+        prompt = f"""You are writing two things for a Discord baseball bot card about a relief pitcher's outing:
+1. A HEADLINE: one punchy sentence (max 12 words), no period at end
+2. A SUMMARY: ~100 words of flowing prose, no bullet points or markdown
 
 PITCHER: {name} | {team}
 OPPONENT: {opp or 'unknown'}
@@ -2993,6 +3004,7 @@ ROLE: {role}
 OUTING LABEL: {label}
 ENTRY SITUATION: {entry_ctx}
 STAT LINE: {stat_line}
+SEASON STATS: {season_stats_str}
 {'INHERITED RUNNERS: ' + str(inherited) + (' (relieved ' + relieved_pitcher + ')' if relieved_pitcher else '') if inherited > 0 else ''}
 {score_context}
 
@@ -3007,16 +3019,19 @@ RECENT FORM (last 5 appearances, most recent first):
 {'CONSECUTIVE APPEARANCES: ' + str(streak_count) + ' straight days' if streak_count >= 2 else ''}
 
 Instructions:
-- Target ~130 words. Stay under 750 characters total — this posts in a Discord embed.
-- VARY the opening structure. Do NOT always start with "[Name] entered in the [inning]". Options: lead with the result, lead with the situation, lead with what the pitcher did, use a short punchy scene-setter. Each card should feel different from the last.
-- Never end with an ellipsis or a mid-thought. Always end with a complete sentence.
-- Describe specifically what happened using the play-by-play detail
-- If he was pulled mid-inning, mention it naturally
-- Comment on the significance given his role and the game situation
-- Weave in recent form naturally if relevant — don't just list numbers
-- Include velocity note as one sentence if provided
-- Do not use headers, bullet points, or markdown
-- Do not start with 'In' or 'Tonight'"""
+- CRITICAL: Never invent or assume any numbers not explicitly provided above. Do not reference save totals, ERA, strikeout numbers, or any other stats unless they appear in SEASON STATS or STAT LINE above.
+- Summary target: ~100 words, under 600 characters total.
+- VARY the opening structure — do not always start with "[Name] entered in the [inning]".
+- Never end with an ellipsis or incomplete thought. Always end with a complete sentence.
+- Use play-by-play detail specifically — name batters, describe what happened.
+- If he was pulled mid-inning, mention which inning and the situation clearly.
+- Weave in recent form naturally if relevant.
+- Include velocity note as one sentence if provided.
+- Do not start with 'In' or 'Tonight'.
+
+Respond in this exact format:
+HEADLINE: [your one-sentence headline]
+SUMMARY: [your summary prose]"""
 
         def _call_claude():
             resp = requests.post(
@@ -3028,7 +3043,7 @@ Instructions:
                 },
                 json={
                     "model": "claude-sonnet-4-20250514",
-                    "max_tokens": 220,
+                    "max_tokens": 250,
                     "messages": [{"role": "user", "content": prompt}],
                 },
                 timeout=20,
@@ -3040,10 +3055,25 @@ Instructions:
                 if block.get("type") == "text"
             ).strip()
 
-        summary = await loop.run_in_executor(None, _call_claude)
+        raw = await loop.run_in_executor(None, _call_claude)
+        if not raw:
+            return None
+
+        headline = ""
+        summary = ""
+        for line in raw.splitlines():
+            if line.startswith("HEADLINE:"):
+                headline = line[len("HEADLINE:"):].strip()
+            elif line.startswith("SUMMARY:"):
+                summary = line[len("SUMMARY:"):].strip()
+
+        # Fallback: if format not followed, treat entire response as summary
+        if not summary and raw:
+            summary = raw.strip()
+
         if summary:
             log(f"Claude API summary generated for {name}")
-            return summary
+            return {"headline": headline, "summary": summary}
         return None
 
     except Exception as e:
@@ -3129,7 +3159,7 @@ async def post_card(channel, p: dict, matchup: str, score: str, context: dict, s
             score_tail = f"{score_num} win"
 
     # Try Claude API — fall back to template on failure
-    claude_summary = await build_summary_via_claude(
+    claude_result = await build_summary_via_claude(
         name=p["name"],
         team=p["team"],
         opp_name=opp_name,
@@ -3145,15 +3175,25 @@ async def post_card(channel, p: dict, matchup: str, score: str, context: dict, s
         pitcher_score=pitcher_score,
         opp_score=opp_score,
         score_tail=score_tail,
+        season_stats=p.get("season_stats", {}),
     )
-    summary_text = claude_summary if claude_summary else template_summary
-    # Discord embed field limit is 1024 characters — target 750 in prompt for safety
-    if len(summary_text) > 800:
-        summary_text = summary_text[:797].rsplit(" ", 1)[0] + "."
 
-    # Layout: impact tag → game line → summary → pitch count → season
+    if claude_result:
+        headline_text = claude_result.get("headline", "")
+        summary_text = claude_result.get("summary", template_summary)
+    else:
+        headline_text = ""
+        summary_text = template_summary
+
+    # Discord embed field limit is 1024 characters — target 600 in prompt for safety
+    if len(summary_text) > 650:
+        summary_text = summary_text[:647].rsplit(" ", 1)[0] + "."
+
+    # Layout: impact tag → game line → headline (bold) → summary → pitch count → season
     embed.add_field(name="", value=f"**{impact_tag(label, s)}**", inline=False)
     embed.add_field(name="Game Line", value=format_game_line(s), inline=False)
+    if headline_text:
+        embed.add_field(name="", value=f"**{headline_text}**", inline=False)
     embed.add_field(name="Summary", value=summary_text, inline=False)
     embed.add_field(name="Pitch Count", value=format_pitch_count(p["stats"]), inline=False)
     embed.add_field(name="Season", value=format_season_line(p.get("season_stats", {})), inline=False)
