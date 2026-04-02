@@ -2960,6 +2960,63 @@ async def get_games() -> list:
         return []
 
 
+async def build_trend_pitcher_list() -> list:
+    """Build a processed_pitchers_by_game-style list from yesterday's final games.
+    Used by the trend system during the 2 AM–2 PM window when today's games haven't started.
+    No recency filter — we want last night's full slate regardless of game start time."""
+    yesterday = (datetime.now(ET) - timedelta(days=1)).date()
+    loop = asyncio.get_event_loop()
+    result = []
+    try:
+        games = await loop.run_in_executor(None, _fetch_schedule_sync, yesterday.isoformat())
+    except Exception as e:
+        log(f"Trend source fetch error for {yesterday}: {e}")
+        return result
+
+    for g in games:
+        if g.get("status", {}).get("detailedState") != "Final":
+            continue
+        game_id = g.get("gamePk")
+        if not game_id:
+            continue
+        try:
+            feed = await get_feed(game_id)
+        except Exception:
+            continue
+        pitchers = get_pitchers(feed)
+        game_date_et = parse_game_date_et(g)
+
+        for p in pitchers:
+            pitcher_id = p.get("id")
+            if pitcher_id is None:
+                continue
+            context = get_pitcher_entry_context(feed, pitcher_id, p["side"])
+            recent_appearances = await get_recent_appearances(pitcher_id, game_date_et, limit=5, max_days=21)
+            current_app = {
+                "ip": str(p["stats"].get("inningsPitched", "0.0")),
+                "h": safe_int(p["stats"].get("hits", 0), 0),
+                "er": safe_int(p["stats"].get("earnedRuns", 0), 0),
+                "bb": safe_int(p["stats"].get("baseOnBalls", 0), 0),
+                "k": safe_int(p["stats"].get("strikeOuts", 0), 0),
+                "saves": safe_int(p["stats"].get("saves", 0), 0),
+                "holds": safe_int(p["stats"].get("holds", 0), 0),
+                "blownSaves": safe_int(p["stats"].get("blownSaves", 0), 0),
+                "avg_fastball_velocity": p.get("avg_fastball_velocity"),
+                "fastball_count": safe_int(p.get("fastball_count", 0), 0),
+                "pitch_count": safe_int(p.get("pitch_count", 0), 0),
+            }
+            recent_for_trend = [current_app] + recent_appearances
+            result.append({
+                "pitcher": p,
+                "current_app": current_app,
+                "recent_appearances": recent_for_trend,
+                "context": context,
+                "game_date_et": game_date_et,
+            })
+    log(f"Trend source: {len(result)} pitchers from {yesterday} final games")
+    return result
+
+
 async def get_feed(game_id) -> dict:
     loop = asyncio.get_event_loop()
     return await loop.run_in_executor(None, _fetch_feed_sync, game_id)
@@ -3573,7 +3630,12 @@ async def loop():
 
                 # --- trend blurbs ---
                 if can_post_trend_now(state, now_et):
-                    trend_candidates = await gather_trend_candidates_from_recent_games(tracked, processed_pitchers_by_game)
+                    # During the trend window (2 AM–2 PM) today's games haven't started yet.
+                    # Fall back to yesterday's final games as the trend data source.
+                    trend_source = processed_pitchers_by_game
+                    if not trend_source:
+                        trend_source = await build_trend_pitcher_list()
+                    trend_candidates = await gather_trend_candidates_from_recent_games(tracked, trend_source)
                     for candidate in trend_candidates:
                         pid = candidate["pitcher_id"]
                         sig = appearance_signature(candidate["recent_appearances"])
