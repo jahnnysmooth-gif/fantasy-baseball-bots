@@ -6,6 +6,7 @@ from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 from zoneinfo import ZoneInfo
 
+import aiohttp
 import discord
 import requests
 
@@ -33,10 +34,13 @@ MAX_POSTS_PER_GAME_PER_SCAN = int(os.getenv("HITTER_MAX_POSTS_PER_GAME_PER_SCAN"
 POST_DELAY_SECONDS = float(os.getenv("HITTER_POST_DELAY_SECONDS", "1.25"))
 AWAKE_SCAN_MIN_MINUTES = int(os.getenv("HITTER_AWAKE_SCAN_MIN_MINUTES", "10"))
 AWAKE_SCAN_MAX_MINUTES = int(os.getenv("HITTER_AWAKE_SCAN_MAX_MINUTES", "8"))
+HITTER_TEST_DATE = os.getenv("HITTER_TEST_DATE", "")  # e.g. "2026-04-01" — overrides today's date for testing
+HITTER_TEST_LIMIT = int(os.getenv("HITTER_TEST_LIMIT", "0"))  # if > 0, cap games processed to this number
 SLEEP_START_HOUR_ET = int(os.getenv("HITTER_SLEEP_START_HOUR_ET", "3"))
 SLEEP_END_HOUR_ET = int(os.getenv("HITTER_SLEEP_END_HOUR_ET", "13"))
 ESPN_PLAYER_IDS_PATH = os.getenv("ESPN_PLAYER_IDS_PATH", "shared/player_ids/espn_player_ids.json")
 ERROR_CHANNEL_ID = int(os.getenv("HITTER_ERROR_CHANNEL_ID", "0"))
+ANTHROPIC_API_KEY = os.getenv("HITTER_BOT_SUMMARY")
 
 intents = discord.Intents.default()
 client: discord.Client | None = None
@@ -600,17 +604,29 @@ def parse_game_date_et(game: dict):
 # ---------------- MLB DATA ----------------
 
 def get_games() -> list[dict]:
-    today = datetime.now(ET).date()
-    games: list[dict] = []
+    if HITTER_TEST_DATE:
+        try:
+            fetch_date = date.fromisoformat(HITTER_TEST_DATE)
+        except ValueError:
+            log(f"Invalid HITTER_TEST_DATE '{HITTER_TEST_DATE}', falling back to today")
+            fetch_date = datetime.now(ET).date()
+    else:
+        fetch_date = datetime.now(ET).date()
 
+    games: list[dict] = []
     try:
-        response = requests.get(f"{SCHEDULE_URL}&date={today.isoformat()}", timeout=REQUEST_TIMEOUT)
+        response = requests.get(f"{SCHEDULE_URL}&date={fetch_date.isoformat()}", timeout=REQUEST_TIMEOUT)
         response.raise_for_status()
         payload = response.json()
         for date_block in payload.get("dates", []):
             games.extend(date_block.get("games", []))
     except Exception as exc:
-        log(f"Schedule fetch error for {today}: {exc}")
+        log(f"Schedule fetch error for {fetch_date}: {exc}")
+
+    if HITTER_TEST_LIMIT > 0:
+        games = games[:HITTER_TEST_LIMIT]
+        log(f"HITTER_TEST_LIMIT={HITTER_TEST_LIMIT}: capped to {len(games)} games")
+
     return games
 
 
@@ -3206,6 +3222,266 @@ def _steal_context_sentence(context: dict) -> str:
     ])
 
 
+async def generate_ai_hitter_summary(
+    name: str,
+    team: str,
+    stats: dict,
+    label: str,
+    context: dict,
+    opponent: str,
+    team_won: bool,
+    recent_games: list[dict],
+    pitcher: dict | None = None,
+    lineup_spot: int = 0,
+    position: str = "",
+    team_score: int = -1,
+    opp_score: int = -1,
+    hitter: dict | None = None,
+    opponent_abbr: str = "",
+    injury_note: str = "",
+) -> str | None:
+    """Call Claude API to generate a hitter summary. Returns None on failure."""
+    if not ANTHROPIC_API_KEY:
+        return None
+
+    try:
+        team_name = team_name_from_abbr(team)
+        opponent_text = opponent or "the opposing club"
+
+        hits = safe_int(stats.get("hits", 0), 0)
+        ab = safe_int(stats.get("atBats", 0), 0)
+        runs = safe_int(stats.get("runs", 0), 0)
+        rbi = safe_int(stats.get("rbi", 0), 0)
+        homers = safe_int(stats.get("homeRuns", 0), 0)
+        doubles = safe_int(stats.get("doubles", 0), 0)
+        triples = safe_int(stats.get("triples", 0), 0)
+        walks = safe_int(stats.get("baseOnBalls", 0), 0)
+        steals = safe_int(stats.get("stolenBases", 0), 0)
+        strikeouts = safe_int(stats.get("strikeOuts", 0), 0)
+
+        stat_parts = [f"{hits}-for-{ab}"]
+        if homers:
+            stat_parts.append(f"{homers} HR")
+        if doubles:
+            stat_parts.append(f"{doubles} 2B")
+        if triples:
+            stat_parts.append(f"{triples} 3B")
+        if rbi:
+            stat_parts.append(f"{rbi} RBI")
+        if runs:
+            stat_parts.append(f"{runs} R")
+        if walks:
+            stat_parts.append(f"{walks} BB")
+        if steals:
+            stat_parts.append(f"{steals} SB")
+        if strikeouts:
+            stat_parts.append(f"{strikeouts} K")
+        stat_line = ", ".join(stat_parts)
+
+        # Score margin
+        if team_score >= 0 and opp_score >= 0:
+            if team_won:
+                margin = abs(team_score - opp_score)
+                score_str = f"{team_name} won {team_score}-{opp_score} ({'blowout' if margin >= 6 else 'comfortable win' if margin >= 4 else 'close game'})"
+            else:
+                margin = abs(team_score - opp_score)
+                score_str = f"{team_name} lost {team_score}-{opp_score} ({'lopsided loss' if margin >= 6 else 'close loss' if margin <= 2 else 'loss'})"
+        else:
+            score_str = f"{team_name} {'won' if team_won else 'lost'}"
+
+        # Pitcher context
+        pitcher_str = ""
+        if pitcher and pitcher.get("name"):
+            pitcher_str = f"Opposing starter: {pitcher['name']}"
+            if pitcher.get("era"):
+                pitcher_str += f" (ERA {pitcher['era']})"
+            if pitcher.get("games_started"):
+                pitcher_str += f", {pitcher['games_started']} GS"
+
+        # Lineup spot
+        lineup_str = f"Lineup spot: {_lineup_spot_description(lineup_spot)}" if lineup_spot else ""
+
+        # Position context
+        pos_str = f"Position: {position}" if position else ""
+
+        # Game context flags
+        context_flags = []
+        if context.get("walkoff"):
+            context_flags.append("delivered the walk-off hit/homer")
+        if context.get("go_ahead_homer"):
+            context_flags.append("hit the go-ahead home run")
+        elif context.get("go_ahead_hit"):
+            context_flags.append("delivered the go-ahead hit")
+        if context.get("game_tying_hit"):
+            context_flags.append("delivered the game-tying hit")
+        if context.get("insurance_hit"):
+            context_flags.append("added an insurance hit")
+        if context.get("first_run_hit"):
+            context_flags.append("drove in the game's first run")
+        homers_info = context.get("homers") or []
+        for h in homers_info:
+            inn = safe_int(h.get("inning", 0), 0)
+            h_rbi = safe_int(h.get("rbi", 0), 0)
+            pitch_type = h.get("pitch_type", "")
+            pitch_speed = float(h.get("pitch_speed") or 0)
+            pitch_str = _simplify_pitch_type(pitch_type, pitch_speed) if pitch_type else ""
+            homer_desc = f"HR in inning {inn}" if inn else "HR"
+            if h_rbi == 4:
+                homer_desc += " (grand slam)"
+            elif h_rbi >= 2:
+                homer_desc += f" ({h_rbi}-run)"
+            if pitch_str:
+                homer_desc += f" off {pitch_str}"
+            context_flags.append(homer_desc)
+        xbh = context.get("extra_base_hits") or []
+        for x in xbh:
+            hit_type = x.get("type", "extra-base hit")
+            inn = safe_int(x.get("inning", 0), 0)
+            x_rbi = safe_int(x.get("rbi", 0), 0)
+            xbh_desc = f"{hit_type} in inning {inn}" if inn else hit_type
+            if x_rbi:
+                xbh_desc += f" ({x_rbi} RBI)"
+            context_flags.append(xbh_desc)
+        steals_ctx = context.get("steals") or []
+        for s in steals_ctx:
+            base = s.get("base", "second")
+            inn = safe_int(s.get("inning", 0), 0)
+            steal_desc = f"stolen base ({base})"
+            if inn:
+                steal_desc += f" in inning {inn}"
+            context_flags.append(steal_desc)
+        hardest_ev = context.get("hardest_ev")
+        if hardest_ev and hardest_ev >= 100:
+            context_flags.append(f"hardest hit ball: {hardest_ev:.1f} mph exit velo")
+        balls_100 = safe_int(context.get("balls_100", 0), 0)
+        if balls_100 >= 2:
+            context_flags.append(f"{balls_100} balls hit at 100+ mph")
+
+        # Recent trend
+        trend_str = ""
+        if recent_games:
+            recent_hits = [g.get("h", 0) for g in recent_games[:5]]
+            hit_streak = 0
+            for h_count in recent_hits:
+                if h_count > 0:
+                    hit_streak += 1
+                else:
+                    break
+            if hit_streak >= 3:
+                trend_str = f"Active hitting streak: {hit_streak + (1 if hits > 0 else 0)} games"
+            hitless_streak = 0
+            for h_count in recent_hits:
+                if h_count == 0:
+                    hitless_streak += 1
+                else:
+                    break
+            if hitless_streak >= 2 and hits > 0:
+                trend_str = f"Bounce-back game after {hitless_streak} hitless games"
+            recent_hr = sum(g.get("hr", 0) for g in recent_games[:5])
+            if recent_hr >= 3:
+                trend_str = (trend_str + f"; on power surge, {recent_hr} HR in last 5 games") if trend_str else f"Power surge: {recent_hr} HR in last 5 games"
+
+        # Opponent record
+        opp_record_str = ""
+        if opponent_abbr:
+            wins, losses = get_team_record(opponent_abbr)
+            if wins >= 0 and (wins + losses) >= 5:
+                opp_record_str = f"Opponent ({opponent_text}) record: {wins}-{losses}"
+
+        # Milestones
+        milestone_str = ""
+        if hitter:
+            milestones = get_milestone_notes(hitter, stats)
+            if milestones:
+                milestone_str = f"Milestone: {milestones[0]}"
+
+        # Injury note passthrough
+        injury_str = injury_note if injury_note else ""
+
+        # Build the full context block for Claude
+        context_lines = [
+            f"Player: {name} ({team_name})",
+            f"Tonight's line: {stat_line}",
+            f"Game result: {score_str}",
+        ]
+        if pitcher_str:
+            context_lines.append(pitcher_str)
+        if lineup_str:
+            context_lines.append(lineup_str)
+        if pos_str:
+            context_lines.append(pos_str)
+        if context_flags:
+            context_lines.append("Key moments: " + "; ".join(context_flags))
+        if trend_str:
+            context_lines.append(f"Recent trend: {trend_str}")
+        if opp_record_str:
+            context_lines.append(opp_record_str)
+        if milestone_str:
+            context_lines.append(milestone_str)
+        if injury_str:
+            context_lines.append(f"Injury/IL note: {injury_str}")
+
+        context_block = "\n".join(context_lines)
+
+        system_prompt = (
+            "You write post-game fantasy baseball hitter cards for a Discord server. "
+            "Your voice is that of a sharp beat reporter who follows fantasy baseball closely — "
+            "confident, natural, and concise. You prioritize fantasy value (HR, RBI, SB, AVG) "
+            "but also capture the human side of the game.\n\n"
+            "Rules:\n"
+            "- Write exactly 3-4 sentences. No more.\n"
+            "- Bold the player's full name on its first mention using **Name**.\n"
+            "- Start with an engaging opener that is NOT just a dry recitation of the stat line. "
+            "Open with the narrative (walkoff, go-ahead hit, hot streak, etc.) and weave in stats.\n"
+            "- Use the player's last name after the first mention, not 'he' every time.\n"
+            "- Vary sentence length. Mix a punchy short sentence with longer ones.\n"
+            "- Be specific: use the actual game context (pitch type, inning, score margin, lineup spot) "
+            "when relevant, but only if it adds something natural. Don't cram everything in.\n"
+            "- Mention fantasy relevance at least once (category impact, multi-cat value, matchup context).\n"
+            "- If a pitcher ERA/quality is provided, mention it briefly when it adds context to the performance.\n"
+            "- Do not use em dashes (—). Use commas or periods instead.\n"
+            "- Do not use the words: 'showcased', 'impressive', 'impressive performance', "
+            "'notable', 'demonstrated', 'incredible', 'amazing', 'fantastic'.\n"
+            "- Do not start sentences with 'Additionally' or 'Furthermore'.\n"
+            "- Do not use the phrase 'on the mound tonight'.\n"
+            "- Output only the summary text. No labels, no preamble, no quotation marks."
+        )
+
+        user_message = f"Write a fantasy baseball summary card for this hitter's performance tonight:\n\n{context_block}"
+
+        async with aiohttp.ClientSession() as session:
+            async with session.post(
+                "https://api.anthropic.com/v1/messages",
+                headers={
+                    "x-api-key": ANTHROPIC_API_KEY,
+                    "anthropic-version": "2023-06-01",
+                    "content-type": "application/json",
+                },
+                json={
+                    "model": "claude-haiku-4-5-20251001",
+                    "max_tokens": 300,
+                    "system": system_prompt,
+                    "messages": [{"role": "user", "content": user_message}],
+                },
+                timeout=aiohttp.ClientTimeout(total=15),
+            ) as resp:
+                if resp.status != 200:
+                    log(f"Anthropic API error {resp.status} for {name}")
+                    return None
+                data = await resp.json()
+                text = data.get("content", [{}])[0].get("text", "").strip()
+                if not text:
+                    return None
+                # Bold the player's name if the model forgot
+                if name not in text and f"**{name}**" not in text:
+                    text = text.replace(name.split()[-1], f"**{name}**", 1) if name.split()[-1] in text else text
+                return text
+
+    except Exception as exc:
+        log(f"AI summary failed for {name}: {exc}")
+        return None
+
+
 def build_hitter_summary(
     name: str,
     team: str,
@@ -3915,6 +4191,32 @@ async def post_card(channel: discord.abc.Messageable, hitter: dict, opponent: st
     injury_note = get_player_injury_status(hitter.get("id", 0), hitter.get("name", ""))
     score_value = score_hitter(stats)
     emoji = _subject_emoji(stats, label, game_context, recent_games)
+
+    summary = await generate_ai_hitter_summary(
+        name=hitter["name"],
+        team=hitter["team"],
+        stats=stats,
+        label=label,
+        context=game_context,
+        opponent=opponent,
+        team_won=team_won,
+        recent_games=recent_games,
+        pitcher=pitcher,
+        lineup_spot=lineup_spot,
+        position=position,
+        team_score=team_score,
+        opp_score=opp_score,
+        hitter=hitter,
+        opponent_abbr=opponent_abbr,
+        injury_note=injury_note,
+    )
+    if not summary:
+        summary = build_hitter_summary(
+            hitter["name"], hitter["team"], stats, label, game_context, opponent, team_won, recent_games,
+            pitcher=pitcher, lineup_spot=lineup_spot, position=position, team_score=team_score, opp_score=opp_score,
+            feed=feed, hitter=hitter, opponent_abbr=opponent_abbr, injury_note=injury_note,
+        )
+
     embed = discord.Embed(
         color=_tier_color(score_value, hitter["team"]),
         timestamp=datetime.now(timezone.utc),
@@ -3922,15 +4224,7 @@ async def post_card(channel: discord.abc.Messageable, hitter: dict, opponent: st
     apply_player_card_chrome(embed, hitter["name"], hitter["team"])
     subject_text = build_hitter_subject(hitter["name"], stats, label, game_context, recent_games, position=position, lineup_spot=lineup_spot)
     embed.add_field(name="", value=f"**{emoji}{subject_text}**", inline=False)
-    embed.add_field(
-        name="Summary",
-        value=build_hitter_summary(
-            hitter["name"], hitter["team"], stats, label, game_context, opponent, team_won, recent_games,
-            pitcher=pitcher, lineup_spot=lineup_spot, position=position, team_score=team_score, opp_score=opp_score,
-            feed=feed, hitter=hitter, opponent_abbr=opponent_abbr, injury_note=injury_note,
-        ),
-        inline=False,
-    )
+    embed.add_field(name="Summary", value=summary, inline=False)
     embed.add_field(name="Game Line", value=format_hitter_game_line(stats), inline=False)
     embed.add_field(name="Season", value=format_hitter_season_line(hitter.get("season_stats", {})), inline=False)
     await channel.send(embed=embed)
