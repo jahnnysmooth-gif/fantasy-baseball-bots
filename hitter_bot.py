@@ -3299,7 +3299,19 @@ async def generate_ai_hitter_summary(
                 pitcher_str += f", {pitcher['games_started']} GS"
 
         # Lineup spot
-        lineup_str = f"Lineup spot: {_lineup_spot_description(lineup_spot)}" if lineup_spot else ""
+        if lineup_spot == 1:
+            lineup_label = "leadoff"
+        elif lineup_spot == 2:
+            lineup_label = "second"
+        elif lineup_spot in (3, 4, 5):
+            lineup_label = "middle of the order"
+        elif lineup_spot in (6, 7):
+            lineup_label = "lower middle of the order"
+        elif lineup_spot in (8, 9):
+            lineup_label = "bottom of the order"
+        else:
+            lineup_label = ""
+        lineup_str = f"Lineup spot: {lineup_spot} ({lineup_label})" if lineup_spot and lineup_label else ""
 
         # Position context
         pos_str = f"Position: {position}" if position else ""
