@@ -31,6 +31,7 @@ MAX_POSTS_PER_LOOP = 4
 GAME_RECENCY_HOURS = 15  # use start time as proxy; 15h covers a game starting at 10 PM + 3h game + buffer
 RESET_CLOSER_STATE = os.getenv("RESET_CLOSER_STATE", "").lower() in {"1", "true", "yes"}
 ANTHROPIC_API_KEY = os.getenv("bullpen_bot_summary", "")
+DEPTH_CHART_OVERRIDE_CHANNEL_ID = int(os.getenv("DEPTH_CHART_OVERRIDE_CHANNEL_ID", "1484232761597366412"))
 TREND_STATE_FILE = "state/closer/trend_state.json"
 
 TREND_FAMILY_COOLDOWN_MINUTES = {
@@ -2838,6 +2839,9 @@ async def get_player_season_stats(player_id: int) -> dict:
     stats = await loop.run_in_executor(None, _fetch_player_season_stats_sync, player_id, season)
     season_stats_cache[player_id] = stats
     return stats
+
+
+def _fetch_schedule_sync(date_str: str) -> list:
     """Blocking schedule fetch — run via executor only."""
     r = requests.get(f"{SCHEDULE_URL}&date={date_str}", timeout=30)
     r.raise_for_status()
