@@ -2858,7 +2858,7 @@ async def gather_trend_candidates_from_recent_games(tracked: dict, processed_pit
         if not recent:
             continue
 
-        # 4-inning IP floor: total outs across the qualifying window must be >= 12
+        # IP floor: lowered to 8 outs for early season — raise back to 12 mid-April
         usage_snapshot = await get_recent_usage_snapshot(pid, game_date_et)
         trend_options = build_trend_candidates(item["current_app"], recent, None, item.get("context", {}), usage_snapshot=usage_snapshot)
         if not trend_options:
@@ -2872,8 +2872,8 @@ async def gather_trend_candidates_from_recent_games(tracked: dict, processed_pit
         window = trend_window_for_code(best.get("code", ""))
         window_apps = recent[:window]
         total_outs = sum(baseball_ip_to_outs(a.get("ip", "0.0")) for a in window_apps)
-        if total_outs < 12:  # 4 innings = 12 outs
-            log(f"Trend suppressed for {p.get('name')} — only {total_outs} outs in window (need 12)")
+        if total_outs < 8:  # ~2.2 innings minimum — lowered for early season, raise back mid-April
+            log(f"Trend suppressed for {p.get('name')} — only {total_outs} outs in window (need 8)")
             continue
 
         candidates.append({
