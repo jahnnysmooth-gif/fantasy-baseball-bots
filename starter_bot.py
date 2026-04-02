@@ -3264,6 +3264,7 @@ async def build_claude_summary(
     Returns None on any failure so post_card falls back to templates.
     """
     if not ANTHROPIC_API_KEY:
+        log("Claude summary skipped — starter_bot_summary env var not set")
         return None
 
     stats   = p.get("stats", {})
@@ -3460,6 +3461,7 @@ Style rules:
 Output only the summary paragraph, nothing else."""
 
     try:
+        log(f"Calling Claude API for {name} summary...")
         client_ai = anthropic.Anthropic(api_key=ANTHROPIC_API_KEY)
         response = await asyncio.to_thread(
             client_ai.messages.create,
