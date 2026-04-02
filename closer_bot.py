@@ -21,9 +21,9 @@ os.makedirs("state/closer", exist_ok=True)
 
 ET = ZoneInfo("America/New_York")
 
-SCHEDULE_URL = "https://statsapi.mlb.com/api/v1/schedule?sportId=1"
+SCHEDULE_URL = "https://statsapi.mlb.com/api/v1/schedule?sportId=1&gameType=R"
 LIVE_URL = "https://statsapi.mlb.com/api/v1.1/game/{}/feed/live"
-PLAYER_SEASON_STATS_URL = "https://statsapi.mlb.com/api/v1/people/{}/stats?stats=season&group=pitching&sportId=1&season={}"
+PLAYER_SEASON_STATS_URL = "https://statsapi.mlb.com/api/v1/people/{}/stats?stats=season&group=pitching&sportId=1&gameType=R&season={}"
 
 POLL_MINUTES = 10
 POST_STAGGER_SECONDS = 45
@@ -35,20 +35,23 @@ DEPTH_CHART_OVERRIDE_CHANNEL_ID = int(os.getenv("DEPTH_CHART_OVERRIDE_CHANNEL_ID
 TREND_STATE_FILE = "state/closer/trend_state.json"
 
 TREND_FAMILY_COOLDOWN_MINUTES = {
-    "scoreless": 240,
-    "strikeout": 180,
-    "role": 180,
-    "dominance": 180,
-    "usage": 180,
-    "command": 120,
-    "rough": 120,
-    "bounce": 120,
+    "strikeout": 240,    # raised — bat-missing trends are high signal, don't flood
+    "dominance": 240,    # raised — dominant streak/run are premium signals
+    "role": 200,         # emerging closers/holds — meaningful but can repeat if different pitchers
+    "rough": 180,        # blown save watch is top priority rough signal
+    "usage": 180,        # late-inning leverage patterns
+    "specialist": 180,   # inherited runner stopper
+    "bounce": 150,       # bounce-back requires 2 clean outings now, less noise
+    "command": 150,      # command spike — solid but secondary
+    "workload": 120,     # fatigue flags can fire more often, different pitchers
     "misc": 120,
 }
 TREND_RANDOM_INTERVAL_MIN_MINUTES = 6
 TREND_RANDOM_INTERVAL_MAX_MINUTES = 16
-TREND_HOURS_START = 2   # 2 AM ET
-TREND_HOURS_END = 14    # 2 PM ET
+TREND_HOURS_START = 2   # 2 AM ET — trend blurbs + velocity alerts window opens
+TREND_HOURS_END = 14    # 2 PM ET — trend blurbs + velocity alerts window closes
+CARD_HOURS_START = 14   # 2 PM ET — tracked card posting window opens
+CARD_HOURS_END = 2      # 2 AM ET — tracked card posting window closes (crosses midnight)
 TREND_MAX_PER_HOUR = 2
 VELOCITY_DELTA_THRESHOLD = 1.0
 VELOCITY_MIN_PITCHES = 10
@@ -1649,12 +1652,11 @@ def build_velocity_inline_sentence(velocity_alert: dict) -> str:
 
 
 def trend_window_for_code(code: str) -> int:
-    if code in {"scoreless5", "scoreless4of5", "ks10last5", "runs3of5"}:
+    if code in {"ks12last5", "dominant_run", "runs3of5", "multi_inning_pattern"}:
         return 5
-    if code in {"scoreless4", "k_3_of_4"}:
+    if code in {"dominant_streak"}:
         return 4
-    if code == "saves2":
-        return 2
+    # workload_spike and inherited_runner_specialist use 6-day window but default 3 is fine for IP check
     return 3
 
 
@@ -1709,24 +1711,30 @@ def build_trend_stat_sentence(name: str, code: str, span_stats: dict):
     ip_text = f"{span_stats.get('ip', '0.0')} innings"
     window = span_stats.get("window", 3)
 
-    if code in {"scoreless4", "scoreless5", "scoreless4of5"}:
+    if code in {"ks12last5", "ks8last3"}:
+        return random.choice([
+            f"He has paired the swing-and-miss with {bb_text} over {ip_text} in that span.",
+            f"Over that stretch, he has worked {ip_text} while keeping it to {bb_text}.",
+            f"That run has also come with {bb_text} over {ip_text}.",
+        ])
+
+    if code in {"dominant_streak", "dominant_run"}:
         return random.choice([
             f"During that {window}-appearance stretch, he has {k_text} against {bb_text}.",
             f"He has covered {ip_text} during that run, with {k_text} and {bb_text}.",
             f"The stretch has come with {k_text} over {ip_text}, and only {bb_text}.",
         ])
 
-    if code in {"ks10last5", "ks7last3", "dominant_last3", "dominant_k_combo", "no_walk3", "k_3_of_4"}:
-        return random.choice([
-            f"That run has also come with {bb_text} over {ip_text}.",
-            f"He has paired the swing-and-miss with {bb_text} over {ip_text} in that span.",
-            f"Over that stretch, he has worked {ip_text} while keeping it to {bb_text}.",
-        ])
-
-    if code in {"runs2of3", "runs3of5", "scoreless_snapped", "first_rough_after_hot"}:
+    if code in {"runs2of3", "runs3of5", "blown_save_watch", "first_rough_after_hot"}:
         return random.choice([
             f"Across that stretch, he has still managed {k_text}, but the run prevention has slipped.",
             f"The recent stretch covers {ip_text}, with {k_text} and {bb_text}, but too many runs have crossed.",
+        ])
+
+    if code in {"command_spike", "multi_inning_pattern"}:
+        return random.choice([
+            f"Over that stretch, he has logged {ip_text} with {k_text} against {bb_text}.",
+            f"That span has come with {k_text} and only {bb_text} over {ip_text}.",
         ])
 
     return random.choice([
@@ -2256,52 +2264,86 @@ def get_all_tracked_names(tracked: dict):
 
 
 def recent_window_summary(recent_appearances):
-    apps = recent_appearances[:5]
+    apps = recent_appearances[:6]
     if not apps:
         return {}
     last3 = apps[:3]
     last4 = apps[:4]
     last5 = apps[:5]
+    last6 = apps[:6]
 
-    # IP floor: 3-game codes only fire if the window covers at least 3 total innings (9 outs)
+    # IP floors
     last3_outs = sum(baseball_ip_to_outs(a.get("ip", "0.0")) for a in last3)
-    last3_meets_ip_floor = last3_outs >= 9
+    last4_outs = sum(baseball_ip_to_outs(a.get("ip", "0.0")) for a in last4)
+    last5_outs = sum(baseball_ip_to_outs(a.get("ip", "0.0")) for a in last5)
+    last3_meets_ip_floor = last3_outs >= 9   # 3 innings
+    last4_meets_ip_floor = last4_outs >= 12  # 4 innings
+    last5_meets_ip_floor = last5_outs >= 15  # 5 innings
 
-    # ER totals for strikeout combo gate
+    # ER / BB totals
     er_last3 = sum(safe_int(a.get("er", 0), 0) for a in last3)
     er_last5 = sum(safe_int(a.get("er", 0), 0) for a in last5)
+    bb_last5 = sum(safe_int(a.get("bb", 0), 0) for a in last5)
+
+    # K totals
+    ks_last3 = sum(safe_int(a.get("k", 0), 0) for a in last3)
+    ks_last5 = sum(safe_int(a.get("k", 0), 0) for a in last5)
+
+    # Blown saves in last 10 appearances (use last6 as proxy)
+    blown_last6 = sum(safe_int(a.get("blownSaves", 0), 0) for a in last6)
 
     return {
         "last3": last3,
         "last4": last4,
         "last5": last5,
+        "last6": last6,
         "last3_meets_ip_floor": last3_meets_ip_floor,
-        # scoreless streaks
-        "scoreless4": len(last4) == 4 and all(a.get("er", 0) == 0 for a in last4),
-        "scoreless5": len(last5) == 5 and all(a.get("er", 0) == 0 for a in last5),
-        "scoreless4of5": len(last5) == 5 and sum(1 for a in last5 if a.get("er", 0) == 0) >= 4,
-        # rough trends
-        "runs2of3": last3_meets_ip_floor and len(last3) == 3 and sum(1 for a in last3 if a.get("er", 0) > 0) >= 2,
-        "runs3of5": len(last5) == 5 and sum(1 for a in last5 if a.get("er", 0) > 0) >= 3,
-        # strikeout trends — require at most 1 ER across the window
-        "ks_last3": sum(safe_int(a.get("k", 0), 0) for a in last3),
-        "ks_last5": sum(safe_int(a.get("k", 0), 0) for a in last5),
-        "ks7last3_clean": last3_meets_ip_floor and er_last3 <= 1,
-        "ks10last5_clean": len(last5) == 5 and er_last5 <= 1,
-        # command / dominance — subject to IP floor
-        "dominant_last3": last3_meets_ip_floor and sum(1 for a in last3 if grade_outing(a) in {"DOMINANT", "CLEAN"}) >= 2,
-        "dominant_k_combo": last3_meets_ip_floor and len(last3) == 3 and sum(1 for a in last3 if a.get("er", 0) == 0 and safe_int(a.get("k", 0), 0) >= 2) >= 2,
-        "no_walk3": last3_meets_ip_floor and len(last3) == 3 and all(safe_int(a.get("bb", 0), 0) == 0 for a in last3),
-        "k_3_of_4": len(last4) == 4 and sum(1 for a in last4 if safe_int(a.get("k", 0), 0) >= 1) >= 3,
-        # role codes — saves2/holds3 exempt from IP floor (stat itself implies meaningful usage)
-        "saves2": len(last3) >= 2 and sum(1 for a in last3[:2] if safe_int(a.get("saves", 0), 0) > 0) == 2,
-        "holds3": len(last3) == 3 and all(safe_int(a.get("holds", 0), 0) > 0 for a in last3),
-        "multi_inning3": last3_meets_ip_floor and len(last3) == 3 and all(baseball_ip_to_outs(a.get("ip", "0.0")) >= 4 and a.get("er", 0) == 0 for a in last3),
-        "inherit_zero3": False,
+        "last4_meets_ip_floor": last4_meets_ip_floor,
+        "last5_meets_ip_floor": last5_meets_ip_floor,
+        # --- strikeout trends (raised floors, at most 1 ER across window) ---
+        "ks_last3": ks_last3,
+        "ks_last5": ks_last5,
+        "ks8last3_clean": last3_meets_ip_floor and ks_last3 >= 8 and er_last3 <= 1,
+        "ks12last5_clean": last5_meets_ip_floor and ks_last5 >= 12 and er_last5 <= 1,
+        # --- dominance: separate streak vs run ---
+        "dominant_streak": last4_meets_ip_floor and len(last4) == 4 and all(
+            grade_outing(a) in {"DOMINANT", "CLEAN"} for a in last4
+        ),
+        "dominant_run": last5_meets_ip_floor and len(last5) == 5 and sum(
+            1 for a in last5 if grade_outing(a) in {"DOMINANT", "CLEAN"}
+        ) >= 4,
+        # --- rough trends ---
+        "runs2of3": last3_meets_ip_floor and len(last3) == 3 and sum(
+            1 for a in last3 if a.get("er", 0) > 0
+        ) >= 2,
+        "runs3of5": last5_meets_ip_floor and len(last5) == 5 and sum(
+            1 for a in last5 if a.get("er", 0) > 0
+        ) >= 3,
+        # --- blown save watch: 2+ blown saves in last 6 appearances ---
+        "blown_save_watch": blown_last6 >= 2,
+        # --- command spike: 0 BB in last 3 with IP floor (was issuing walks before) ---
+        "command_spike": last3_meets_ip_floor and len(last3) == 3 and all(
+            safe_int(a.get("bb", 0), 0) == 0 for a in last3
+        ) and bb_last5 >= 2,  # had walks earlier in the window = genuine improvement
+        # --- multi-inning pattern: avg 4+ outs/outing over last 5 ---
+        "multi_inning_pattern": last5_meets_ip_floor and len(last5) == 5 and (
+            last5_outs / 5
+        ) >= 4.0,
+        # --- role codes (saves/holds exempt from IP floor) ---
+        "saves2in7": sum(
+            1 for a in last5 if safe_int(a.get("saves", 0), 0) > 0
+        ) >= 2,
+        "save_plus_hold": (
+            sum(1 for a in last5 if safe_int(a.get("saves", 0), 0) > 0) >= 1 and
+            sum(1 for a in last5 if safe_int(a.get("holds", 0), 0) > 0) >= 1
+        ),
+        "holds3": last3_meets_ip_floor and len(last3) == 3 and all(
+            safe_int(a.get("holds", 0), 0) > 0 for a in last3
+        ),
     }
 
 
-def build_trend_candidates(current_app: dict, recent_appearances, tracked_info, context: dict):
+def build_trend_candidates(current_app: dict, recent_appearances, tracked_info, context: dict, usage_snapshot: dict | None = None):
     if tracked_info:
         return []
     if not recent_appearances:
@@ -2310,75 +2352,84 @@ def build_trend_candidates(current_app: dict, recent_appearances, tracked_info, 
     if not info:
         return []
     candidates = []
-    current_grade = grade_outing(current_app)
     current_save = safe_int(current_app.get("saves", 0), 0) > 0
     current_hold = safe_int(current_app.get("holds", 0), 0) > 0
     prev = recent_appearances[1] if len(recent_appearances) > 1 else None
     prev2 = recent_appearances[2] if len(recent_appearances) > 2 else None
     last3_meets_ip_floor = info.get("last3_meets_ip_floor", False)
+    last4_meets_ip_floor = info.get("last4_meets_ip_floor", False)
+    last5_meets_ip_floor = info.get("last5_meets_ip_floor", False)
 
     def add(code, subject, emoji, priority, family, detail=None):
         candidates.append({"code": code, "subject": subject, "emoji": emoji, "priority": priority, "family": family, "detail": detail or {}})
 
-    # --- scoreless streaks (priority ladder: scoreless5 > scoreless4 > scoreless4of5) ---
-    if info.get("scoreless5"):
-        add("scoreless5", "Scoreless Streak: 5 Straight", "🔥", 100, "scoreless")
-    elif info.get("scoreless4"):
-        add("scoreless4", "Scoreless Streak: 4 Straight", "🔥", 88, "scoreless")
-    elif info.get("scoreless4of5"):
-        add("scoreless4of5", "Strong Recent Run", "🔥", 72, "scoreless")
+    # --- strikeout trends (raised floors: 12 over 5, 8 over 3; at most 1 ER) ---
+    if info.get("ks12last5_clean"):
+        add("ks12last5", "Bat-Missing Run", "⚡", 96, "strikeout", {"ks": info.get("ks_last5", 0), "window": 5})
+    elif info.get("ks8last3_clean"):
+        add("ks8last3", "Strikeout Surge", "⚡", 86, "strikeout", {"ks": info.get("ks_last3", 0), "window": 3})
 
-    # --- strikeout trends — only fire when window is mostly clean (at most 1 ER) ---
-    if info.get("ks10last5_clean") and info.get("ks_last5", 0) >= 10:
-        add("ks10last5", "Bat-Missing Run", "⚡", 96, "strikeout", {"ks": info.get("ks_last5", 0), "window": 5})
-    elif info.get("ks7last3_clean") and info.get("ks_last3", 0) >= 7:
-        add("ks7last3", "Strikeout Surge", "⚡", 86, "strikeout", {"ks": info.get("ks_last3", 0), "window": 3})
+    # --- dominance: separate streak (4 straight) vs run (4 of 5) ---
+    if info.get("dominant_streak"):
+        add("dominant_streak", "Dominant Streak", "🔥", 92, "dominance")
+    elif info.get("dominant_run"):
+        add("dominant_run", "Dominant Run", "🔥", 80, "dominance")
 
-    # --- command / dominance — guarded by IP floor ---
-    if info.get("dominant_last3"):
-        add("dominant_last3", "Dominant Stretch", "⚡", 78, "dominance")
-    if info.get("dominant_k_combo"):
-        add("dominant_k_combo", "Power Outings Stacking Up", "⚡", 82, "dominance")
-    if info.get("no_walk3"):
-        add("no_walk3", "No-Walk Run", "🧠", 68, "command")
-    if info.get("k_3_of_4"):
-        add("k_3_of_4", "Steady Swing-and-Miss", "⚡", 62, "strikeout")
-
-    # --- role codes (saves2/holds3 exempt from IP floor) ---
-    if current_save and info.get("saves2"):
-        add("saves2", "Back-to-Back Saves", "📈", 90, "role")
-    if current_hold and info.get("holds3"):
-        add("holds3", "Three Straight Holds", "📈", 84, "role")
-    if info.get("multi_inning3"):
-        add("multi_inning3", "Multi-Inning Success", "📈", 66, "usage")
-
-    # --- bounce-back codes — guarded by IP floor on the 3-game window ---
-    if last3_meets_ip_floor:
-        if prev and safe_int(prev.get("blownSaves", 0), 0) > 0 and current_app.get("er", 0) == 0:
-            add("bounce_blown", "Bounce-Back Outing", "🔁", 74, "bounce")
-        if prev and prev.get("er", 0) > 0 and current_app.get("er", 0) == 0:
-            add("bounce_rough", "Rebound Performance", "🔁", 60, "bounce")
-        if prev and prev2 and prev.get("er", 0) > 0 and prev2.get("er", 0) > 0 and current_app.get("er", 0) == 0:
-            add("clean_rebound_2bad", "Steadier After Trouble", "🔁", 76, "bounce")
+    # --- blown save watch (highest-priority rough signal — wire drop alert) ---
+    if info.get("blown_save_watch"):
+        add("blown_save_watch", "Blown Save Watch", "🚨", 95, "rough")
 
     # --- rough trends ---
-    if info.get("runs2of3"):
-        add("runs2of3", "Recent Form Trending Down", "⚠️", 64, "rough")
-    if info.get("runs3of5"):
-        add("runs3of5", "Rough Stretch", "⚠️", 69, "rough")
-    if last3_meets_ip_floor:
-        if prev and info.get("scoreless4") is False and prev.get("er", 0) == 0 and prev2 and prev2.get("er", 0) == 0 and current_app.get("er", 0) > 0:
-            add("scoreless_snapped", "Scoreless Run Snapped", "⚠️", 58, "rough")
+    if not info.get("blown_save_watch"):
+        if info.get("runs3of5"):
+            add("runs3of5", "Rough Stretch", "⚠️", 69, "rough")
+        elif info.get("runs2of3"):
+            add("runs2of3", "Recent Form Trending Down", "⚠️", 64, "rough")
         if prev and prev.get("er", 0) == 0 and prev2 and prev2.get("er", 0) == 0 and current_app.get("er", 0) > 0:
             add("first_rough_after_hot", "First Rough Turn After Hot Stretch", "⚠️", 61, "rough")
 
-    # --- usage / leverage signals ---
-    if context.get("entry_inning") is not None and safe_int(context.get("entry_inning"), 0) >= 7 and current_app.get("er", 0) == 0:
-        add("late_inning_clean", "Late-Inning Look", "📈", 63, "usage")
-    if context.get("entry_inning") is not None and safe_int(context.get("entry_inning"), 0) >= 8 and current_app.get("er", 0) == 0:
-        add("higher_leverage_usage", "More Meaningful Work", "📈", 67, "usage")
-    if context.get("finished_game") and current_save:
-        add("save_conversion", "Emerging Late-Inning Option", "📈", 73, "role")
+    # --- bounce-back: requires 2 clean outings after a rough stretch ---
+    if last3_meets_ip_floor and prev and prev2:
+        current_clean = current_app.get("er", 0) == 0
+        prev_clean = prev.get("er", 0) == 0
+        prev2_rough = prev2.get("er", 0) > 0 or safe_int(prev2.get("blownSaves", 0), 0) > 0
+        if current_clean and prev_clean and prev2_rough:
+            add("bounce_back", "Bounce-Back Stretch", "🔁", 76, "bounce")
+
+    # --- command spike: 0 BB in last 3 after issuing walks earlier ---
+    if info.get("command_spike"):
+        add("command_spike", "Command Clicking", "🧠", 72, "command")
+
+    # --- multi-inning pattern ---
+    if info.get("multi_inning_pattern"):
+        add("multi_inning_pattern", "Multi-Inning Workhorse", "📈", 70, "usage")
+
+    # --- workload spike: 4+ appearances in last 6 days (fatigue flag) ---
+    apps_last6 = (usage_snapshot or {}).get("apps_last6", 0)
+    if apps_last6 >= 4:
+        add("workload_spike", "Heavy Workload Alert", "😤", 67, "workload", {"apps_last6": apps_last6})
+
+    # --- inherited runner specialist: track via context inherited_stranded_recent ---
+    inherited_stranded = context.get("inherited_stranded_recent", 0)
+    if inherited_stranded >= 3:
+        add("inherited_runner_specialist", "Inherited Runner Stopper", "🛑", 74, "specialist", {"inherited_stranded": inherited_stranded})
+
+    # --- usage / leverage: 2+ late-inning clean appearances in last 7 days ---
+    late_clean_recent = context.get("late_inning_clean_recent", 0)
+    if late_clean_recent >= 2:
+        entry = safe_int(context.get("entry_inning"), 0)
+        if entry >= 8 and current_app.get("er", 0) == 0:
+            add("higher_leverage_usage", "Trusted in the Big Spots", "📈", 78, "usage")
+        elif entry >= 7 and current_app.get("er", 0) == 0:
+            add("late_inning_clean", "Late-Inning Staple", "📈", 65, "usage")
+
+    # --- role: save_conversion requires 2 saves in 7 days OR save + hold ---
+    if info.get("saves2in7"):
+        add("saves2in7", "Emerging Closer", "📈", 90, "role")
+    elif info.get("save_plus_hold"):
+        add("save_plus_hold", "Emerging Late-Inning Option", "📈", 82, "role")
+    if current_hold and info.get("holds3"):
+        add("holds3", "Three Straight Holds", "📈", 75, "role")
 
     return candidates
 
@@ -2415,77 +2466,86 @@ def build_trend_analysis(name: str, team: str, trend: dict, recent_appearances, 
     code = trend.get("code")
     info = recent_window_summary(recent_appearances)
     span_stats = summarize_trend_span(recent_appearances, code)
+    apps_last6 = trend.get("detail", {}).get("apps_last6", 4)  # fallback to 4 for workload copy
+    inherited_stranded = trend.get("detail", {}).get("inherited_stranded", 3)  # fallback for copy
 
     templates = {
-        "scoreless5": [
-            f"{name} has now turned in five straight scoreless outings, one of the better recent runs in this bullpen.",
-            f"{name} has now logged five straight scoreless outings, giving him one of the stronger recent runs in this bullpen.",
-            f"Five straight scoreless appearances have put {name} firmly on the radar in this bullpen.",
+        # --- strikeout ---
+        "ks12last5": [
+            f"{name} has piled up {number_word(info.get('ks_last5', 0))} strikeouts over his last five appearances and the bat-missing has become impossible to ignore.",
+            f"Over his last five outings, {name} has racked up {number_word(info.get('ks_last5', 0))} strikeouts — a swing-and-miss rate that puts him among the most electric arms in this bullpen.",
         ],
-        "scoreless4": [
-            f"{name} has now strung together four straight scoreless outings and is building real momentum.",
-            f"Four straight scoreless appearances have {name} on a run that is starting to stand out.",
-            f"{name} has been locked in lately, putting up four straight scoreless outings.",
+        "ks8last3": [
+            f"{name} has punched out {number_word(info.get('ks_last3', 0))} hitters across his last three outings, and the strikeout stuff has been genuinely sharp.",
+            f"Strikeouts are stacking up fast for {name}, who has registered {number_word(info.get('ks_last3', 0))} over his last three appearances.",
         ],
-        "scoreless4of5": [
-            f"{name} has been scoreless in four of his last five outings and is building real momentum.",
-            f"{name} has put together scoreless work in four of his last five appearances and the recent body of work is starting to stand out.",
+        # --- dominance ---
+        "dominant_streak": [
+            f"{name} has now turned in four straight dominant performances — the kind of run that changes how managers deploy a reliever.",
+            f"Four consecutive dominant outings have {name} on one of the stronger recent stretches in this bullpen.",
         ],
-        "ks10last5": [
-            f"{name} has racked up {number_word(info.get('ks_last5', 0))} strikeouts over his last five appearances and the bat-missing has become impossible to miss.",
-            f"Over his last five outings, {name} has piled up {number_word(info.get('ks_last5', 0))} strikeouts and the swing-and-miss has jumped off the page.",
+        "dominant_run": [
+            f"{name} has been dominant in four of his last five outings, and the consistency is hard to overlook at this point.",
+            f"Four dominant appearances over the last five turns have {name} firmly on the radar.",
         ],
-        "ks7last3": [
-            f"{name} has piled up {number_word(info.get('ks_last3', 0))} strikeouts across his last three outings and is missing bats at a high rate.",
-            f"Strikeouts are starting to pile up for {name}, who has {number_word(info.get('ks_last3', 0))} over his last three appearances.",
-        ],
-        "dominant_last3": [
-            f"{name} has delivered multiple dominant appearances over his last three turns and is clearly in a strong stretch.",
-        ],
-        "dominant_k_combo": [
-            f"{name} has stacked power outings lately, with multiple recent appearances featuring scoreless work and at least two strikeouts.",
-        ],
-        "no_walk3": [
-            f"{name} has gone three straight outings without issuing a walk, and the recent command has been a real positive.",
-        ],
-        "saves2": [
-            f"{name} has converted saves in back-to-back appearances and is starting to show up in more meaningful spots.",
-        ],
-        "holds3": [
-            f"{name} has now collected holds in three straight appearances and continues to show up in useful spots.",
-        ],
-        "multi_inning3": [
-            f"{name} has put together a string of successful multi-inning outings, giving this bullpen useful length without sacrificing results.",
-        ],
-        "bounce_blown": [
-            f"After a blown save last time out, {name} answered with a clean bounce-back appearance.",
-        ],
-        "bounce_rough": [
-            f"{name} bounced back with a cleaner outing after running into trouble previously.",
-        ],
-        "clean_rebound_2bad": [
-            f"After two rougher appearances, {name} steadied things with a clean rebound outing.",
-        ],
-        "runs2of3": [
-            f"{name} has now allowed runs in two of his last three appearances, and the recent form is starting to turn shaky.",
+        # --- rough / blown save watch ---
+        "blown_save_watch": [
+            f"{name} has now blown multiple save opportunities recently — that is the kind of trend that should prompt a closer look at the depth chart.",
+            f"Multiple blown saves in a short window have put {name}'s closer role in question. Fantasy managers should be paying attention.",
         ],
         "runs3of5": [
-            f"{name} has been tagged in three of his last five outings, and the recent trend has gone in the wrong direction.",
+            f"{name} has allowed runs in three of his last five outings, and the recent form has gone in the wrong direction.",
         ],
-        "scoreless_snapped": [
-            f"A scoreless run came to an end for {name}, who had been putting together cleaner work lately.",
+        "runs2of3": [
+            f"{name} has been tagged in two of his last three appearances, and the recent results are starting to raise some flags.",
         ],
         "first_rough_after_hot": [
             f"{name} hit his first real bump after a stronger recent stretch.",
         ],
-        "late_inning_clean": [
-            f"{name} handled another clean late-inning look and continues to see work that matters more than ordinary middle relief.",
+        # --- bounce-back (now requires 2 clean after rough) ---
+        "bounce_back": [
+            f"After running into trouble, {name} has now strung together two clean outings and the concerning stretch appears to be behind him.",
+            f"{name} has answered a rough patch with back-to-back clean appearances — a real bounce-back run.",
         ],
+        # --- command spike ---
+        "command_spike": [
+            f"{name} has gone his last three outings without issuing a walk after showing earlier control issues. The command has clicked in.",
+            f"After struggling with his command earlier, {name} has been completely walk-free over his last three turns — a notable shift.",
+        ],
+        # --- multi-inning pattern ---
+        "multi_inning_pattern": [
+            f"{name} has averaged more than a full inning per outing over his last five appearances, giving this bullpen genuine length from a reliable arm.",
+            f"The recent workload for {name} has crept beyond a typical one-inning role — he has been getting multiple outs consistently and handling it well.",
+        ],
+        # --- workload spike ---
+        "workload_spike": [
+            f"{name} has appeared in {apps_last6} of the last six days, and the workload is starting to stack up. Worth monitoring before streaming.",
+            f"Heavy recent usage alert — {name} has been called on frequently and fatigue could become a factor if the pattern continues.",
+        ],
+        # --- inherited runner specialist ---
+        "inherited_runner_specialist": [
+            f"{name} has stranded multiple inherited runners in recent appearances, quietly becoming one of the more reliable fire-extinguisher options in this pen.",
+            f"Managers have been trusting {name} in tight inherited-runner spots and he has delivered, stranding {inherited_stranded} in recent outings.",
+        ],
+        # --- usage / leverage ---
         "higher_leverage_usage": [
-            f"The recent usage for {name} has started to creep into more meaningful territory, and he answered with another clean line.",
+            f"{name} has now made multiple late-game clean appearances and the usage pattern suggests the manager trusts him in spots that actually matter.",
+            f"The recent deployment for {name} has consistently landed in the eighth inning or later — and he has been clean each time.",
         ],
-        "save_conversion": [
-            f"{name} closed the door in his latest chance and is beginning to show up in spots that matter.",
+        "late_inning_clean": [
+            f"{name} has been showing up in late-inning spots consistently and delivering clean work — a pattern worth noting for deeper formats.",
+        ],
+        # --- role ---
+        "saves2in7": [
+            f"{name} has picked up multiple saves in the last seven days and is firmly establishing himself as the closer here.",
+            f"Back-to-back save opportunities have gone to {name}, and he has converted both. The role appears to be his.",
+        ],
+        "save_plus_hold": [
+            f"{name} has been trusted in both save and hold situations recently, signaling the manager views him as a top leverage arm.",
+            f"Save and hold opportunities in the same window point to {name} getting real high-leverage work. He is worth monitoring as a potential closer handcuff.",
+        ],
+        "holds3": [
+            f"{name} has now collected holds in three straight appearances and continues to show up in meaningful spots ahead of the closer.",
         ],
     }
 
@@ -2528,6 +2588,19 @@ def get_next_trend_delay_minutes() -> int:
     low = max(safe_int(TREND_RANDOM_INTERVAL_MIN_MINUTES, 6), 1)
     high = max(safe_int(TREND_RANDOM_INTERVAL_MAX_MINUTES, 16), low)
     return random.randint(low, high)
+
+
+def within_card_hours(now_et: datetime) -> bool:
+    """Returns True if current ET hour is within the card posting window (2 PM – 2 AM ET).
+    This window crosses midnight, so hour >= 14 OR hour < 2."""
+    hour = now_et.hour
+    return hour >= CARD_HOURS_START or hour < CARD_HOURS_END
+
+
+def within_trend_hours(now_et: datetime) -> bool:
+    """Returns True if current ET hour is within the trend/velocity window (2 AM – 2 PM ET)."""
+    hour = now_et.hour
+    return TREND_HOURS_START <= hour < TREND_HOURS_END
 
 
 def can_post_trend_now(state, now_et: datetime):
@@ -2786,7 +2859,8 @@ async def gather_trend_candidates_from_recent_games(tracked: dict, processed_pit
             continue
 
         # 4-inning IP floor: total outs across the qualifying window must be >= 12
-        trend_options = build_trend_candidates(item["current_app"], recent, None, item.get("context", {}))
+        usage_snapshot = await get_recent_usage_snapshot(pid, game_date_et)
+        trend_options = build_trend_candidates(item["current_app"], recent, None, item.get("context", {}), usage_snapshot=usage_snapshot)
         if not trend_options:
             continue
 
@@ -2842,13 +2916,16 @@ async def get_player_season_stats(player_id: int) -> dict:
 
 
 def _fetch_schedule_sync(date_str: str) -> list:
-    """Blocking schedule fetch — run via executor only."""
+    """Blocking schedule fetch — run via executor only. Excludes Spring Training (S) and Exhibition (E) games."""
     r = requests.get(f"{SCHEDULE_URL}&date={date_str}", timeout=30)
     r.raise_for_status()
     data = r.json()
     games = []
     for date_block in data.get("dates", []):
-        games.extend(date_block.get("games", []))
+        for game in date_block.get("games", []):
+            if game.get("gameType") in ("S", "E"):
+                continue
+            games.append(game)
     return games
 
 
@@ -2905,13 +2982,9 @@ def get_pitchers(feed: dict):
             if not stats or not stats.get("inningsPitched"):
                 continue
 
-            season_stats_block = p.get("seasonStats", {})
-            if isinstance(season_stats_block, dict) and "pitching" in season_stats_block:
-                season_stats = season_stats_block.get("pitching", {})
-            elif isinstance(season_stats_block, dict):
-                season_stats = season_stats_block
-            else:
-                season_stats = {}
+            # season_stats is populated downstream via get_player_season_stats (gameType=R)
+            # Do NOT read seasonStats from the boxscore — it aggregates all game types including Spring Training
+            season_stats = {}
 
             velo = get_fastball_velocity_summary(feed, p.get("person", {}).get("id"))
             player_obj = {
@@ -3423,75 +3496,80 @@ async def loop():
                     label_order.get(c["label"], 9),        # then by label priority
                 ))
 
-                # --- apply cap: tracked always through, non-tracked suppressed when at cap ---
-                to_post = []
-                loop_count = 0
-                for c in candidates:
-                    if loop_count >= MAX_POSTS_PER_LOOP:
-                        if c["is_tracked"]:
-                            to_post.append(c)  # tracked always posts
+                # --- card posting window: 2 PM – 2 AM ET only ---
+                if not within_card_hours(now_et):
+                    if candidates:
+                        log(f"Outside card posting hours ({now_et.strftime('%H:%M')} ET) — skipping {len(candidates)} candidate(s)")
+                else:
+                    # --- apply cap: tracked always through, non-tracked suppressed when at cap ---
+                    to_post = []
+                    loop_count = 0
+                    for c in candidates:
+                        if loop_count >= MAX_POSTS_PER_LOOP:
+                            if c["is_tracked"]:
+                                to_post.append(c)  # tracked always posts
+                            else:
+                                log(f"Suppressing {c['pitcher']['name']} (cap reached, non-tracked)")
                         else:
-                            log(f"Suppressing {c['pitcher']['name']} (cap reached, non-tracked)")
-                    else:
-                        to_post.append(c)
-                        loop_count += 1
+                            to_post.append(c)
+                            loop_count += 1
 
-                log(f"Queued {len(to_post)} cards this loop ({len(candidates)} candidates)")
+                    log(f"Queued {len(to_post)} cards this loop ({len(candidates)} candidates)")
 
-                # --- post with stagger, write state after each ---
-                for i, c in enumerate(to_post):
-                    p = c["pitcher"]
-                    pitcher_id = c["pitcher_id"]
-                    game_id = c["game_id"]
-                    game_date_et = c["game_date_et"]
-                    context = c["context"]
-                    recent_appearances = c["recent_appearances"]
-                    recent_for_trend = c["recent_for_trend"]
-                    current_app = c["current_app"]
+                    # --- post with stagger, write state after each ---
+                    for i, c in enumerate(to_post):
+                        p = c["pitcher"]
+                        pitcher_id = c["pitcher_id"]
+                        game_id = c["game_id"]
+                        game_date_et = c["game_date_et"]
+                        context = c["context"]
+                        recent_appearances = c["recent_appearances"]
+                        recent_for_trend = c["recent_for_trend"]
+                        current_app = c["current_app"]
 
-                    streak_count = await get_streak_count(pitcher_id, game_date_et)
-                    usage_note = build_usage_sentence(await get_recent_usage_snapshot(pitcher_id, game_date_et))
-                    velocity_alert = build_velocity_alert(current_app, recent_for_trend)
+                        streak_count = await get_streak_count(pitcher_id, game_date_et)
+                        usage_note = build_usage_sentence(await get_recent_usage_snapshot(pitcher_id, game_date_et))
+                        velocity_alert = build_velocity_alert(current_app, recent_for_trend)
 
-                    log(f"Posting {p['name']} | {p['team']} | {c['matchup']} ({i+1}/{len(to_post)})")
-                    await post_card(
-                        channel,
-                        p,
-                        c["matchup"],
-                        c["score"],
-                        context,
-                        streak_count,
-                        c["tracked_info"],
-                        recent_appearances,
-                        usage_note=usage_note,
-                        velocity_alert=velocity_alert if c["is_tracked"] else None,
-                        feed=c["feed"],
-                        away_team_name=c["away_team_name"],
-                        home_team_name=c["home_team_name"],
-                        away_score=c["away_score"],
-                        home_score=c["home_score"],
-                    )
-
-                    if (not c["is_tracked"]) and should_post_velocity_alert(state, pitcher_id, game_id, velocity_alert, now_et):
-                        log(f"Velocity alert {p['name']} | {p['team']} | {velocity_alert.get('subject')}")
-                        await post_velocity_card(
+                        log(f"Posting {p['name']} | {p['team']} | {c['matchup']} ({i+1}/{len(to_post)})")
+                        await post_card(
                             channel,
-                            {
-                                "name": p["name"],
-                                "team": p["team"],
-                                "season_stats": p.get("season_stats", {}),
-                            },
-                            velocity_alert,
+                            p,
+                            c["matchup"],
+                            c["score"],
+                            context,
+                            streak_count,
+                            c["tracked_info"],
+                            recent_appearances,
+                            usage_note=usage_note,
+                            velocity_alert=velocity_alert if c["is_tracked"] else None,
+                            feed=c["feed"],
+                            away_team_name=c["away_team_name"],
+                            home_team_name=c["home_team_name"],
+                            away_score=c["away_score"],
+                            home_score=c["home_score"],
                         )
-                        mark_velocity_posted(state, pitcher_id, game_id, velocity_alert, now_et)
 
-                    # Write state after each post to prevent duplicates if loop overlaps
-                    posted.add(c["key"])
-                    state["posted"] = list(posted)
-                    save_state(state)
+                        if within_trend_hours(now_et) and (not c["is_tracked"]) and should_post_velocity_alert(state, pitcher_id, game_id, velocity_alert, now_et):
+                            log(f"Velocity alert {p['name']} | {p['team']} | {velocity_alert.get('subject')}")
+                            await post_velocity_card(
+                                channel,
+                                {
+                                    "name": p["name"],
+                                    "team": p["team"],
+                                    "season_stats": p.get("season_stats", {}),
+                                },
+                                velocity_alert,
+                            )
+                            mark_velocity_posted(state, pitcher_id, game_id, velocity_alert, now_et)
 
-                    if i < len(to_post) - 1:
-                        await asyncio.sleep(POST_STAGGER_SECONDS)
+                        # Write state after each post to prevent duplicates if loop overlaps
+                        posted.add(c["key"])
+                        state["posted"] = list(posted)
+                        save_state(state)
+
+                        if i < len(to_post) - 1:
+                            await asyncio.sleep(POST_STAGGER_SECONDS)
 
                 # --- trend blurbs ---
                 if can_post_trend_now(state, now_et):
