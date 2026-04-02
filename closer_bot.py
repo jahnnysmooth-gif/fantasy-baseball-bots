@@ -3054,17 +3054,6 @@ RECENT FORM (last 5 appearances, most recent first):
 {('USAGE NOTE: ' + usage_note) if usage_note else ''}
 {'CONSECUTIVE APPEARANCES: ' + str(streak_count) + ' straight days' if streak_count >= 2 else ''}
 
-Instructions:
-- CRITICAL: Never invent or assume any numbers not explicitly provided above. Do not reference save totals, ERA, strikeout numbers, or any other stats unless they appear in SEASON STATS or STAT LINE above. Do not say a pitcher "gave up an earned run in his previous outing" unless PREVIOUS OUTING shows a non-zero ER. Do not say he "inherited X runners" unless INHERITED RUNNERS is explicitly listed above.
-- Summary target: ~100 words, under 600 characters total.
-- VARY the opening structure — do not always start with "[Name] entered in the [inning]".
-- Never end with an ellipsis or incomplete thought. Always end with a complete sentence.
-- Use play-by-play detail specifically — name batters, describe what happened.
-- If he was pulled mid-inning, mention which inning and the situation clearly.
-- Weave in recent form naturally if relevant.
-- Include velocity note as one sentence if provided.
-- Do not start with 'In' or 'Tonight'.
-
 Respond in this exact format:
 HEADLINE: [your one-sentence headline]
 SUMMARY: [your summary prose]"""
@@ -3076,10 +3065,35 @@ SUMMARY: [your summary prose]"""
                     "Content-Type": "application/json",
                     "x-api-key": ANTHROPIC_API_KEY,
                     "anthropic-version": "2023-06-01",
+                    "anthropic-beta": "prompt-caching-2024-07-31",
                 },
                 json={
-                    "model": "claude-sonnet-4-20250514",
+                    "model": "claude-haiku-4-5-20251001",
                     "max_tokens": 250,
+                    "system": [
+                        {
+                            "type": "text",
+                            "text": (
+                                "You are writing two things for a Discord baseball bot card about a relief pitcher's outing:\n"
+                                "1. A HEADLINE: one punchy sentence (max 12 words), no period at end\n"
+                                "2. A SUMMARY: ~100 words of flowing prose, no bullet points or markdown\n\n"
+                                "Instructions:\n"
+                                "- CRITICAL: Never invent or assume any numbers not explicitly provided. Do not reference save totals, ERA, strikeout numbers, or any other stats unless they appear in SEASON STATS or STAT LINE. Do not say a pitcher \"gave up an earned run in his previous outing\" unless PREVIOUS OUTING shows a non-zero ER. Do not say he \"inherited X runners\" unless INHERITED RUNNERS is explicitly listed.\n"
+                                "- Summary target: ~100 words, under 600 characters total.\n"
+                                "- VARY the opening structure — do not always start with \"[Name] entered in the [inning]\".\n"
+                                "- Never end with an ellipsis or incomplete thought. Always end with a complete sentence.\n"
+                                "- Use play-by-play detail specifically — name batters, describe what happened.\n"
+                                "- If he was pulled mid-inning, mention which inning and the situation clearly.\n"
+                                "- Weave in recent form naturally if relevant.\n"
+                                "- Include velocity note as one sentence if provided.\n"
+                                "- Do not start with 'In' or 'Tonight'.\n\n"
+                                "Respond in this exact format:\n"
+                                "HEADLINE: [your one-sentence headline]\n"
+                                "SUMMARY: [your summary prose]"
+                            ),
+                            "cache_control": {"type": "ephemeral"},
+                        }
+                    ],
                     "messages": [{"role": "user", "content": prompt}],
                 },
                 timeout=20,
