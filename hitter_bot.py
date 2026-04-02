@@ -3242,8 +3242,10 @@ async def generate_ai_hitter_summary(
 ) -> str | None:
     """Call Claude API to generate a hitter summary. Returns None on failure."""
     if not ANTHROPIC_API_KEY:
+        log(f"AI summary skipped for {name}: HITTER_BOT_SUMMARY not set")
         return None
 
+    log(f"AI summary: calling Claude for {name}")
     try:
         team_name = team_name_from_abbr(team)
         opponent_text = opponent or "the opposing club"
@@ -3487,6 +3489,7 @@ async def generate_ai_hitter_summary(
                 # Bold the player's name if the model forgot
                 if name not in text and f"**{name}**" not in text:
                     text = text.replace(name.split()[-1], f"**{name}**", 1) if name.split()[-1] in text else text
+                log(f"AI summary: got response for {name} ({len(text)} chars)")
                 return text
 
     except Exception as exc:
@@ -4125,6 +4128,127 @@ def build_slump_summary(
     return " ".join(sentences[:4]).strip()
 
 
+async def generate_ai_cold_summary(
+    name: str,
+    team: str,
+    stats: dict,
+    opponent: str,
+    team_won: bool,
+    recent_games: list[dict],
+    card_type: str,  # "bad_night" or "slump"
+    hitless_streak: int = 0,
+    pitcher: dict | None = None,
+) -> str | None:
+    """Call Claude API to generate a bad night or slump summary. Returns None on failure."""
+    if not ANTHROPIC_API_KEY:
+        log(f"AI cold summary skipped for {name}: HITTER_BOT_SUMMARY not set")
+        return None
+
+    log(f"AI cold summary: calling Claude for {name} ({card_type})")
+    try:
+        team_name = team_name_from_abbr(team)
+        opponent_text = opponent or "the opposing club"
+
+        hits = safe_int(stats.get("hits", 0), 0)
+        ab = safe_int(stats.get("atBats", 0), 0)
+        strikeouts = safe_int(stats.get("strikeOuts", 0), 0)
+        walks = safe_int(stats.get("baseOnBalls", 0), 0)
+        rbi = safe_int(stats.get("rbi", 0), 0)
+
+        stat_parts = [f"{hits}-for-{ab}"]
+        if strikeouts:
+            stat_parts.append(f"{strikeouts} K")
+        if walks:
+            stat_parts.append(f"{walks} BB")
+        if rbi:
+            stat_parts.append(f"{rbi} RBI")
+        stat_line = ", ".join(stat_parts)
+
+        result_str = f"{team_name} {'won' if team_won else 'lost'}"
+
+        pitcher_str = ""
+        if pitcher and pitcher.get("name"):
+            pitcher_str = f"Opposing starter: {pitcher['name']}"
+            if pitcher.get("era"):
+                pitcher_str += f" (ERA {pitcher['era']})"
+
+        recent_ab = sum(g.get("ab", 0) for g in recent_games[:max(hitless_streak - 1, 3)])
+        context_lines = [
+            f"Player: {name} ({team_name})",
+            f"Tonight's line: {stat_line}",
+            f"Game result: {result_str} vs. {opponent_text}",
+        ]
+        if pitcher_str:
+            context_lines.append(pitcher_str)
+        if card_type == "slump":
+            context_lines.append(f"Hitless streak: {hitless_streak} straight games without a hit")
+            if recent_ab > 0:
+                context_lines.append(f"At-bats without a hit in this stretch: {recent_ab + ab}")
+        else:
+            context_lines.append("Card type: bad night (0-for with multiple strikeouts)")
+
+        context_block = "\n".join(context_lines)
+
+        if card_type == "slump":
+            tone_instruction = (
+                "This is a slump card. The tone should be sympathetic but honest. "
+                "Acknowledge the drought, give it some context (pitcher quality if available, "
+                "total at-bats in the stretch), and end with a forward-looking note — "
+                "something like 'the talent is there' or 'worth watching over the next few games'. "
+                "Don't pile on."
+            )
+        else:
+            tone_instruction = (
+                "This is a bad night card. The tone should be matter-of-fact and brief. "
+                "Name what happened (strikeouts, hitless), note if the opposing pitcher made it tough, "
+                "and keep it short. Two to three sentences max. Don't be dramatic."
+            )
+
+        system_prompt = (
+            "You write post-game fantasy baseball player cards for a Discord server. "
+            "Your voice is sharp, natural, and concise — like a beat reporter who follows fantasy closely.\n\n"
+            f"{tone_instruction}\n\n"
+            "Rules:\n"
+            "- Bold the player's full name on its first mention using **Name**.\n"
+            "- Use the player's last name after the first mention.\n"
+            "- Do not use em dashes (—). Use commas or periods instead.\n"
+            "- Do not use the words: 'showcased', 'impressive', 'notable', 'demonstrated'.\n"
+            "- Do not start sentences with 'Additionally' or 'Furthermore'.\n"
+            "- Output only the summary text. No labels, no preamble, no quotation marks."
+        )
+
+        user_message = f"Write a fantasy baseball summary for this player's performance:\n\n{context_block}"
+
+        async with aiohttp.ClientSession() as session:
+            async with session.post(
+                "https://api.anthropic.com/v1/messages",
+                headers={
+                    "x-api-key": ANTHROPIC_API_KEY,
+                    "anthropic-version": "2023-06-01",
+                    "content-type": "application/json",
+                },
+                json={
+                    "model": "claude-haiku-4-5-20251001",
+                    "max_tokens": 200,
+                    "system": system_prompt,
+                    "messages": [{"role": "user", "content": user_message}],
+                },
+                timeout=aiohttp.ClientTimeout(total=15),
+            ) as resp:
+                if resp.status != 200:
+                    log(f"Anthropic API error {resp.status} for {name} ({card_type})")
+                    return None
+                data = await resp.json()
+                text = data.get("content", [{}])[0].get("text", "").strip()
+                if text:
+                    log(f"AI cold summary: got response for {name} ({card_type}, {len(text)} chars)")
+                return text if text else None
+
+    except Exception as exc:
+        log(f"AI cold summary failed for {name}: {exc}")
+        return None
+
+
 async def post_slump_card(
     channel: discord.abc.Messageable,
     hitter: dict,
@@ -4138,6 +4262,23 @@ async def post_slump_card(
     recent_games = get_recent_hitter_games(hitter.get("id"), game_date_et)
     pitcher = get_opposing_starter(feed, hitter.get("side", "home"))
 
+    summary = await generate_ai_cold_summary(
+        name=hitter["name"],
+        team=hitter["team"],
+        stats=stats,
+        opponent=opponent,
+        team_won=team_won,
+        recent_games=recent_games,
+        card_type="slump",
+        hitless_streak=hitless_streak,
+        pitcher=pitcher,
+    )
+    if not summary:
+        summary = build_slump_summary(
+            hitter["name"], hitter["team"], stats, hitless_streak,
+            opponent, team_won, recent_games, pitcher=pitcher,
+        )
+
     embed = discord.Embed(
         color=0x2C2F33,  # Slightly darker than bad night cards
         timestamp=datetime.now(timezone.utc),
@@ -4145,14 +4286,7 @@ async def post_slump_card(
     apply_player_card_chrome(embed, hitter["name"], hitter["team"])
     subject = build_slump_subject(hitter["name"], hitless_streak)
     embed.add_field(name="", value=f"**🥶 {subject}**", inline=False)
-    embed.add_field(
-        name="Summary",
-        value=build_slump_summary(
-            hitter["name"], hitter["team"], stats, hitless_streak,
-            opponent, team_won, recent_games, pitcher=pitcher,
-        ),
-        inline=False,
-    )
+    embed.add_field(name="Summary", value=summary, inline=False)
     embed.add_field(name="Game Line", value=format_hitter_game_line(stats), inline=False)
     embed.add_field(name="Season", value=format_hitter_season_line(hitter.get("season_stats", {})), inline=False)
     await channel.send(embed=embed)
@@ -4171,6 +4305,21 @@ async def post_bad_card(
     recent_games = get_recent_hitter_games(hitter.get("id"), game_date_et)
     pitcher = get_opposing_starter(feed, hitter.get("side", "home"))
 
+    summary = await generate_ai_cold_summary(
+        name=hitter["name"],
+        team=hitter["team"],
+        stats=stats,
+        opponent=opponent,
+        team_won=team_won,
+        recent_games=recent_games,
+        card_type="bad_night",
+        pitcher=pitcher,
+    )
+    if not summary:
+        summary = build_bad_night_summary(
+            hitter["name"], hitter["team"], stats, label, opponent, team_won, recent_games, pitcher=pitcher,
+        )
+
     embed = discord.Embed(
         color=0x36393F,  # Dark gray — visually distinct from good cards
         timestamp=datetime.now(timezone.utc),
@@ -4178,13 +4327,7 @@ async def post_bad_card(
     apply_player_card_chrome(embed, hitter["name"], hitter["team"])
     subject = build_bad_night_subject(hitter["name"], stats, label, opponent)
     embed.add_field(name="", value=f"**📉 {subject}**", inline=False)
-    embed.add_field(
-        name="Summary",
-        value=build_bad_night_summary(
-            hitter["name"], hitter["team"], stats, label, opponent, team_won, recent_games, pitcher=pitcher,
-        ),
-        inline=False,
-    )
+    embed.add_field(name="Summary", value=summary, inline=False)
     embed.add_field(name="Game Line", value=format_hitter_game_line(stats), inline=False)
     embed.add_field(name="Season", value=format_hitter_season_line(hitter.get("season_stats", {})), inline=False)
     await channel.send(embed=embed)
