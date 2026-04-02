@@ -23,6 +23,7 @@ ET = ZoneInfo("America/New_York")
 
 SCHEDULE_URL = "https://statsapi.mlb.com/api/v1/schedule?sportId=1"
 LIVE_URL = "https://statsapi.mlb.com/api/v1.1/game/{}/feed/live"
+PLAYER_SEASON_STATS_URL = "https://statsapi.mlb.com/api/v1/people/{}/stats?stats=season&group=pitching&sportId=1&season={}"
 
 POLL_MINUTES = 10
 POST_STAGGER_SECONDS = 45
@@ -91,6 +92,7 @@ TEAM_COLORS = {
 appearance_cache = {}
 pitching_stats_cache = {}
 player_meta_cache = {}
+season_stats_cache = {}  # pid -> regular season pitching stats dict
 
 ESPN_PLAYER_IDS_PATH = os.getenv("ESPN_PLAYER_IDS_PATH", "shared/player_ids/espn_player_ids.json")
 player_headshot_index = None
@@ -833,18 +835,20 @@ def get_pitcher_entry_context(feed: dict, pitcher_id: int, pitcher_side: str):
     else:
         entry_outs_text = "with two outs"
 
-    # Inherited runners: check runners present at start of pitcher's first play
+    # Inherited runners: runners already on base when this pitcher's first play began.
+    # A truly inherited runner has originBase == start (they haven't moved yet)
+    # and they are not being put out or scoring on this play.
     inherited_runners = []
     for runner_event in first_play.get("runners", []):
         movement = runner_event.get("movement", {})
         details = runner_event.get("details", {})
-        # Runner was on base before this play started (originBase set, not scoring yet)
         origin = movement.get("originBase")
         start = movement.get("start")
         is_out_on_play = movement.get("isOut", False)
-        # A runner inherited from before this at-bat will have a start base and
-        # their playIndex will be 0 (they were already on base)
-        if start and not details.get("isScoringEvent", False) and not is_out_on_play:
+        is_scoring = details.get("isScoringEvent", False)
+        # Runner was already on base: originBase equals start (hasn't moved),
+        # not being retired, not scoring
+        if origin and start and origin == start and not is_out_on_play and not is_scoring:
             inherited_runners.append(start)
 
     inherited_count = len(inherited_runners)
@@ -2809,7 +2813,31 @@ async def gather_trend_candidates_from_recent_games(tracked: dict, processed_pit
 
 # ---------------- CORE ----------------
 
-def _fetch_schedule_sync(date_str: str) -> list:
+def _fetch_player_season_stats_sync(player_id: int, season: int) -> dict:
+    """Fetch regular season pitching stats for a player — sportId=1 only, no spring training."""
+    try:
+        url = PLAYER_SEASON_STATS_URL.format(player_id, season)
+        r = requests.get(url, timeout=15)
+        r.raise_for_status()
+        data = r.json()
+        for group in data.get("stats", []):
+            splits = group.get("splits", [])
+            if splits:
+                return splits[0].get("stat", {})
+    except Exception:
+        pass
+    return {}
+
+
+async def get_player_season_stats(player_id: int) -> dict:
+    """Get regular season pitching stats with cache."""
+    if player_id in season_stats_cache:
+        return season_stats_cache[player_id]
+    season = datetime.now(ET).year
+    loop = asyncio.get_event_loop()
+    stats = await loop.run_in_executor(None, _fetch_player_season_stats_sync, player_id, season)
+    season_stats_cache[player_id] = stats
+    return stats
     """Blocking schedule fetch — run via executor only."""
     r = requests.get(f"{SCHEDULE_URL}&date={date_str}", timeout=30)
     r.raise_for_status()
@@ -2966,11 +2994,14 @@ async def build_summary_via_claude(
             if detail.get("heart_of_order_retired"):
                 detail_parts.append(f"- Retired heart of order: {', '.join(detail['heart_of_order_retired'])}")
 
-        # Recent form
-        recent_er = [a.get("er", 0) for a in recent_appearances[:5]]
-        recent_form = ", ".join(
-            f"{'0 ER' if er == 0 else str(er) + ' ER'}" for er in recent_er
-        ) if recent_er else "no recent data"
+        # Recent form — label explicitly so Claude can't misread the sequence
+        recent_form_parts = []
+        for i, a in enumerate(recent_appearances[:5]):
+            er_val = a.get("er", 0)
+            label_str = "most recent" if i == 0 else f"{i+1} outings ago"
+            recent_form_parts.append(f"{label_str}: {er_val} ER")
+        recent_form = ", ".join(recent_form_parts) if recent_form_parts else "no recent data"
+        prev_outing_er = recent_appearances[0].get("er", 0) if recent_appearances else 0
 
         velocity_str = ""
         if velocity_alert:
@@ -3005,6 +3036,7 @@ OUTING LABEL: {label}
 ENTRY SITUATION: {entry_ctx}
 STAT LINE: {stat_line}
 SEASON STATS: {season_stats_str}
+PREVIOUS OUTING: {prev_outing_er} ER (use this exact number if referencing his last appearance)
 {'INHERITED RUNNERS: ' + str(inherited) + (' (relieved ' + relieved_pitcher + ')' if relieved_pitcher else '') if inherited > 0 else ''}
 {score_context}
 
@@ -3019,7 +3051,7 @@ RECENT FORM (last 5 appearances, most recent first):
 {'CONSECUTIVE APPEARANCES: ' + str(streak_count) + ' straight days' if streak_count >= 2 else ''}
 
 Instructions:
-- CRITICAL: Never invent or assume any numbers not explicitly provided above. Do not reference save totals, ERA, strikeout numbers, or any other stats unless they appear in SEASON STATS or STAT LINE above.
+- CRITICAL: Never invent or assume any numbers not explicitly provided above. Do not reference save totals, ERA, strikeout numbers, or any other stats unless they appear in SEASON STATS or STAT LINE above. Do not say a pitcher "gave up an earned run in his previous outing" unless PREVIOUS OUTING shows a non-zero ER. Do not say he "inherited X runners" unless INHERITED RUNNERS is explicitly listed above.
 - Summary target: ~100 words, under 600 characters total.
 - VARY the opening structure — do not always start with "[Name] entered in the [inning]".
 - Never end with an ellipsis or incomplete thought. Always end with a complete sentence.
@@ -3097,6 +3129,14 @@ async def post_card(channel, p: dict, matchup: str, score: str, context: dict, s
 
     label = classify(s)
     detail = get_pitcher_outing_detail(feed, p.get("id"), ip=str(p["stats"].get("inningsPitched", "0.0")), er=safe_int(p["stats"].get("earnedRuns", 0), 0)) if feed else None
+
+    # Fetch verified regular season stats (sportId=1 only — excludes spring training)
+    # Falls back to boxscore seasonStats if the API call fails
+    pitcher_id_for_stats = p.get("id")
+    if pitcher_id_for_stats:
+        verified_season_stats = await get_player_season_stats(pitcher_id_for_stats)
+        if verified_season_stats:
+            p = {**p, "season_stats": verified_season_stats}
 
     # Reclassify: a hold in the 9th or later with a margin <= 3 and runs allowed
     # is a save situation where the pitcher let damage happen — treat as SHAKY_HOLD
@@ -3229,6 +3269,8 @@ async def loop():
                 if current_date != last_refresh_date:
                     tracked = await refresh_tracked_pitchers()
                     last_refresh_date = current_date
+                    season_stats_cache.clear()
+                    log("Season stats cache cleared for new day")
 
                 games = await get_games()
                 log(f"Checking {len(games)} games")
