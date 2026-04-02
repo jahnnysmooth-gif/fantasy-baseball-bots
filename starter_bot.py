@@ -15,7 +15,7 @@ import requests
 TOKEN = os.getenv("ANALYTIC_BOT_TOKEN")
 CHANNEL_ID = int(os.getenv("STARTER_WATCH_CHANNEL_ID", "0"))
 ANTHROPIC_API_KEY = os.getenv("STARTER_BOT_SUMMARY", "")
-CLAUDE_MODEL = "claude-sonnet-4-6"
+CLAUDE_MODEL = "claude-haiku-4-5-20251001"
 
 STATE_FILE = "state/starter/state.json"
 os.makedirs("state/starter", exist_ok=True)
@@ -3447,27 +3447,26 @@ async def build_claude_summary(
     if next_start_note: facts.append(f"Next start: {next_start_note}")
 
     context_block = "\n".join(facts)
-    cap = 6 if label in {"GEM", "DOMINANT"} else 5
+    cap = 4 if label in {"GEM", "DOMINANT"} else 3
 
-    prompt = f"""You are writing the Summary field for a fantasy baseball Discord bot card recapping a starting pitcher's outing.
+    # Static system instructions — eligible for prompt caching (paid once, reused)
+    system_instructions = """You write the Summary field for a fantasy baseball Discord bot card recapping a starting pitcher's outing. You write in the voice of a conversational beat writer — quick, sharp, knowledgeable.
 
-Here are the facts about the outing:
+Rules:
+- Lead with what made this outing interesting or defining, not just the stat line
+- Do not repeat raw stats already in the Game Line field (IP, H, ER, BB, K) — reference them indirectly
+- Do not start two consecutive sentences with the same word
+- No filler: "all in all", "at the end of the day", "make no mistake", "when it was all said and done"
+- No "he showed" or "he demonstrated" — say what happened
+- Vary sentence length — mix short punchy sentences with longer ones
+- If a next start is in the facts, close with a one-sentence look-ahead
+- Third person, past tense, plain prose — no bullet points, no markdown
+- Output only the summary paragraph, nothing else"""
+
+    user_message = f"""Facts about the outing:
 {context_block}
 
-Write exactly {cap} sentences in the voice of a conversational beat writer — someone who watched the game and is writing a quick, sharp game note for a knowledgeable baseball audience. 
-
-Style rules:
-- Conversational but substantive — like a beat writer's post-game notebook entry, not a broadcast call
-- Lead with what made this outing interesting or defining, not just the stat line
-- Do not repeat the raw stats already shown in the Game Line field (IP, H, ER, BB, K) — reference them indirectly if needed ("with the board clean" rather than "0 ER")
-- Do not start two consecutive sentences with the same word
-- No filler phrases: "all in all", "at the end of the day", "when it was all said and done", "make no mistake"
-- No "he showed" or "he demonstrated" — say what happened
-- Vary sentence length and rhythm — mix short punchy sentences with longer ones
-- If a next start is listed in the facts, close with a natural one-sentence look-ahead
-- Third person, past tense, plain prose — no bullet points, no markdown, no headers
-
-Output only the summary paragraph, nothing else."""
+Write exactly {cap} sentences."""
 
     try:
         log(f"Calling Claude API for {name} summary...")
@@ -3475,8 +3474,15 @@ Output only the summary paragraph, nothing else."""
         response = await asyncio.to_thread(
             client_ai.messages.create,
             model=CLAUDE_MODEL,
-            max_tokens=500,
-            messages=[{"role": "user", "content": prompt}],
+            max_tokens=250,
+            system=[
+                {
+                    "type": "text",
+                    "text": system_instructions,
+                    "cache_control": {"type": "ephemeral"},
+                }
+            ],
+            messages=[{"role": "user", "content": user_message}],
         )
         text = response.content[0].text.strip()
         if text:
