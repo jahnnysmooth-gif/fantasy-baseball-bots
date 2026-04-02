@@ -1131,14 +1131,22 @@ def get_pitching_stats_for_date(target_date):
     return stats_by_pitcher
 
 
-def get_recent_appearances(pitcher_id: int, game_date_et, limit=3, max_days=45):
+def get_recent_appearances(pitcher_id: int, game_date_et, limit=5, max_days=45):
     appearances = []
     if pitcher_id is None or game_date_et is None:
         return appearances
 
+    # Never look back before the regular season start to avoid spring training noise
+    from datetime import date as date_type
+    season_year = game_date_et.year
+    # MLB regular season typically starts late March — use March 20 as a safe floor
+    season_floor = date_type(season_year, 3, 20)
+
     check_date = game_date_et - timedelta(days=1)
 
     for _ in range(max_days):
+        if check_date < season_floor:
+            break
         stats_by_pitcher = get_pitching_stats_for_date(check_date)
         if pitcher_id in stats_by_pitcher:
             appearances.append(stats_by_pitcher[pitcher_id])
@@ -2907,7 +2915,16 @@ def build_starter_subject_line(p: dict, label: str, game_context: dict, seed: in
     if team_runs > opp_runs and label in POSITIVE_STARTER_LABELS:
         choices.append(f"🏁 {name} helps set up a winning night for the {team_name}")
     elif team_runs < opp_runs and label in BAD_STARTER_LABELS | {"UNEVEN"}:
-        choices.append(f"📉 {name} leaves the {team_name} chasing the game")
+        bad_loss_choices = [
+            f"📉 {name} puts the {team_name} in a hole early",
+            f"📉 {name} hands the {team_name} a tough night to overcome",
+            f"📉 {name} struggles to keep the {team_name} in it",
+            f"📉 {name} cannot stop the {team_name} from falling behind",
+            f"📉 {name} gives the opposition too much room to work",
+            f"📉 {name} lets this one get away from the {team_name}",
+            f"📉 {name} sends the {team_name} to a rough defeat",
+        ]
+        choices.append(bad_loss_choices[seed % len(bad_loss_choices)])
 
     subject = choices[seed % len(choices)].strip().rstrip(".!?:;,-")
     return subject.replace("...", "").strip()
@@ -3456,6 +3473,7 @@ Rules:
 - Lead with what made this outing interesting or defining, not just the stat line
 - Do not repeat raw stats already in the Game Line field (IP, H, ER, BB, K) — reference them indirectly
 - Do not start two consecutive sentences with the same word
+- No em dashes (—) — use commas, periods, or rewrite the sentence instead
 - No filler: "all in all", "at the end of the day", "make no mistake", "when it was all said and done"
 - No "he showed" or "he demonstrated" — say what happened
 - Vary sentence length — mix short punchy sentences with longer ones
