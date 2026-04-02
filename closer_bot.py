@@ -3402,6 +3402,8 @@ async def loop():
 
     tracked = await refresh_tracked_pitchers()
     last_refresh_date = datetime.now(ET).date()
+    trend_pitcher_cache: list = []
+    trend_pitcher_cache_date: object = None
     loop_lock = asyncio.Lock()
 
     while True:
@@ -3418,6 +3420,8 @@ async def loop():
                     tracked = await refresh_tracked_pitchers()
                     last_refresh_date = current_date
                     season_stats_cache.clear()
+                    trend_pitcher_cache = []
+                    trend_pitcher_cache_date = None
                     log("Season stats cache cleared for new day")
 
                 games = await get_games()
@@ -3632,9 +3636,16 @@ async def loop():
                 if can_post_trend_now(state, now_et):
                     # During the trend window (2 AM–2 PM) today's games haven't started yet.
                     # Fall back to yesterday's final games as the trend data source.
+                    # Cache it — yesterday's games are static, no need to refetch every loop.
                     trend_source = processed_pitchers_by_game
                     if not trend_source:
-                        trend_source = await build_trend_pitcher_list()
+                        if trend_pitcher_cache_date != current_date or not trend_pitcher_cache:
+                            trend_pitcher_cache = await build_trend_pitcher_list()
+                            trend_pitcher_cache_date = current_date
+                            log(f"Trend pitcher cache built: {len(trend_pitcher_cache)} pitchers")
+                        else:
+                            log(f"Trend pitcher cache hit: {len(trend_pitcher_cache)} pitchers")
+                        trend_source = trend_pitcher_cache
                     trend_candidates = await gather_trend_candidates_from_recent_games(tracked, trend_source)
                     for candidate in trend_candidates:
                         pid = candidate["pitcher_id"]
