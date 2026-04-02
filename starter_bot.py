@@ -14,13 +14,22 @@ import requests
 
 TOKEN = os.getenv("ANALYTIC_BOT_TOKEN")
 CHANNEL_ID = int(os.getenv("STARTER_WATCH_CHANNEL_ID", "0"))
-ANTHROPIC_API_KEY = os.getenv("starter_bot_summary", "")
+ANTHROPIC_API_KEY = os.getenv("STARTER_BOT_SUMMARY", "")
 CLAUDE_MODEL = "claude-sonnet-4-6"
 
 STATE_FILE = "state/starter/state.json"
 os.makedirs("state/starter", exist_ok=True)
 
 ET = ZoneInfo("America/New_York")
+
+# Debug: log API key status at startup
+def _log_startup():
+    key = os.getenv("STARTER_BOT_SUMMARY", "")
+    if key:
+        print(f"[STARTER] STARTER_BOT_SUMMARY loaded (length={len(key)})", flush=True)
+    else:
+        print("[STARTER] WARNING: STARTER_BOT_SUMMARY env var is empty or missing", flush=True)
+_log_startup()
 
 SCHEDULE_URL = "https://statsapi.mlb.com/api/v1/schedule?sportId=1"
 LIVE_URL = "https://statsapi.mlb.com/api/v1.1/game/{}/feed/live"
@@ -3264,7 +3273,7 @@ async def build_claude_summary(
     Returns None on any failure so post_card falls back to templates.
     """
     if not ANTHROPIC_API_KEY:
-        log("Claude summary skipped — starter_bot_summary env var not set")
+        log("Claude summary skipped — STARTER_BOT_SUMMARY env var not set")
         return None
 
     stats   = p.get("stats", {})
