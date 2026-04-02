@@ -34,6 +34,8 @@ HEADERS = {
 
 ESPN_PLAYER_IDS_PATH = os.getenv("ESPN_PLAYER_IDS_PATH", "shared/player_ids/espn_player_ids.json")
 player_headshot_index = None
+allowed_players_cache = None
+TOP_300_PLAYERS_PATH = os.getenv("TOP_300_PLAYERS_PATH", "top_300_players.json")
 
 # Use Render persistent disk so duplicate protection survives redeploys/restarts
 STATE_DIR = Path("state/injury")
@@ -192,6 +194,63 @@ def normalize_lookup_name(name: str) -> str:
     return " ".join(cleaned.split())
 
 
+def load_allowed_players() -> set[str]:
+    global allowed_players_cache
+
+    if allowed_players_cache is not None:
+        return allowed_players_cache
+
+    allowed_players_cache = set()
+
+    if not os.path.exists(TOP_300_PLAYERS_PATH):
+        log(f"Top 300 player file not found: {TOP_300_PLAYERS_PATH}")
+        return allowed_players_cache
+
+    try:
+        with open(TOP_300_PLAYERS_PATH, "r", encoding="utf-8") as f:
+            raw = json.load(f)
+    except Exception as e:
+        log(f"Could not load top 300 player file: {e}")
+        return allowed_players_cache
+
+    player_list = []
+
+    if isinstance(raw, list):
+        player_list = raw
+    elif isinstance(raw, dict):
+        if isinstance(raw.get("players"), list):
+            player_list = raw.get("players", [])
+        elif isinstance(raw.get("allowed_players"), list):
+            player_list = raw.get("allowed_players", [])
+
+    for item in player_list:
+        if isinstance(item, str):
+            normalized = normalize_lookup_name(item)
+            if normalized:
+                allowed_players_cache.add(normalized)
+            continue
+
+        if isinstance(item, dict):
+            player_name = item.get("name") or item.get("player")
+            if player_name:
+                normalized = normalize_lookup_name(player_name)
+                if normalized:
+                    allowed_players_cache.add(normalized)
+
+    log(f"Loaded {len(allowed_players_cache)} allowed players from {TOP_300_PLAYERS_PATH}")
+    return allowed_players_cache
+
+
+def is_allowed_player(player_name: str) -> bool:
+    allowed_players = load_allowed_players()
+
+    if not allowed_players:
+        return True
+
+    normalized = normalize_lookup_name(player_name)
+    return normalized in allowed_players
+
+
 def load_player_headshot_index() -> dict:
     global player_headshot_index
     if player_headshot_index is not None:
@@ -313,10 +372,6 @@ def get_player_headshot(name: str, team: str = None) -> str | None:
         return last_name_match.get("headshot_url")
 
     return None
-
-
-
-    print(f"[INJURY] {msg}", flush=True)
 
 
 def clamp_update(text: str, max_len: int = MAX_UPDATE_LEN) -> str:
@@ -597,6 +652,9 @@ async def post_allowed_updates() -> None:
     new_items = []
 
     for item in items:
+        if not is_allowed_player(item["player"]):
+            continue
+
         update_id = make_update_id(item)
         item["update_id"] = update_id
         current_ids.append(update_id)
