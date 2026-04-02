@@ -48,6 +48,7 @@ background_task: asyncio.Task | None = None
 player_headshot_index: dict | None = None
 hitter_stats_cache: dict = {}
 decisive_event_cache: dict = {}
+_ai_session: aiohttp.ClientSession | None = None
 
 
 TEAM_COLORS = {
@@ -3276,8 +3277,6 @@ async def generate_ai_hitter_summary(
             stat_parts.append(f"{walks} BB")
         if steals:
             stat_parts.append(f"{steals} SB")
-        if strikeouts:
-            stat_parts.append(f"{strikeouts} K")
         stat_line = ", ".join(stat_parts)
 
         # Score margin
@@ -3463,18 +3462,25 @@ async def generate_ai_hitter_summary(
 
         user_message = f"Write a fantasy baseball summary card for this hitter's performance tonight:\n\n{context_block}"
 
-        async with aiohttp.ClientSession() as session:
-            async with session.post(
+        session = _ai_session or aiohttp.ClientSession()
+        async with session.post(
                 "https://api.anthropic.com/v1/messages",
                 headers={
                     "x-api-key": ANTHROPIC_API_KEY,
                     "anthropic-version": "2023-06-01",
+                    "anthropic-beta": "prompt-caching-2024-07-31",
                     "content-type": "application/json",
                 },
                 json={
                     "model": "claude-haiku-4-5-20251001",
                     "max_tokens": 300,
-                    "system": system_prompt,
+                    "system": [
+                        {
+                            "type": "text",
+                            "text": system_prompt,
+                            "cache_control": {"type": "ephemeral"},
+                        }
+                    ],
                     "messages": [{"role": "user", "content": user_message}],
                 },
                 timeout=aiohttp.ClientTimeout(total=15),
@@ -4192,16 +4198,15 @@ async def generate_ai_cold_summary(
         if card_type == "slump":
             tone_instruction = (
                 "This is a slump card. The tone should be sympathetic but honest. "
-                "Acknowledge the drought, give it some context (pitcher quality if available, "
-                "total at-bats in the stretch), and end with a forward-looking note — "
-                "something like 'the talent is there' or 'worth watching over the next few games'. "
-                "Don't pile on."
+                "Acknowledge the drought and give it brief context (pitcher quality if available, "
+                "total at-bats in the stretch). End with one short forward-looking line. "
+                "Two to three sentences max."
             )
         else:
             tone_instruction = (
                 "This is a bad night card. The tone should be matter-of-fact and brief. "
-                "Name what happened (strikeouts, hitless), note if the opposing pitcher made it tough, "
-                "and keep it short. Two to three sentences max. Don't be dramatic."
+                "Name what happened (strikeouts, hitless), note if the opposing pitcher made it tough. "
+                "One to two sentences only. No fluff."
             )
 
         system_prompt = (
@@ -4219,18 +4224,41 @@ async def generate_ai_cold_summary(
 
         user_message = f"Write a fantasy baseball summary for this player's performance:\n\n{context_block}"
 
-        async with aiohttp.ClientSession() as session:
-            async with session.post(
+        static_rules = (
+            "You write post-game fantasy baseball player cards for a Discord server. "
+            "Your voice is sharp, natural, and concise — like a beat reporter who follows fantasy closely.\n\n"
+            "Rules:\n"
+            "- Bold the player's full name on its first mention using **Name**.\n"
+            "- Use the player's last name after the first mention.\n"
+            "- Do not use em dashes (—). Use commas or periods instead.\n"
+            "- Do not use the words: 'showcased', 'impressive', 'notable', 'demonstrated'.\n"
+            "- Do not start sentences with 'Additionally' or 'Furthermore'.\n"
+            "- Output only the summary text. No labels, no preamble, no quotation marks."
+        )
+
+        session = _ai_session or aiohttp.ClientSession()
+        async with session.post(
                 "https://api.anthropic.com/v1/messages",
                 headers={
                     "x-api-key": ANTHROPIC_API_KEY,
                     "anthropic-version": "2023-06-01",
+                    "anthropic-beta": "prompt-caching-2024-07-31",
                     "content-type": "application/json",
                 },
                 json={
                     "model": "claude-haiku-4-5-20251001",
-                    "max_tokens": 200,
-                    "system": system_prompt,
+                    "max_tokens": 120,
+                    "system": [
+                        {
+                            "type": "text",
+                            "text": static_rules,
+                            "cache_control": {"type": "ephemeral"},
+                        },
+                        {
+                            "type": "text",
+                            "text": f"\n{tone_instruction}",
+                        },
+                    ],
                     "messages": [{"role": "user", "content": user_message}],
                 },
                 timeout=aiohttp.ClientTimeout(total=15),
@@ -4652,9 +4680,12 @@ async def hitter_loop() -> None:
 # ---------------- DISCORD LIFECYCLE ----------------
 
 async def on_ready() -> None:
-    global background_task
+    global background_task, _ai_session
     assert client is not None
     log(f"Logged in as {client.user}")
+    if _ai_session is None or _ai_session.closed:
+        _ai_session = aiohttp.ClientSession()
+        log("AI HTTP session created")
     if background_task is None or background_task.done():
         background_task = asyncio.create_task(hitter_loop())
         log("Hitter background task created")
