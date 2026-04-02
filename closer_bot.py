@@ -974,6 +974,8 @@ def get_pitcher_outing_detail(feed: dict, pitcher_id: int, ip: str = "0.0", er: 
         "finished_inning": True,
         "departure_outs": 0,
         "departure_runners": 0,
+        "departure_inning": 0,
+        "departure_half": "",
         "replaced_by": "",
     }
 
@@ -1040,20 +1042,22 @@ def get_pitcher_outing_detail(feed: dict, pitcher_id: int, ip: str = "0.0", er: 
             if event in OUT_EVENTS or event == "Strikeout":
                 heart_retired.append(last_name)
 
-    # Determine if pitcher finished the inning
+    # Determine if pitcher finished his last inning
+    # Must check all half-innings he appeared in — a pitcher can finish one inning
+    # cleanly then come back and get pulled mid-inning in the next.
     finished_inning = True
     departure_outs = 0
     departure_runners = 0
     replaced_by = ""
+    departure_inning = 0
+    departure_half = ""
 
     if pitcher_play_indices:
         last_idx = pitcher_play_indices[-1]
         last_play = plays[last_idx]
         last_about = last_play.get("about", {})
-        last_result = last_play.get("result", {})
 
-        # Use the maximum endOuts seen across all his plays — a walk/HBP on his
-        # last play won't advance the out count, so last play alone can undercount.
+        # Use the maximum endOuts seen across all his plays
         max_end_outs = 0
         for idx in pitcher_play_indices:
             about_i = plays[idx].get("about", {})
@@ -1061,28 +1065,38 @@ def get_pitcher_outing_detail(feed: dict, pitcher_id: int, ip: str = "0.0", er: 
             if end_outs_i > max_end_outs:
                 max_end_outs = end_outs_i
 
-        if last_idx + 1 < len(plays):
-            next_play = plays[last_idx + 1]
-            next_matchup = next_play.get("matchup", {})
-            next_pitcher_id = next_matchup.get("pitcher", {}).get("id")
-            next_about = next_play.get("about", {})
-            same_half = (
-                next_about.get("inning") == last_about.get("inning")
-                and next_about.get("halfInning") == last_about.get("halfInning")
-            )
-            if same_half and next_pitcher_id != pitcher_id:
-                finished_inning = False
-                # Use IP-derived outs from the pitcher's box score stat line as the
-                # authoritative out count — endOuts can be 0 on walks/non-out plays
-                # and max_end_outs will undercount when all his plays are walks.
-                ip_outs = baseball_ip_to_outs(ip) if ip else max_end_outs
-                departure_outs = max(ip_outs, max_end_outs)
-                departure_runners = sum(
-                    1 for r in last_play.get("runners", [])
-                    if not r.get("movement", {}).get("isOut", False)
-                    and not r.get("details", {}).get("isScoringEvent", False)
+        # Check if he was pulled in any inning he appeared in by scanning forward
+        # from each of his plays for a same-half different-pitcher transition
+        for check_idx in reversed(pitcher_play_indices):
+            check_play = plays[check_idx]
+            check_about = check_play.get("about", {})
+
+            if check_idx + 1 < len(plays):
+                next_play = plays[check_idx + 1]
+                next_matchup = next_play.get("matchup", {})
+                next_pitcher_id = next_matchup.get("pitcher", {}).get("id")
+                next_about = next_play.get("about", {})
+                same_half = (
+                    next_about.get("inning") == check_about.get("inning")
+                    and next_about.get("halfInning") == check_about.get("halfInning")
                 )
-                replaced_by = _fix_name(next_matchup.get("pitcher", {}).get("fullName", ""))
+                if same_half and next_pitcher_id != pitcher_id:
+                    # Pulled mid-inning — record which inning
+                    finished_inning = False
+                    # Outs recorded in this specific inning at point of pull
+                    inning_outs = safe_int(check_about.get("endOuts", check_about.get("outs", 0)), 0)
+                    ip_outs = baseball_ip_to_outs(ip) if ip else max_end_outs
+                    departure_outs = max(ip_outs, inning_outs)
+                    departure_runners = sum(
+                        1 for r in check_play.get("runners", [])
+                        if not r.get("movement", {}).get("isOut", False)
+                        and not r.get("details", {}).get("isScoringEvent", False)
+                    )
+                    replaced_by = _fix_name(next_matchup.get("pitcher", {}).get("fullName", ""))
+                    # Store which inning he was pulled from for the summary
+                    departure_inning = safe_int(check_about.get("inning"), 0)
+                    departure_half = check_about.get("halfInning", "")
+                    break
 
     return {
         "strikeouts": strikeouts,
@@ -1094,6 +1108,8 @@ def get_pitcher_outing_detail(feed: dict, pitcher_id: int, ip: str = "0.0", er: 
         "finished_inning": finished_inning,
         "departure_outs": departure_outs,
         "departure_runners": departure_runners,
+        "departure_inning": departure_inning if not finished_inning else 0,
+        "departure_half": departure_half if not finished_inning else "",
         "replaced_by": replaced_by,
     }
 
@@ -2939,7 +2955,10 @@ async def build_summary_via_claude(
                 d_outs = detail.get("departure_outs", 0)
                 d_runners = detail.get("departure_runners", 0)
                 replaced = detail.get("replaced_by", "")
-                pull_str = f"Pulled with {d_outs} out(s) recorded, {d_runners} runner(s) on"
+                d_inning = detail.get("departure_inning", 0)
+                d_half = detail.get("departure_half", "")
+                inning_str = f" in the {d_half.lower()} of the {ordinal(d_inning)}" if d_inning and d_half else ""
+                pull_str = f"Pulled mid-inning{inning_str} with {d_outs} out(s) recorded, {d_runners} runner(s) on"
                 if replaced:
                     pull_str += f", replaced by {replaced}"
                 detail_parts.append(f"- {pull_str}")
@@ -2988,7 +3007,7 @@ RECENT FORM (last 5 appearances, most recent first):
 {'CONSECUTIVE APPEARANCES: ' + str(streak_count) + ' straight days' if streak_count >= 2 else ''}
 
 Instructions:
-- Target ~180 words. Stay under 900 characters total — this posts in a Discord embed.
+- Target ~130 words. Stay under 750 characters total — this posts in a Discord embed.
 - VARY the opening structure. Do NOT always start with "[Name] entered in the [inning]". Options: lead with the result, lead with the situation, lead with what the pitcher did, use a short punchy scene-setter. Each card should feel different from the last.
 - Never end with an ellipsis or a mid-thought. Always end with a complete sentence.
 - Describe specifically what happened using the play-by-play detail
@@ -3009,7 +3028,7 @@ Instructions:
                 },
                 json={
                     "model": "claude-sonnet-4-20250514",
-                    "max_tokens": 280,
+                    "max_tokens": 220,
                     "messages": [{"role": "user", "content": prompt}],
                 },
                 timeout=20,
@@ -3128,9 +3147,9 @@ async def post_card(channel, p: dict, matchup: str, score: str, context: dict, s
         score_tail=score_tail,
     )
     summary_text = claude_summary if claude_summary else template_summary
-    # Discord embed field limit is 1024 characters — target 900 in prompt for safety
-    if len(summary_text) > 950:
-        summary_text = summary_text[:947].rsplit(" ", 1)[0] + "."
+    # Discord embed field limit is 1024 characters — target 750 in prompt for safety
+    if len(summary_text) > 800:
+        summary_text = summary_text[:797].rsplit(" ", 1)[0] + "."
 
     # Layout: impact tag → game line → summary → pitch count → season
     embed.add_field(name="", value=f"**{impact_tag(label, s)}**", inline=False)
