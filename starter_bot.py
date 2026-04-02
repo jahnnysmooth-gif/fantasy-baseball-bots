@@ -6,6 +6,7 @@ import time
 from datetime import datetime, timedelta, timezone
 from zoneinfo import ZoneInfo
 
+import anthropic
 import discord
 import requests
 
@@ -13,6 +14,8 @@ import requests
 
 TOKEN = os.getenv("ANALYTIC_BOT_TOKEN")
 CHANNEL_ID = int(os.getenv("STARTER_WATCH_CHANNEL_ID", "0"))
+ANTHROPIC_API_KEY = os.getenv("starter_bot_summary", "")
+CLAUDE_MODEL = "claude-sonnet-4-6"
 
 STATE_FILE = "state/starter/state.json"
 os.makedirs("state/starter", exist_ok=True)
@@ -3247,6 +3250,233 @@ def score_field_emoji(game_context: dict) -> str:
     return "⚾"
 
 
+async def build_claude_summary(
+    p: dict,
+    label: str,
+    game_context: dict,
+    recent_appearances=None,
+    opp_hitting: dict | None = None,
+    next_start: dict | None = None,
+    season: int = 0,
+) -> str | None:
+    """
+    Use the Claude API to write the Summary field.
+    Returns None on any failure so post_card falls back to templates.
+    """
+    if not ANTHROPIC_API_KEY:
+        return None
+
+    stats   = p.get("stats", {})
+    flow    = p.get("game_flow") or {}
+    contact = p.get("contact_profile") or {}
+    name    = p.get("name", "the pitcher")
+    team    = team_name_from_abbr(p.get("team", ""))
+    opp_abbr = game_context.get("home_abbr") if p.get("side") == "away" else game_context.get("away_abbr")
+    opp_name = team_name_from_abbr(opp_abbr)
+
+    ip     = str(stats.get("inningsPitched", "0.0"))
+    h      = safe_int(stats.get("hits", 0), 0)
+    er     = safe_int(stats.get("earnedRuns", 0), 0)
+    bb     = safe_int(stats.get("baseOnBalls", 0), 0)
+    k      = safe_int(stats.get("strikeOuts", 0), 0)
+    wins   = safe_int(stats.get("wins", 0), 0)
+    losses = safe_int(stats.get("losses", 0), 0)
+
+    # Pitch metrics
+    csw       = p.get("csw_percent")
+    velo      = p.get("avg_fastball_velocity")
+    fp_pct    = p.get("fp_strike_pct")
+    pitch_cnt = safe_int(p.get("pitch_count", 0), 0)
+    pitch_counts = p.get("pitch_type_counts", {})
+
+    # Dominant pitch type
+    dominant_pitch = ""
+    if pitch_counts:
+        total_pitches = sum(pitch_counts.values())
+        if total_pitches >= 30:
+            PITCH_NAMES = {
+                "FF": "four-seam fastball", "FT": "two-seam fastball", "SI": "sinker",
+                "FC": "cutter", "SL": "slider", "ST": "sweeper", "CU": "curveball",
+                "KC": "knuckle curve", "CH": "changeup", "FS": "split-finger",
+            }
+            top_code = max(pitch_counts, key=pitch_counts.get)
+            top_pct  = pitch_counts[top_code] / total_pitches
+            if top_pct >= 0.40:
+                dominant_pitch = f"{PITCH_NAMES.get(top_code, top_code.lower())} ({int(top_pct*100)}%)"
+
+    # Opponent quality
+    opp_tier = ""
+    if opp_hitting:
+        tier = classify_offense(opp_hitting.get("ops", 0.0))
+        if tier != "average":
+            opp_tier = tier.replace("_", " ")
+
+    # Recent form
+    form_notes = []
+    if recent_appearances:
+        def _is_qs(a): return safe_float(a.get("ip","0"),0) >= 6.0 and safe_int(a.get("er",0),0) <= 3
+        streak = 0
+        for a in ([{"ip": ip, "er": er}] + list(recent_appearances)):
+            if _is_qs(a): streak += 1
+            else: break
+        if streak >= 3:
+            # Compute ERA over the streak
+            streak_apps = recent_appearances[:streak - 1]
+            ss = compute_streak_stats(streak_apps) if streak_apps else {}
+            era_note = f", {ss['era_stretch']:.2f} ERA over that stretch" if ss.get("era_stretch") else ""
+            form_notes.append(f"{streak} consecutive quality starts{era_note}")
+        elif streak == 2:
+            form_notes.append("back-to-back quality starts")
+        elif recent_appearances and recent_appearances[0].get("label","") in BAD_STARTER_LABELS:
+            if label in GOOD_STARTER_LABELS:
+                form_notes.append("bounceback after a rough previous outing")
+            else:
+                rough_count = sum(1 for a in recent_appearances[:3] if a.get("label","") in BAD_STARTER_LABELS)
+                if rough_count >= 2:
+                    form_notes.append(f"{rough_count + 1} straight rough outings")
+
+    # Contact profile
+    hrs        = safe_int(contact.get("home_runs", 0), 0)
+    xbh        = safe_int(contact.get("extra_base_hits", 0), 0)
+    hr_hitters = contact.get("hr_hitters", [])
+    notable_hr = next((x for x in hr_hitters if safe_int(x.get("season_hrs",0),0) >= 15), None)
+
+    # Leverage context
+    lev_damage   = safe_int(flow.get("leverage_damage_runs", 0), 0)
+    garbage_runs = safe_int(flow.get("garbage_time_runs", 0), 0)
+    stranded     = safe_int(flow.get("stranded_runners", 0), 0)
+
+    # Next start
+    next_start_note = ""
+    if next_start:
+        ns_opp  = next_start.get("opp_name", "")
+        ns_date = next_start.get("date")
+        if ns_date:
+            days_away = (ns_date - datetime.now(ET).date()).days
+            when = "tomorrow" if days_away == 1 else ns_date.strftime("%A")
+        else:
+            when = "next time out"
+        at_vs = "vs." if next_start.get("side") == "home" else "@"
+        ns_tier = ""
+        if ns_opp:
+            ns_hitting = get_team_hitting_stats(normalize_team_abbr(next_start.get("opp_abbr", "")), season)
+            if ns_hitting:
+                ns_t = classify_offense(ns_hitting.get("ops", 0.0))
+                if ns_t not in ("average", ""):
+                    ns_tier = f" ({ns_t.replace('_',' ')} offense)"
+        next_start_note = f"{when} {at_vs} {ns_opp}{ns_tier}"
+
+    # Rivalry
+    is_rivalry = frozenset({
+        normalize_team_abbr(game_context.get("away_abbr", "")),
+        normalize_team_abbr(game_context.get("home_abbr", "")),
+    }) in RIVALRIES
+
+    # Season debut / IL return
+    gs        = safe_int(p.get("season_stats", {}).get("gamesStarted", 0), 0)
+    is_debut  = gs == 1
+    is_return = gs >= 2 and (not recent_appearances or len(recent_appearances) == 0)
+
+    # ---------- Build context block ----------
+    facts = [
+        f"Pitcher: {name} ({team})",
+        f"Opponent: {opp_name}",
+        f"Game line: {ip} IP  {h} H  {er} ER  {bb} BB  {k} K",
+        f"Decision: {'Win' if wins else 'Loss' if losses else 'No decision'}",
+        f"Classification: {label}",
+        f"Final score: {game_context.get('score_display','')}",
+    ]
+
+    # Pitch quality
+    if velo:      facts.append(f"Avg fastball velocity: {velo} mph")
+    if csw:       facts.append(f"CSW (called strikes + whiffs): {csw}%")
+    if fp_pct:    facts.append(f"First-pitch strike rate: {int(fp_pct)}%")
+    if pitch_cnt: facts.append(f"Pitch count: {pitch_cnt}")
+    if dominant_pitch: facts.append(f"Dominant pitch: {dominant_pitch}")
+
+    # Game flow
+    scs = safe_int(flow.get("scoreless_to_start", 0), 0)
+    if scs >= 3:  facts.append(f"Opened with {scs} consecutive scoreless innings")
+    if flow.get("only_damage_in_one_inning") and er > 0:
+        facts.append("All runs came in a single inning")
+    if flow.get("settled_after_rough"):
+        facts.append("Rough first inning, then settled down")
+    longest = safe_int(flow.get("longest_scoreless_streak", 0), 0)
+    if longest >= 4 and longest != scs:
+        facts.append(f"Best stretch: {longest} consecutive scoreless innings mid-outing")
+    if flow.get("bullpen_blew_inherited"):
+        facts.append("Bullpen let his inherited runners score after he exited")
+    if garbage_runs > 0 and garbage_runs >= er:
+        facts.append(f"Most/all earned runs came in garbage time (team led 4+)")
+    elif lev_damage >= 2:
+        facts.append(f"{lev_damage} runs allowed while game was within 2")
+    if stranded >= 4:
+        facts.append(f"Stranded {stranded} runners")
+
+    # Contact
+    if hrs >= 2:   facts.append(f"Gave up {hrs} home runs")
+    elif notable_hr:
+        facts.append(f"Gave up a home run to {notable_hr['name']} ({notable_hr['season_hrs']} HR this season)")
+    if xbh >= 3:   facts.append(f"{xbh} extra-base hits (non-HR) allowed")
+    elif hrs == 0 and xbh == 0 and h >= 5:
+        facts.append("All hits were singles — no real power damage")
+
+    # Opponent quality
+    if opp_tier:  facts.append(f"Opponent offense this season: {opp_tier}")
+
+    # Form / streak
+    if form_notes: facts.append(f"Recent form: {'; '.join(form_notes)}")
+
+    # Context flags
+    if is_rivalry: facts.append(f"Rivalry game ({team} vs. {opp_name})")
+    if is_debut:   facts.append("First start of the season")
+    if is_return:  facts.append("Return from likely IL stint (no recent appearances found)")
+    if game_context.get("day_night") == "day": facts.append("Day game")
+
+    # Next start
+    if next_start_note: facts.append(f"Next start: {next_start_note}")
+
+    context_block = "\n".join(facts)
+    cap = 6 if label in {"GEM", "DOMINANT"} else 5
+
+    prompt = f"""You are writing the Summary field for a fantasy baseball Discord bot card recapping a starting pitcher's outing.
+
+Here are the facts about the outing:
+{context_block}
+
+Write exactly {cap} sentences in the voice of a conversational beat writer — someone who watched the game and is writing a quick, sharp game note for a knowledgeable baseball audience. 
+
+Style rules:
+- Conversational but substantive — like a beat writer's post-game notebook entry, not a broadcast call
+- Lead with what made this outing interesting or defining, not just the stat line
+- Do not repeat the raw stats already shown in the Game Line field (IP, H, ER, BB, K) — reference them indirectly if needed ("with the board clean" rather than "0 ER")
+- Do not start two consecutive sentences with the same word
+- No filler phrases: "all in all", "at the end of the day", "when it was all said and done", "make no mistake"
+- No "he showed" or "he demonstrated" — say what happened
+- Vary sentence length and rhythm — mix short punchy sentences with longer ones
+- If a next start is listed in the facts, close with a natural one-sentence look-ahead
+- Third person, past tense, plain prose — no bullet points, no markdown, no headers
+
+Output only the summary paragraph, nothing else."""
+
+    try:
+        client_ai = anthropic.Anthropic(api_key=ANTHROPIC_API_KEY)
+        response = await asyncio.to_thread(
+            client_ai.messages.create,
+            model=CLAUDE_MODEL,
+            max_tokens=500,
+            messages=[{"role": "user", "content": prompt}],
+        )
+        text = response.content[0].text.strip()
+        if text:
+            log(f"Claude summary generated for {name} ({len(text)} chars)")
+            return text
+    except Exception as e:
+        log(f"Claude summary failed for {name}: {e} — falling back to templates")
+
+    return None
+
+
 async def post_card(
     channel,
     p: dict,
@@ -3261,13 +3491,30 @@ async def post_card(
     label = classify_starter(stats)
     seed = build_starter_summary_seed(p["name"], stats, game_context)
 
+    # Try Claude API first, fall back to templates on any failure
+    summary = await build_claude_summary(
+        p, label, game_context,
+        recent_appearances=recent_appearances,
+        opp_hitting=opp_hitting,
+        next_start=next_start,
+        season=season,
+    )
+    if not summary:
+        summary = build_starter_summary(
+            p, label, game_context,
+            recent_appearances=recent_appearances,
+            opp_hitting=opp_hitting,
+            next_start=next_start,
+            season=season,
+        )
+
     embed = discord.Embed(
         color=TEAM_COLORS.get(normalize_team_abbr(p["team"]), 0x2ECC71),
         timestamp=datetime.now(timezone.utc),
     )
     apply_player_card_chrome(embed, p["name"], p["team"])
     embed.add_field(name="", value=f"**{build_starter_subject_line(p, label, game_context, seed)}**", inline=False)
-    embed.add_field(name="Summary", value=build_starter_summary(p, label, game_context, recent_appearances=recent_appearances, opp_hitting=opp_hitting, next_start=next_start, season=season), inline=False)
+    embed.add_field(name="Summary", value=summary, inline=False)
     embed.add_field(name="Game Line", value=format_starter_game_line(stats), inline=False)
     embed.add_field(name="Season", value=format_starter_season_line(p.get("season_stats", {})), inline=False)
     embed.add_field(name=f"{score_field_emoji(game_context)} Score", value=score_value, inline=False)
