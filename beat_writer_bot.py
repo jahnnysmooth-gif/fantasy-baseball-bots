@@ -157,12 +157,20 @@ def generate_headline(content: str, author: str) -> str:
     """Generate a short headline from tweet content"""
     normalized = normalize_text(content)
     
-    # Extract player name (first capitalized name)
-    player_match = re.search(r'\b([A-Z][a-z]+(?:\s+[A-Z][a-z]+)+)\b', content)
-    player_name = player_match.group(1) if player_match else None
+    # Extract player name - look for capitalized full names
+    player_names = re.findall(r'\b([A-Z][a-z]+\s+[A-Z][a-z]+(?:\s+(?:Jr\.|Sr\.|III|II|IV))?)\b', content)
+    player_name = player_names[0] if player_names else None
     
-    # IL placements (check first - highest priority)
-    if "to il" in normalized or "on il" in normalized or "to the il" in normalized or "on the il" in normalized:
+    # Check each category with regex patterns for more accuracy
+    
+    # 1. DESIGNATED FOR ASSIGNMENT (check before "to il")
+    if re.search(r'\bdesignated?\s+(?:for\s+assignment|if|of)\b', normalized) or " dfa" in normalized:
+        if player_name:
+            return f"🚪 {player_name} DFA'd"
+        return "🚪 Player DFA'd"
+    
+    # 2. IL PLACEMENTS
+    if re.search(r'\b(?:to|on)\s+(?:the\s+)?(?:10-day|15-day|60-day)?\s*il\b', normalized):
         if player_name:
             if "15-day" in normalized:
                 return f"🏥 {player_name} → 15-Day IL"
@@ -172,55 +180,74 @@ def generate_headline(content: str, author: str) -> str:
                 return f"🏥 {player_name} → 10-Day IL"
             else:
                 return f"🏥 {player_name} → IL"
+        return "🏥 Player to IL"
     
-    # Activations/Reinstatements
-    if "activated from" in normalized or "reinstated from" in normalized:
+    # 3. ACTIVATIONS / REINSTATEMENTS
+    if re.search(r'\b(?:activated|reinstated)\s+from\b', normalized):
         if player_name:
             return f"✅ {player_name} Activated"
+        return "✅ Player Activated"
     
-    # Recalls (only if not going TO IL)
-    if "recalled from" in normalized and "to il" not in normalized and "on il" not in normalized:
+    # 4. RECALLS
+    if re.search(r'\brecalled\s+from\b', normalized):
         if player_name:
             return f"📈 {player_name} Recalled"
+        return "📈 Player Recalled"
     
-    # Roster moves
-    if "optioned to" in normalized:
+    # 5. OPTIONS
+    if re.search(r'\boptioned\s+to\b', normalized):
         if player_name:
             return f"📉 {player_name} Optioned"
+        return "📉 Player Optioned"
     
-    if "released" in normalized or "released by" in normalized:
-        if player_name:
-            return f"🚪 {player_name} Released"
-    
-    if "claimed" in normalized and ("waiver" in normalized or "from" in normalized):
-        if player_name:
-            return f"📥 {player_name} Claimed"
-    
-    if "dealt to" in normalized or "traded to" in normalized:
+    # 6. TRADES
+    if re.search(r'\b(?:dealt|traded)\s+to\b', normalized):
         if player_name:
             return f"🔄 {player_name} Traded"
+        return "🔄 Player Traded"
     
-    # In-game injuries
-    if "left the game" in normalized or "exited" in normalized or "removed from" in normalized:
+    # 7. RELEASES
+    if re.search(r'\breleased\s+(?:by|rhp|lhp|if|of|c|1b|2b|3b|ss)\b', normalized):
+        if player_name:
+            return f"🚪 {player_name} Released"
+        return "🚪 Player Released"
+    
+    # 8. CLAIMS
+    if re.search(r'\bclaimed\s+(?:off|from)\b', normalized):
+        if player_name:
+            return f"📥 {player_name} Claimed"
+        return "📥 Player Claimed"
+    
+    # 9. IN-GAME REMOVALS
+    if re.search(r'\b(?:out of|left)\s+the\s+game\b', normalized) or re.search(r'\bexited\s+(?:the\s+game|with)\b', normalized):
         if player_name:
             return f"⚠️ {player_name} Left Game"
+        return "⚠️ Player Left Game"
     
-    if "scratched" in normalized and "lineup" in normalized:
+    # 10. SCRATCHED
+    if "scratched" in normalized:
         if player_name:
             return f"❌ {player_name} Scratched"
+        return "❌ Player Scratched"
     
-    # X-rays/Medical
-    if "x-rays" in normalized or "x rays" in normalized:
+    # 11. X-RAYS / MRI
+    if re.search(r'\bx-?rays?\b', normalized):
         if player_name:
             if "negative" in normalized:
                 return f"✅ {player_name} X-Rays Negative"
-            else:
-                return f"🏥 {player_name} X-Rays"
+            return f"🏥 {player_name} X-Rays"
+        return "🏥 Medical Update"
     
-    # Rehab assignment
-    if "rehab assignment" in normalized or ("rehab" in normalized and "assignment" in normalized):
+    if "mri" in normalized:
+        if player_name:
+            return f"🏥 {player_name} MRI"
+        return "🏥 Medical Update"
+    
+    # 12. REHAB
+    if re.search(r'\brehab\s+(?:assignment|outing|game|start)\b', normalized):
         if player_name:
             return f"🔄 {player_name} Rehab Update"
+        return "🔄 Rehab Update"
     
     # Default
     return "📰 Injury/Roster Update"
