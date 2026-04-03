@@ -612,7 +612,7 @@ async def on_error(event, *args, **kwargs):
 
 async def start_lineup_bot():
     if not DISCORD_TOKEN:
-        raise RuntimeError("LINEUP_BOT_TOKEN is not set")
+        raise RuntimeError("PETER_GAMMONS_BOT_TOKEN is not set")
     if not CHANNEL_ID:
         raise RuntimeError("LINEUP_CHANNEL_ID is not set")
 
