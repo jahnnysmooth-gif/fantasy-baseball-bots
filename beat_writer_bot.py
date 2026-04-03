@@ -447,56 +447,70 @@ class BeatWriterBot(commands.Bot):
 
 
     def parse_tweetshift_message(self, message: discord.Message) -> Optional[TweetData]:
-        """Parse tweetshift format - reads from embeds"""
-        # TweetShift posts embeds with author info in embed.author.name
-        # and tweet content in embed.description
+        """Parse tweetshift format - reads from embeds OR plain text"""
         
-        if not message.embeds:
-            log(f"Message {message.id} has no embeds (content preview: {message.content[:100]})")
-            return None
-        
-        embed = message.embeds[0]
-        
-        # Extract author from embed.author.name
-        # Format: "Name (@handle)" or just "Name"
-        author = None
-        if embed.author and embed.author.name:
-            author_text = embed.author.name
-            # Extract handle if present: "Marc Topkin (@TBTimes_Rays)" -> "TBTimes_Rays"
-            handle_match = re.search(r'\(@([^)]+)\)', author_text)
-            if handle_match:
-                author = handle_match.group(1)
-            else:
-                author = author_text
-        
-        # Fallback: try to extract author from title or footer
-        if not author:
-            if embed.title:
-                handle_match = re.search(r'@([A-Za-z0-9_]+)', embed.title)
-                if handle_match:
-                    author = handle_match.group(1)
+        # Try embed format first (preferred)
+        if message.embeds:
+            embed = message.embeds[0]
             
-            if not author and embed.footer and embed.footer.text:
-                handle_match = re.search(r'@([A-Za-z0-9_]+)', embed.footer.text)
+            # Extract author from embed.author.name
+            author = None
+            if embed.author and embed.author.name:
+                author_text = embed.author.name
+                handle_match = re.search(r'\(@([^)]+)\)', author_text)
                 if handle_match:
                     author = handle_match.group(1)
-        
-        # If still no author, skip this message
-        if not author:
-            log(f"Message {message.id} - could not extract author, skipping")
-            return None
-        
-        # Get tweet content from embed description
-        tweet_content = embed.description
-        if not tweet_content:
-            return None
-        
-        # Unescape markdown characters
-        tweet_content = tweet_content.replace('\\#', '#').replace('\\-', '-').replace('\\.', '.')
-        tweet_content = tweet_content.replace('\\*', '*').replace('\\(', '(').replace('\\)', ')')
-        
-        # Extract tweet URL from embed.url
-        tweet_url = embed.url if embed.url else None
+                else:
+                    author = author_text
+            
+            # Fallback: try to extract author from title or footer
+            if not author:
+                if embed.title:
+                    handle_match = re.search(r'@([A-Za-z0-9_]+)', embed.title)
+                    if handle_match:
+                        author = handle_match.group(1)
+                
+                if not author and embed.footer and embed.footer.text:
+                    handle_match = re.search(r'@([A-Za-z0-9_]+)', embed.footer.text)
+                    if handle_match:
+                        author = handle_match.group(1)
+            
+            # Get tweet content from embed description
+            tweet_content = embed.description
+            if not tweet_content:
+                log(f"Message {message.id} embed has no description - skipping")
+                return None
+            
+            # Unescape markdown characters
+            tweet_content = tweet_content.replace('\\#', '#').replace('\\-', '-').replace('\\.', '.')
+            tweet_content = tweet_content.replace('\\*', '*').replace('\\(', '(').replace('\\)', ')')
+            
+            # Extract tweet URL from embed.url
+            tweet_url = embed.url if embed.url else None
+            
+            # Use generic author if none found
+            if not author:
+                author = "BeatWriter"
+            
+        else:
+            # Plain text format - extract author and content from message.content
+            content = message.content.strip()
+            if not content:
+                log(f"Message {message.id} has no content - skipping")
+                return None
+            
+            # Try to extract author from text
+            # Common formats: "Author - tweet text" or just "tweet text"
+            author_match = re.match(r'^([A-Za-z0-9_]+)\s*-\s*(.+)', content, re.DOTALL)
+            if author_match:
+                author = author_match.group(1)
+                tweet_content = author_match.group(2).strip()
+            else:
+                # No clear author, use generic and use full content
+                author = "BeatWriter"
+                tweet_content = content
+            
+            tweet_url = None
         
         # Create tweet data and extract team
         tweet_data = TweetData(
