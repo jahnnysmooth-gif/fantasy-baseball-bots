@@ -459,19 +459,32 @@ class BeatWriterBot(commands.Bot):
         
         # Extract author from embed.author.name
         # Format: "Name (@handle)" or just "Name"
-        if not embed.author or not embed.author.name:
-            log(f"Message {message.id} embed has no author (description: {embed.description[:100] if embed.description else 'None'})")
+        author = None
+        if embed.author and embed.author.name:
+            author_text = embed.author.name
+            # Extract handle if present: "Marc Topkin (@TBTimes_Rays)" -> "TBTimes_Rays"
+            handle_match = re.search(r'\(@([^)]+)\)', author_text)
+            if handle_match:
+                author = handle_match.group(1)
+            else:
+                author = author_text
+        
+        # Fallback: try to extract author from title or footer
+        if not author:
+            if embed.title:
+                handle_match = re.search(r'@([A-Za-z0-9_]+)', embed.title)
+                if handle_match:
+                    author = handle_match.group(1)
+            
+            if not author and embed.footer and embed.footer.text:
+                handle_match = re.search(r'@([A-Za-z0-9_]+)', embed.footer.text)
+                if handle_match:
+                    author = handle_match.group(1)
+        
+        # If still no author, skip this message
+        if not author:
+            log(f"Message {message.id} - could not extract author, skipping")
             return None
-        
-        author_text = embed.author.name
-        
-        # Extract handle if present: "Marc Topkin (@TBTimes_Rays)" -> "TBTimes_Rays"
-        handle_match = re.search(r'\(@([^)]+)\)', author_text)
-        if handle_match:
-            author = handle_match.group(1)
-        else:
-            # Fallback to full author name
-            author = author_text
         
         # Get tweet content from embed description
         tweet_content = embed.description
