@@ -157,86 +157,70 @@ def generate_headline(content: str, author: str) -> str:
     """Generate a short headline from tweet content"""
     normalized = normalize_text(content)
     
-    # IL placements
-    if "to il" in normalized or "on il" in normalized or "placed on" in normalized:
-        # Extract player name (first capitalized name)
-        match = re.search(r'\b([A-Z][a-z]+(?:\s+[A-Z][a-z]+)+)\b', content)
-        if match:
-            player = match.group(1)
+    # Extract player name (first capitalized name)
+    player_match = re.search(r'\b([A-Z][a-z]+(?:\s+[A-Z][a-z]+)+)\b', content)
+    player_name = player_match.group(1) if player_match else None
+    
+    # IL placements (check first - highest priority)
+    if "to il" in normalized or "on il" in normalized or "to the il" in normalized or "on the il" in normalized:
+        if player_name:
             if "15-day" in normalized:
-                return f"🏥 {player} → 15-Day IL"
+                return f"🏥 {player_name} → 15-Day IL"
             elif "60-day" in normalized:
-                return f"🏥 {player} → 60-Day IL"
+                return f"🏥 {player_name} → 60-Day IL"
+            elif "10-day" in normalized:
+                return f"🏥 {player_name} → 10-Day IL"
             else:
-                return f"🏥 {player} → IL"
+                return f"🏥 {player_name} → IL"
     
     # Activations/Reinstatements
     if "activated from" in normalized or "reinstated from" in normalized:
-        match = re.search(r'\b([A-Z][a-z]+(?:\s+[A-Z][a-z]+)+)\b', content)
-        if match:
-            player = match.group(1)
-            return f"✅ {player} Activated"
+        if player_name:
+            return f"✅ {player_name} Activated"
+    
+    # Recalls (only if not going TO IL)
+    if "recalled from" in normalized and "to il" not in normalized and "on il" not in normalized:
+        if player_name:
+            return f"📈 {player_name} Recalled"
     
     # Roster moves
     if "optioned to" in normalized:
-        match = re.search(r'\b([A-Z][a-z]+(?:\s+[A-Z][a-z]+)+)\b', content)
-        if match:
-            player = match.group(1)
-            return f"📉 {player} Optioned"
+        if player_name:
+            return f"📉 {player_name} Optioned"
     
-    if "recalled from" in normalized:
-        match = re.search(r'\b([A-Z][a-z]+(?:\s+[A-Z][a-z]+)+)\b', content)
-        if match:
-            player = match.group(1)
-            return f"📈 {player} Recalled"
-    
-    if "released" in normalized:
-        match = re.search(r'\b([A-Z][a-z]+(?:\s+[A-Z][a-z]+)+)\b', content)
-        if match:
-            player = match.group(1)
-            return f"🚪 {player} Released"
+    if "released" in normalized or "released by" in normalized:
+        if player_name:
+            return f"🚪 {player_name} Released"
     
     if "claimed" in normalized and ("waiver" in normalized or "from" in normalized):
-        match = re.search(r'\b([A-Z][a-z]+(?:\s+[A-Z][a-z]+)+)\b', content)
-        if match:
-            player = match.group(1)
-            return f"📥 {player} Claimed"
+        if player_name:
+            return f"📥 {player_name} Claimed"
     
     if "dealt to" in normalized or "traded to" in normalized:
-        match = re.search(r'\b([A-Z][a-z]+(?:\s+[A-Z][a-z]+)+)\b', content)
-        if match:
-            player = match.group(1)
-            return f"🔄 {player} Traded"
+        if player_name:
+            return f"🔄 {player_name} Traded"
     
     # In-game injuries
     if "left the game" in normalized or "exited" in normalized or "removed from" in normalized:
-        match = re.search(r'\b([A-Z][a-z]+(?:\s+[A-Z][a-z]+)+)\b', content)
-        if match:
-            player = match.group(1)
-            return f"⚠️ {player} Left Game"
+        if player_name:
+            return f"⚠️ {player_name} Left Game"
     
-    if "scratched" in normalized:
-        match = re.search(r'\b([A-Z][a-z]+(?:\s+[A-Z][a-z]+)+)\b', content)
-        if match:
-            player = match.group(1)
-            return f"❌ {player} Scratched"
+    if "scratched" in normalized and "lineup" in normalized:
+        if player_name:
+            return f"❌ {player_name} Scratched"
     
     # X-rays/Medical
     if "x-rays" in normalized or "x rays" in normalized:
-        match = re.search(r'\b([A-Z][a-z]+(?:\s+[A-Z][a-z]+)+)\b', content)
-        if match:
-            player = match.group(1)
+        if player_name:
             if "negative" in normalized:
-                return f"✅ {player} X-Rays Negative"
+                return f"✅ {player_name} X-Rays Negative"
             else:
-                return f"🏥 {player} X-Rays"
+                return f"🏥 {player_name} X-Rays"
     
     # Rehab assignment
-    if "rehab assignment" in normalized or "rehab" in normalized:
-        match = re.search(r'\b([A-Z][a-z]+(?:\s+[A-Z][a-z]+)+)\b', content)
-        if match:
-            player = match.group(1)
-            return f"🔄 {player} Rehab Update"
+    if "rehab assignment" in normalized or ("rehab" in normalized and "assignment" in normalized):
+        if player_name:
+            return f"🔄 {player_name} Rehab Update"
     
     # Default
     return "📰 Injury/Roster Update"
@@ -369,6 +353,10 @@ class BeatWriterBot(commands.Bot):
         await self.scan_recent_messages()
 
     async def on_message(self, message: discord.Message) -> None:
+        # Debug: log all messages from tweetshift channel
+        if message.channel.id == TWEETSHIFT_CHANNEL_ID:
+            log(f"Message received from tweetshift channel (ID: {message.id})")
+        
         # Ignore own messages
         if message.author == self.user:
             return
@@ -380,6 +368,7 @@ class BeatWriterBot(commands.Bot):
         # Parse tweetshift format
         tweet = self.parse_tweetshift_message(message)
         if not tweet:
+            log(f"Failed to parse message {message.id}")
             return
         
         # Filter by keywords
@@ -548,9 +537,9 @@ class BeatWriterBot(commands.Bot):
             "10-day il", "15-day il", "60-day il",
             
             # Roster moves
-            "optioned to", "recalled from", "designated for assignment",
-            "dfa'd", "claimed off", "released by", "signed to",
-            "dealt to", "traded to",
+            "optioned to", "recalled from", 
+            "designated for assignment", "designate", "dfa",
+            "claimed off", "released by", "dealt to", "traded to",
             
             # In-game injuries
             "left the game", "left game", "exited the game", "exited with",
