@@ -617,27 +617,32 @@ class BeatWriterBot(commands.Bot):
             "10-day il", "15-day il", "60-day il",
             
             # Roster moves
-            "optioned to", "recalled from", 
+            "optioned", "recalled", 
             "designated for assignment", "designate", "dfa",
             "claimed off", "released by", "dealt to", "traded to",
+            "bereavement list",
             
             # In-game injuries
-            "left the game", "left game", "exited the game", "exited with",
-            "removed from the game", "out of the game",
+            "left the game", "left game", "exited", "exit",
+            "removed from", "out of the game",
             "helped off", "limped off", "carried off",
             
             # Injury updates
             "x-rays", "x rays", "mri", "ct scan",
             "placed on injured", "to injured list",
-            "scratched from lineup", "scratched from the lineup",
-            "day-to-day with", "dtd with",
-            "suffered a", "reaggravated", "underwent surgery",
-            "scheduled for surgery", "rehab assignment",
+            "scratched", "day-to-day", "dtd",
+            "suffered", "reaggravated", "underwent surgery",
+            "scheduled for surgery", "rehab assignment", "rehab start",
             
-            # Specific injury diagnosis
-            "oblique strain", "hamstring strain", "shoulder injury",
-            "elbow injury", "knee injury", "ankle injury",
-            "hit by a pitch on", "fouled a ball off"
+            # Body parts + injury context
+            "tightness", "soreness", "discomfort",
+            "oblique", "hamstring", "shoulder", "elbow", "knee", 
+            "ankle", "hip", "back", "wrist", "hand", "finger",
+            "concussion", "fracture", "sprain", "strain",
+            "tommy john", "ucl", "acl", "mcl",
+            
+            # Other injury signals
+            "hit by pitch", "fouled a ball off", "collision"
         ]
         
         return any(phrase in normalized for phrase in required_phrases)
