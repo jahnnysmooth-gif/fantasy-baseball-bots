@@ -583,6 +583,7 @@ async def background_loop():
 async def on_ready():
     global background_task
     log(f"Logged in as {client.user}")
+    await client.change_presence(status=discord.Status.invisible)
 
     if background_task is None or background_task.done():
         background_task = asyncio.create_task(background_loop())

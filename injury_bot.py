@@ -712,6 +712,7 @@ async def background_loop() -> None:
 async def on_ready():
     global background_task_started
     log(f"Logged in as {client.user}")
+    await client.change_presence(status=discord.Status.invisible)
 
     if not background_task_started:
         background_task_started = True
