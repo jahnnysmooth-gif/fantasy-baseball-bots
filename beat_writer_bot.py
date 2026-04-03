@@ -7,6 +7,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Set
 
+import aiohttp
 import discord
 from discord.ext import commands
 
@@ -46,6 +47,7 @@ print(f"[BEAT WRITER] ON_THE_BEAT_CHANNEL_ID from env: {os.getenv('ON_THE_BEAT_C
 PETER_GAMMONS_BOT_TOKEN = str(cfg("PETER_GAMMONS_BOT_TOKEN", "") or "").strip()
 TWEETSHIFT_CHANNEL_ID = int(str(cfg("TWEETSHIFT_CHANNEL_ID", "0") or "0"))
 ON_THE_BEAT_CHANNEL_ID = int(str(cfg("ON_THE_BEAT_CHANNEL_ID", "0") or "0"))
+ANTHROPIC_API_KEY = str(cfg("ON_THE_BEAT_KEY", "") or "").strip()
 
 print(f"[BEAT WRITER] After cfg() - PETER_GAMMONS_BOT_TOKEN={'SET' if PETER_GAMMONS_BOT_TOKEN else 'NOT SET'}", flush=True)
 print(f"[BEAT WRITER] After cfg() - TWEETSHIFT_CHANNEL_ID={TWEETSHIFT_CHANNEL_ID}", flush=True)
@@ -370,6 +372,76 @@ class BeatWriterBot(commands.Bot):
         super().__init__(command_prefix="!", intents=intents)
         
         self.state = BotState()
+        self.http_session: Optional[aiohttp.ClientSession] = None
+    
+    async def setup_hook(self) -> None:
+        """Called when bot is starting up"""
+        self.http_session = aiohttp.ClientSession()
+    
+    async def close(self) -> None:
+        """Clean up HTTP session on shutdown"""
+        if self.http_session:
+            await self.http_session.close()
+        await super().close()
+    
+    async def ask_claude_if_relevant(self, tweet_content: str) -> bool:
+        """
+        Use Claude Haiku API to determine if tweet is fantasy baseball injury/roster news
+        Returns True if relevant, False if not
+        """
+        if not ANTHROPIC_API_KEY:
+            log("No ANTHROPIC_API_KEY - skipping LLM validation")
+            return True  # Default to posting if no API key
+        
+        if not self.http_session:
+            self.http_session = aiohttp.ClientSession()
+        
+        prompt = f"""Is this tweet fantasy baseball injury or roster news? Answer ONLY "Yes" or "No".
+
+Tweet: {tweet_content}
+
+Relevant tweets include:
+- IL placements, activations
+- Injuries (in-game or reported)
+- Roster moves (DFA, options, recalls, trades)
+- Medical updates (X-rays, MRI, surgery)
+
+NOT relevant:
+- Game highlights, home runs, stats
+- Schedules, podcasts, newsletters
+- General team news without injury/roster impact
+
+Answer:"""
+        
+        try:
+            async with self.http_session.post(
+                "https://api.anthropic.com/v1/messages",
+                headers={
+                    "x-api-key": ANTHROPIC_API_KEY,
+                    "anthropic-version": "2023-06-01",
+                    "content-type": "application/json",
+                },
+                json={
+                    "model": "claude-haiku-4-20250514",
+                    "max_tokens": 10,
+                    "messages": [{"role": "user", "content": prompt}]
+                },
+                timeout=aiohttp.ClientTimeout(total=10)
+            ) as resp:
+                if resp.status != 200:
+                    log(f"Claude API error {resp.status} - defaulting to Yes")
+                    return True
+                
+                data = await resp.json()
+                answer = data.get("content", [{}])[0].get("text", "").strip().lower()
+                
+                is_relevant = "yes" in answer
+                log(f"LLM validation: {answer} -> {'PASS' if is_relevant else 'SKIP'}")
+                return is_relevant
+                
+        except Exception as e:
+            log(f"LLM validation error: {e} - defaulting to Yes")
+            return True  # Default to posting on error
 
     async def on_ready(self) -> None:
         log(f"Logged in as {self.user}")
@@ -396,10 +468,20 @@ class BeatWriterBot(commands.Bot):
             log(f"Failed to parse message {message.id}")
             return
         
-        # Filter by keywords
-        if not self.contains_keywords(tweet.content):
+        # Filter by keywords - returns (passes, is_borderline)
+        passes, is_borderline = self.contains_keywords(tweet.content)
+        
+        if not passes:
             log(f"Skipping (no keywords): {tweet.author} - {tweet.content[:80]}")
             return
+        
+        # If borderline, ask Claude for validation
+        if is_borderline:
+            log(f"Borderline tweet - asking Claude API...")
+            is_relevant = await self.ask_claude_if_relevant(tweet.content)
+            if not is_relevant:
+                log(f"Skipping (LLM rejected): {tweet.author} - {tweet.content[:80]}")
+                return
         
         # Check if already posted
         content_hash = tweet.content_hash()
@@ -446,8 +528,15 @@ class BeatWriterBot(commands.Bot):
             
             processed += 1
             
-            if not self.contains_keywords(tweet.content):
+            passes, is_borderline = self.contains_keywords(tweet.content)
+            if not passes:
                 continue
+            
+            # For backfill, skip LLM validation to avoid API costs on old tweets
+            # Just use keyword filtering
+            if is_borderline:
+                # Could add LLM here too, but for backfill we'll trust keywords
+                pass
             
             content_hash = tweet.content_hash()
             if self.state.already_posted(content_hash):
@@ -575,8 +664,11 @@ class BeatWriterBot(commands.Bot):
         
         return tweet_data
 
-    def contains_keywords(self, text: str) -> bool:
-        """Check if text contains any relevant keywords"""
+    def contains_keywords(self, text: str) -> tuple[bool, bool]:
+        """
+        Check if text contains any relevant keywords
+        Returns: (passes_filter, is_borderline)
+        """
         normalized = normalize_text(text)
         
         # Hard skip patterns - instant reject
@@ -615,10 +707,10 @@ class BeatWriterBot(commands.Bot):
         
         for pattern in hard_skip:
             if pattern in normalized:
-                return False
+                return (False, False)
         
-        # MUST contain one of these specific phrases
-        roster_phrases = [
+        # High-confidence phrases - always post, no LLM needed
+        high_confidence = [
             # IL transactions
             "to il", "to the il", "on il", "on the il", 
             "placed on", "activated from", "reinstated from",
@@ -630,49 +722,46 @@ class BeatWriterBot(commands.Bot):
             "claimed off", "released by", "dealt to", "traded to",
             "bereavement list",
             
-            # In-game injuries (specific phrases only)
+            # Clear injury phrases
             "left the game", "left game", 
             "removed from", "out of the game",
             "helped off", "limped off", "carried off",
             "foul ball off", "hit by pitch", "hit by a pitch",
-            
-            # Medical/injury phrases
             "x-rays", "x rays", "mri", "ct scan",
-            "to injured list",
-            "scratched", "day-to-day", "dtd",
-            "suffered", "underwent surgery",
-            "scheduled for surgery", "rehab assignment", "rehab start",
+            "to injured list", "scratched",
+            "day-to-day", "dtd",
+            "underwent surgery", "scheduled for surgery",
+            "rehab assignment", "rehab start",
             "second opinion", "as a precaution",
             "tightness", "soreness", "discomfort",
             "concussion", "fracture",
             "tommy john", "ucl", "acl", "mcl",
         ]
         
-        # Check roster phrases first
-        for phrase in roster_phrases:
+        for phrase in high_confidence:
             if phrase in normalized:
-                return True
+                return (True, False)  # High confidence, no LLM needed
         
-        # Body parts require injury context words
-        body_parts = ["oblique", "hamstring", "shoulder", "elbow", "knee", 
-                     "ankle", "hip", "wrist", "hand", "finger"]
+        # Borderline keywords - need LLM validation
+        borderline_body_parts = ["elbow", "shoulder", "knee", "hip", "ankle",
+                                "wrist", "oblique", "hamstring", "hand", "finger"]
+        
         injury_context = ["injury", "injured", "hurt", "strain", "sprain",
-                         "sore", "tight", "issue", "pain", "looked at"]
+                         "sore", "tight", "issue", "pain", "looked at", "suffered"]
         
-        # "exited" only counts if WITH injury context or body part
-        if "exited" in normalized or "exit" in normalized:
-            # Must have game context
-            if "game" in normalized:
-                return True
-        
-        # Check if body part + injury context both present
-        has_body_part = any(part in normalized for part in body_parts)
+        # Body part + injury context = borderline (needs LLM)
+        has_body_part = any(part in normalized for part in borderline_body_parts)
         has_injury_context = any(ctx in normalized for ctx in injury_context)
         
         if has_body_part and has_injury_context:
-            return True
+            return (True, True)  # Passes but needs LLM validation
         
-        return False
+        # "exited" or "exit" with "game" = borderline
+        if ("exited" in normalized or "exit" in normalized) and "game" in normalized:
+            return (True, True)  # Passes but needs LLM validation
+        
+        # No match
+        return (False, False)
 
     def extract_team_color(self, content: str) -> int:
         """Try to extract team from content and return color"""
