@@ -375,9 +375,7 @@ class BeatWriterBot(commands.Bot):
         log(f"Logged in as {self.user}")
         log(f"Listening to channel: {TWEETSHIFT_CHANNEL_ID}")
         log(f"Posting to channel: {ON_THE_BEAT_CHANNEL_ID}")
-        
-        # Scan last 12 hours on startup
-        await self.scan_recent_messages()
+        log("Bot ready - monitoring for new messages only")
 
     async def on_message(self, message: discord.Message) -> None:
         # Debug: log all messages from tweetshift channel
@@ -595,14 +593,16 @@ class BeatWriterBot(commands.Bot):
             # Game action
             "didn't realize", "handed him the ball", "will replace",
             "will make his debut", "gave up a run", "got it back",
-            "hit his first", "hits the first", "first career",
+            "hit his first", "hits the first", "first career", "first homer",
             "ugliest inning", "not to pile on", "tough first",
             "hoped to stretch", "played wild games", "beginning the season",
             "equivalent of the backup", "dealing with the stomach bug",
             "resorted to using", "talked before the game",
-            # Non-injury "back" references
+            # Non-injury references
             "looking back at", "back at", "back in", "are back at",
-            "want it bad", "want it back"
+            "want it bad", "want it back", "came back",
+            "is rocking the", "throw back", "throws back",
+            "exit velocities", "exit velo",
         ]
         
         for pattern in hard_skip:
@@ -610,7 +610,7 @@ class BeatWriterBot(commands.Bot):
                 return False
         
         # MUST contain one of these specific phrases
-        required_phrases = [
+        roster_phrases = [
             # IL transactions
             "to il", "to the il", "on il", "on the il", 
             "placed on", "activated from", "reinstated from",
@@ -622,30 +622,49 @@ class BeatWriterBot(commands.Bot):
             "claimed off", "released by", "dealt to", "traded to",
             "bereavement list",
             
-            # In-game injuries
-            "left the game", "left game", "exited", "exit",
+            # In-game injuries (specific phrases only)
+            "left the game", "left game", 
             "removed from", "out of the game",
             "helped off", "limped off", "carried off",
+            "foul ball off", "hit by pitch", "hit by a pitch",
             
-            # Injury updates
+            # Medical/injury phrases
             "x-rays", "x rays", "mri", "ct scan",
-            "placed on injured", "to injured list",
+            "to injured list",
             "scratched", "day-to-day", "dtd",
-            "suffered", "reaggravated", "underwent surgery",
+            "suffered", "underwent surgery",
             "scheduled for surgery", "rehab assignment", "rehab start",
-            
-            # Body parts + injury context
+            "second opinion", "as a precaution",
             "tightness", "soreness", "discomfort",
-            "oblique", "hamstring", "shoulder", "elbow", "knee", 
-            "ankle", "hip", "back", "wrist", "hand", "finger",
-            "concussion", "fracture", "sprain", "strain",
+            "concussion", "fracture",
             "tommy john", "ucl", "acl", "mcl",
-            
-            # Other injury signals
-            "hit by pitch", "fouled a ball off", "collision"
         ]
         
-        return any(phrase in normalized for phrase in required_phrases)
+        # Check roster phrases first
+        for phrase in roster_phrases:
+            if phrase in normalized:
+                return True
+        
+        # Body parts require injury context words
+        body_parts = ["oblique", "hamstring", "shoulder", "elbow", "knee", 
+                     "ankle", "hip", "wrist", "hand", "finger"]
+        injury_context = ["injury", "injured", "hurt", "strain", "sprain",
+                         "sore", "tight", "issue", "pain", "looked at"]
+        
+        # "exited" only counts if WITH injury context or body part
+        if "exited" in normalized or "exit" in normalized:
+            # Must have game context
+            if "game" in normalized:
+                return True
+        
+        # Check if body part + injury context both present
+        has_body_part = any(part in normalized for part in body_parts)
+        has_injury_context = any(ctx in normalized for ctx in injury_context)
+        
+        if has_body_part and has_injury_context:
+            return True
+        
+        return False
 
     def extract_team_color(self, content: str) -> int:
         """Try to extract team from content and return color"""
