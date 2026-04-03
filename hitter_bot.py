@@ -4615,14 +4615,18 @@ async def run_morning_sweep(channel, state: dict, posted: set) -> None:
                 player_team == home_abbr and home_score > away_score
             )
             log(f"Morning sweep posting: {hitter['name']} | {hitter['team']} | score={score_value:.2f}")
-            await post_card(channel, hitter, opponent, team_won, feed, game_date_et,
-                            team_score=away_score if player_team == away_abbr else home_score,
-                            opp_score=home_score if player_team == away_abbr else away_score,
-                            opponent_abbr=opp_abbr)
-            posted.add(post_key)
-            posts_this_sweep += 1
-            state["posted"] = sorted(posted)
-            save_state(state)
+            try:
+                await post_card(channel, hitter, opponent, team_won, feed, game_date_et,
+                                team_score=away_score if player_team == away_abbr else home_score,
+                                opp_score=home_score if player_team == away_abbr else away_score,
+                                opponent_abbr=opp_abbr)
+                posted.add(post_key)
+                posts_this_sweep += 1
+                state["posted"] = sorted(posted)
+                save_state(state)
+            except Exception as exc:
+                log(f"Morning sweep: post failed for {hitter['name']}, will retry next sweep: {exc}")
+                continue
             await asyncio.sleep(POST_DELAY_SECONDS)
 
         # Bad/slump cards

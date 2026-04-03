@@ -11,7 +11,7 @@ import discord
 import requests
 from bs4 import BeautifulSoup
 
-DISCORD_TOKEN = os.getenv("LINEUP_BOT_TOKEN")
+DISCORD_TOKEN = os.getenv("PETER_GAMMONS_BOT_TOKEN")
 CHANNEL_ID = int(os.getenv("LINEUP_CHANNEL_ID", "0"))
 POLL_INTERVAL = int(os.getenv("LINEUP_POLL_INTERVAL", "300"))
 
