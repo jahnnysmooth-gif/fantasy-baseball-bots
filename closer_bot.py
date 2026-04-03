@@ -51,7 +51,7 @@ TREND_RANDOM_INTERVAL_MAX_MINUTES = 16
 TREND_HOURS_START = 2   # 2 AM ET — trend blurbs + velocity alerts window opens
 TREND_HOURS_END = 14    # 2 PM ET — trend blurbs + velocity alerts window closes
 CARD_HOURS_START = 14   # 2 PM ET — tracked card posting window opens
-CARD_HOURS_END = 2      # 2 AM ET — tracked card posting window closes (crosses midnight)
+CARD_HOURS_END = int(os.getenv("CLOSER_CARD_HOURS_END", "4"))  # 4 AM ET — late West Coast games can finish past 2 AM
 TREND_MAX_PER_HOUR = 2
 VELOCITY_DELTA_THRESHOLD = 1.0
 VELOCITY_MIN_PITCHES = 10
@@ -2937,11 +2937,29 @@ def _fetch_feed_sync(game_id) -> dict:
 
 
 async def get_games() -> list:
-    today = datetime.now(ET).date()
+    now_et = datetime.now(ET)
+    today = now_et.date()
     yesterday = today - timedelta(days=1)
     loop = asyncio.get_event_loop()
 
-    # Today-first: once today has any games scheduled, don't fetch yesterday
+    # Before 4 AM ET, fetch both yesterday and today — late West Coast games
+    # finish after midnight and only appear on yesterday's slate
+    if now_et.hour < CARD_HOURS_END:
+        seen_ids: set = set()
+        games: list = []
+        for fetch_date in [yesterday, today]:
+            try:
+                day_games = await loop.run_in_executor(None, _fetch_schedule_sync, fetch_date.isoformat())
+                for g in (day_games or []):
+                    gid = g.get("gamePk")
+                    if gid and gid not in seen_ids:
+                        seen_ids.add(gid)
+                        games.append(g)
+            except Exception as e:
+                log(f"Schedule fetch error for {fetch_date}: {e}")
+        return games
+
+    # Normal hours: today-first, fall back to yesterday if no games yet
     try:
         today_games = await loop.run_in_executor(None, _fetch_schedule_sync, today.isoformat())
     except Exception as e:
@@ -2951,7 +2969,6 @@ async def get_games() -> list:
     if today_games:
         return today_games
 
-    # No games today — fall back to yesterday
     try:
         yesterday_games = await loop.run_in_executor(None, _fetch_schedule_sync, yesterday.isoformat())
         return yesterday_games
