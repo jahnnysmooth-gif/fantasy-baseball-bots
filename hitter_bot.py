@@ -4371,7 +4371,17 @@ async def post_slump_card(
     embed.add_field(name="Summary", value=summary, inline=False)
     embed.add_field(name="Game Line", value=format_hitter_game_line(stats), inline=False)
     embed.add_field(name="Season", value=format_hitter_season_line(hitter.get("season_stats", {})), inline=False)
-    await channel.send(embed=embed)
+    for attempt in range(3):
+        try:
+            await channel.send(embed=embed)
+            return
+        except Exception as exc:
+            if attempt < 2:
+                log(f"post_slump_card send failed (attempt {attempt + 1}/3): {exc} — retrying in {5 * (attempt + 1)}s")
+                await asyncio.sleep(5 * (attempt + 1))
+            else:
+                log(f"post_slump_card send failed after 3 attempts for {hitter['name']}: {exc}")
+                raise
 
 
 async def post_bad_card(
@@ -4412,7 +4422,17 @@ async def post_bad_card(
     embed.add_field(name="Summary", value=summary, inline=False)
     embed.add_field(name="Game Line", value=format_hitter_game_line(stats), inline=False)
     embed.add_field(name="Season", value=format_hitter_season_line(hitter.get("season_stats", {})), inline=False)
-    await channel.send(embed=embed)
+    for attempt in range(3):
+        try:
+            await channel.send(embed=embed)
+            return
+        except Exception as exc:
+            if attempt < 2:
+                log(f"post_bad_card send failed (attempt {attempt + 1}/3): {exc} — retrying in {5 * (attempt + 1)}s")
+                await asyncio.sleep(5 * (attempt + 1))
+            else:
+                log(f"post_bad_card send failed after 3 attempts for {hitter['name']}: {exc}")
+                raise
 
 
 # ---------------- EMBED POSTING ----------------
@@ -4464,7 +4484,17 @@ async def post_card(channel: discord.abc.Messageable, hitter: dict, opponent: st
     embed.add_field(name="Summary", value=summary, inline=False)
     embed.add_field(name="Game Line", value=format_hitter_game_line(stats), inline=False)
     embed.add_field(name="Season", value=format_hitter_season_line(hitter.get("season_stats", {})), inline=False)
-    await channel.send(embed=embed)
+    for attempt in range(3):
+        try:
+            await channel.send(embed=embed)
+            return
+        except Exception as exc:
+            if attempt < 2:
+                log(f"post_card send failed (attempt {attempt + 1}/3): {exc} — retrying in {5 * (attempt + 1)}s")
+                await asyncio.sleep(5 * (attempt + 1))
+            else:
+                log(f"post_card send failed after 3 attempts for {hitter['name']}: {exc}")
+                raise
 
 
 
