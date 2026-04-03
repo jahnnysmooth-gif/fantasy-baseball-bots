@@ -141,8 +141,7 @@ def save_state(state):
 def within_run_window():
     now = datetime.now(ET)
     start = now.replace(hour=7, minute=0, second=0, microsecond=0)
-    end = now.replace(hour=23, minute=0, second=0, microsecond=0)
-    return start <= now <= end
+    return now >= start
 
 
 def seconds_until_window_open():
@@ -153,6 +152,31 @@ def seconds_until_window_open():
     if now >= next_open:
         next_open += timedelta(days=1)
     return max(0, (next_open - now).total_seconds())
+
+
+def last_game_has_started(items):
+    """Return True if the latest scheduled game time is in the past."""
+    now = datetime.now(ET)
+    today_str = now.strftime("%Y-%m-%d")
+    latest = None
+
+    for item in items:
+        raw = item.get("game_time", "")
+        if not raw:
+            continue
+        try:
+            # game_time is like "10:10 PM ET"
+            dt = datetime.strptime(f"{today_str} {raw.replace(' ET', '')}", "%Y-%m-%d %I:%M %p")
+            dt = dt.replace(tzinfo=ET)
+            if latest is None or dt > latest:
+                latest = dt
+        except ValueError:
+            continue
+
+    if latest is None:
+        return False
+
+    return now >= latest
 
 
 def fetch_page():
@@ -405,7 +429,7 @@ async def edit_existing_embed(channel, message_id, embed):
     await message.edit(embed=embed)
 
 
-async def run_once():
+async def run_once(html=None, lines=None, items=None):
     channel = client.get_channel(CHANNEL_ID)
     if channel is None:
         log("Channel not found.")
@@ -414,9 +438,10 @@ async def run_once():
     state = load_state()
     posted = state.get("posted", {})
 
-    html = fetch_page()
-    lines = get_lines(html)
-    items = parse_lineups(lines)
+    if items is None:
+        html = fetch_page()
+        lines = get_lines(html)
+        items = parse_lineups(lines)
 
     log(f"Parsed {len(items)} lineups")
 
@@ -524,11 +549,24 @@ async def background_loop():
                 from datetime import timedelta
                 wake_dt = datetime.now(ET) + timedelta(seconds=secs)
                 wake_time = wake_dt.strftime("%I:%M %p ET")
-                log(f"Outside run window (7AM–11PM ET). Sleeping until {wake_time} ({int(secs)}s).")
+                log(f"Outside run window. Sleeping until {wake_time} ({int(secs)}s).")
                 await asyncio.sleep(secs)
                 continue
 
-            await run_once()
+            html = fetch_page()
+            lines = get_lines(html)
+            items = parse_lineups(lines)
+
+            await run_once(html=html, lines=lines, items=items)
+
+            if last_game_has_started(items):
+                secs = seconds_until_window_open()
+                from datetime import timedelta
+                wake_dt = datetime.now(ET) + timedelta(seconds=secs)
+                wake_time = wake_dt.strftime("%I:%M %p ET")
+                log(f"Last game has started. Sleeping until {wake_time} ({int(secs)}s).")
+                await asyncio.sleep(secs)
+                continue
 
         except Exception as e:
             log(f"Background loop crashed: {e}")
