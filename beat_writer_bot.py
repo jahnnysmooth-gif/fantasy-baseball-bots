@@ -10,6 +10,8 @@ from typing import Any, Dict, List, Optional, Set
 import discord
 from discord.ext import commands
 
+print("[BEAT WRITER] Module import started", flush=True)
+
 try:
     from dotenv import load_dotenv
 except Exception:
@@ -22,8 +24,10 @@ if load_dotenv:
 
 try:
     import beat_writer_config  # type: ignore
+    print("[BEAT WRITER] beat_writer_config imported", flush=True)
 except Exception:
     beat_writer_config = None
+    print("[BEAT WRITER] beat_writer_config not found", flush=True)
 
 
 def cfg(name: str, default: Any = None) -> Any:
@@ -34,14 +38,18 @@ def cfg(name: str, default: Any = None) -> Any:
     return os.getenv(name, default)
 
 
+print(f"[BEAT WRITER] Reading env vars...", flush=True)
+print(f"[BEAT WRITER] PETER_GAMMONS_BOT_TOKEN from env: {os.getenv('PETER_GAMMONS_BOT_TOKEN', 'NOT FOUND')[:20]}...", flush=True)
+print(f"[BEAT WRITER] TWEETSHIFT_CHANNEL_ID from env: {os.getenv('TWEETSHIFT_CHANNEL_ID', 'NOT FOUND')}", flush=True)
+print(f"[BEAT WRITER] ON_THE_BEAT_CHANNEL_ID from env: {os.getenv('ON_THE_BEAT_CHANNEL_ID', 'NOT FOUND')}", flush=True)
+
 PETER_GAMMONS_BOT_TOKEN = str(cfg("PETER_GAMMONS_BOT_TOKEN", "") or "").strip()
 TWEETSHIFT_CHANNEL_ID = int(str(cfg("TWEETSHIFT_CHANNEL_ID", "0") or "0"))
 ON_THE_BEAT_CHANNEL_ID = int(str(cfg("ON_THE_BEAT_CHANNEL_ID", "0") or "0"))
 
-# Debug logging
-print(f"[BEAT WRITER DEBUG] PETER_GAMMONS_BOT_TOKEN={'SET' if PETER_GAMMONS_BOT_TOKEN else 'NOT SET'}", flush=True)
-print(f"[BEAT WRITER DEBUG] TWEETSHIFT_CHANNEL_ID={TWEETSHIFT_CHANNEL_ID}", flush=True)
-print(f"[BEAT WRITER DEBUG] ON_THE_BEAT_CHANNEL_ID={ON_THE_BEAT_CHANNEL_ID}", flush=True)
+print(f"[BEAT WRITER] After cfg() - PETER_GAMMONS_BOT_TOKEN={'SET' if PETER_GAMMONS_BOT_TOKEN else 'NOT SET'}", flush=True)
+print(f"[BEAT WRITER] After cfg() - TWEETSHIFT_CHANNEL_ID={TWEETSHIFT_CHANNEL_ID}", flush=True)
+print(f"[BEAT WRITER] After cfg() - ON_THE_BEAT_CHANNEL_ID={ON_THE_BEAT_CHANNEL_ID}", flush=True)
 
 STATE_DIR = BASE_DIR / "state" / "beat_writer"
 POSTED_HASHES_FILE = STATE_DIR / "posted_hashes.json"
