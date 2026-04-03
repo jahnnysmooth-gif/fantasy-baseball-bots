@@ -490,20 +490,30 @@ class BeatWriterBot(commands.Bot):
                 else:
                     author = author_text
             
-            # Fallback: try to extract author from title or footer
-            if not author:
-                if embed.title:
-                    handle_match = re.search(r'@([A-Za-z0-9_]+)', embed.title)
-                    if handle_match:
-                        author = handle_match.group(1)
-                
-                if not author and embed.footer and embed.footer.text:
-                    handle_match = re.search(r'@([A-Za-z0-9_]+)', embed.footer.text)
-                    if handle_match:
-                        author = handle_match.group(1)
+            # Fallback: check if author is at the start of description
+            # Format: "Name (@handle)\n\nTweet content"
+            if not author and embed.description:
+                desc_author_match = re.match(r'^([^(]+)\s*\(@([^)]+)\)', embed.description)
+                if desc_author_match:
+                    author = desc_author_match.group(2)  # Use the handle
+                    # Remove author line from description
+                    tweet_content = re.sub(r'^[^(]+\s*\(@[^)]+\)\s*\n*', '', embed.description).strip()
+                else:
+                    tweet_content = embed.description
+            else:
+                tweet_content = embed.description
             
-            # Get tweet content from embed description
-            tweet_content = embed.description
+            # Still no author? Try title
+            if not author and embed.title:
+                title_match = re.search(r'@([A-Za-z0-9_]+)', embed.title)
+                if title_match:
+                    author = title_match.group(1)
+            
+            # Try footer as last resort
+            if not author and embed.footer and embed.footer.text:
+                footer_match = re.search(r'@([A-Za-z0-9_]+)', embed.footer.text)
+                if footer_match:
+                    author = footer_match.group(1)
             if not tweet_content:
                 log(f"Message {message.id} embed has no description - skipping")
                 return None
@@ -526,16 +536,30 @@ class BeatWriterBot(commands.Bot):
                 log(f"Message {message.id} has no content - skipping")
                 return None
             
-            # Try to extract author from text
-            # Common formats: "Author - tweet text" or just "tweet text"
-            author_match = re.match(r'^([A-Za-z0-9_]+)\s*-\s*(.+)', content, re.DOTALL)
+            # Try to extract author from various text patterns
+            author = None
+            tweet_content = content
+            
+            # Pattern 1: "Author - tweet text"
+            author_match = re.match(r'^([A-Za-z0-9_]+)\s*[-–—]\s*(.+)', content, re.DOTALL)
             if author_match:
                 author = author_match.group(1)
                 tweet_content = author_match.group(2).strip()
             else:
-                # No clear author, use generic and use full content
+                # Pattern 2: Look for @handle anywhere in the text
+                handle_match = re.search(r'@([A-Za-z0-9_]+)', content)
+                if handle_match:
+                    # Use the first @handle found
+                    author = handle_match.group(1)
+            
+            # If still no author, check message author (Discord user posting it)
+            if not author and message.author:
+                # Use Discord username as fallback
+                author = message.author.name
+            
+            # Last resort
+            if not author:
                 author = "BeatWriter"
-                tweet_content = content
             
             tweet_url = None
         
