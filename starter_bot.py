@@ -347,7 +347,10 @@ def load_state():
 
 def save_state(state):
     with open(STATE_FILE, "w", encoding="utf-8") as f:
-        json.dump({"posted": state.get("posted", [])}, f, indent=2)
+        json.dump({
+            "posted": state.get("posted", []),
+            "last_sweep_date": state.get("last_sweep_date", ""),
+        }, f, indent=2)
 
 
 # ---------------- SAFE CONVERSIONS ----------------
@@ -3230,15 +3233,25 @@ def build_starter_next_start_sentence(p: dict, label: str, seed: int, next_start
     return choices[(seed // 101) % len(choices)]
 
 def get_games():
-    today = datetime.now(ET).date()
+    now = datetime.now(ET)
+    today = now.date()
     games = []
+    seen_ids: set = set()
 
-    data = fetch_with_retry(f"{SCHEDULE_URL}&date={today.isoformat()}")
-    if data is None:
-        log(f"Schedule fetch failed for {today}")
-        return games
-    for date_block in data.get("dates", []):
-        games.extend(date_block.get("games", []))
+    # Between midnight and 4 AM ET, also check yesterday's slate for late finishers
+    fetch_dates = [today - timedelta(days=1), today] if now.hour < 4 else [today]
+
+    for fetch_date in fetch_dates:
+        data = fetch_with_retry(f"{SCHEDULE_URL}&date={fetch_date.isoformat()}")
+        if data is None:
+            log(f"Schedule fetch failed for {fetch_date}")
+            continue
+        for date_block in data.get("dates", []):
+            for game in date_block.get("games", []):
+                gid = game.get("gamePk")
+                if gid and gid not in seen_ids:
+                    seen_ids.add(gid)
+                    games.append(game)
 
     return games
 
@@ -3556,6 +3569,99 @@ async def post_card(
     await channel.send(embed=embed)
 
 
+async def run_morning_sweep(channel, state: dict, posted: set) -> None:
+    """Backfill scan of yesterday's final games. Called by sweep_loop at 7:30 AM ET daily.
+    Posts any starter cards missed overnight."""
+    yesterday = datetime.now(ET).date() - timedelta(days=1)
+    log(f"Morning sweep: checking {yesterday} for missed starter cards")
+
+    try:
+        data = fetch_with_retry(f"{SCHEDULE_URL}&date={yesterday.isoformat()}")
+        if not data:
+            log("Morning sweep: schedule fetch failed")
+            return
+        games = []
+        for date_block in data.get("dates", []):
+            games.extend(date_block.get("games", []))
+    except Exception as exc:
+        log(f"Morning sweep: schedule fetch error: {exc}")
+        return
+
+    posts_this_sweep = 0
+    for g in games:
+        if g.get("status", {}).get("detailedState") != "Final":
+            continue
+        game_id = g.get("gamePk")
+        if not game_id:
+            continue
+
+        feed = await asyncio.to_thread(get_feed, game_id)
+        if feed is None:
+            continue
+        starters = get_starters(feed)
+        if not starters:
+            continue
+
+        game_teams = feed.get("gameData", {}).get("teams", {})
+        away_abbr = (
+            game_teams.get("away", {}).get("abbreviation")
+            or g.get("teams", {}).get("away", {}).get("team", {}).get("abbreviation")
+            or "AWAY"
+        )
+        home_abbr = (
+            game_teams.get("home", {}).get("abbreviation")
+            or g.get("teams", {}).get("home", {}).get("team", {}).get("abbreviation")
+            or "HOME"
+        )
+        away_score = safe_int(g.get("teams", {}).get("away", {}).get("score", 0), 0)
+        home_score = safe_int(g.get("teams", {}).get("home", {}).get("score", 0), 0)
+        score_value = build_starter_score_display(away_abbr, away_score, home_abbr, home_score)
+        game_datetime = feed.get("gameData", {}).get("datetime", {})
+        day_night = str(game_datetime.get("dayNight") or "").lower()
+        game_context = {
+            "away_abbr": away_abbr,
+            "home_abbr": home_abbr,
+            "away_score": away_score,
+            "home_score": home_score,
+            "score_display": score_value,
+            "day_night": day_night,
+        }
+        game_date_et = parse_game_date_et(g)
+        season = game_date_et.year if game_date_et else datetime.now(ET).year
+
+        away_hitting = await asyncio.to_thread(get_team_hitting_stats, normalize_team_abbr(away_abbr), season)
+        home_hitting = await asyncio.to_thread(get_team_hitting_stats, normalize_team_abbr(home_abbr), season)
+
+        ordered = sorted(starters, key=lambda p: (-starter_score(p["stats"]), 0 if p.get("side") == "away" else 1))
+        posted_this_game = 0
+        for p in ordered:
+            pid = p.get("id")
+            if pid is None:
+                continue
+            key = f"{game_id}_{pid}"
+            if key in posted:
+                continue
+            if posted_this_game >= MAX_STARTER_CARDS_PER_GAME:
+                break
+            opp_hitting = home_hitting if p.get("side") == "away" else away_hitting
+            recent_appearances = await asyncio.to_thread(get_recent_appearances, pid, game_date_et, limit=5, max_days=45)
+            next_start = await asyncio.to_thread(get_next_start, pid, p.get("team", ""), game_date_et)
+            log(f"Morning sweep posting: {p['name']} | {p['team']}")
+            await post_card(channel, p, game_context, score_value,
+                            recent_appearances=recent_appearances,
+                            opp_hitting=opp_hitting,
+                            next_start=next_start,
+                            season=season)
+            posted.add(key)
+            posted_this_game += 1
+            posts_this_sweep += 1
+            state["posted"] = list(posted)
+            save_state(state)
+            await asyncio.sleep(POST_STAGGER_SECONDS)
+
+    log(f"Morning sweep complete: {posts_this_sweep} posts")
+
+
 async def loop():
     await client.wait_until_ready()
     channel = await client.fetch_channel(CHANNEL_ID)
@@ -3703,15 +3809,42 @@ async def loop():
 intents = discord.Intents.default()
 client = discord.Client(intents=intents)
 background_task = None
+sweep_task = None
+
+
+async def sweep_loop_starter():
+    """Runs the morning sweep every day at 7:30 AM ET regardless of the main sleep window."""
+    await client.wait_until_ready()
+    channel = await client.fetch_channel(CHANNEL_ID)
+
+    while True:
+        now = datetime.now(ET)
+        target = now.replace(hour=8, minute=0, second=0, microsecond=0)
+        if now >= target:
+            target += timedelta(days=1)
+        sleep_secs = (target - now).total_seconds()
+        log(f"Sweep loop: next sweep at 7:30 AM ET (sleeping {sleep_secs/3600:.1f}h)")
+        await asyncio.sleep(sleep_secs)
+
+        if RESET_STARTER_STATE:
+            continue
+
+        state = load_state()
+        posted = set(state.get("posted", []))
+        await run_morning_sweep(channel, state, posted)
 
 
 @client.event
 async def on_ready():
-    global background_task
+    global background_task, sweep_task
     log(f"Logged in as {client.user}")
+    await client.change_presence(status=discord.Status.invisible)
     if background_task is None or background_task.done():
         background_task = asyncio.create_task(loop())
         log("Starter background task created")
+    if sweep_task is None or sweep_task.done():
+        sweep_task = asyncio.create_task(sweep_loop_starter())
+        log("Starter sweep task created")
 
 
 async def start_starter_bot():

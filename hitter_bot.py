@@ -49,6 +49,7 @@ player_headshot_index: dict | None = None
 hitter_stats_cache: dict = {}
 decisive_event_cache: dict = {}
 _ai_session: aiohttp.ClientSession | None = None
+sweep_task: asyncio.Task | None = None
 
 
 TEAM_COLORS = {
@@ -342,7 +343,11 @@ def load_state() -> dict:
 
 
 def save_state(state: dict) -> None:
-    STATE_FILE.write_text(json.dumps({"posted": state.get("posted", [])}, indent=2), encoding="utf-8")
+    STATE_FILE.write_text(json.dumps({
+        "posted": state.get("posted", []),
+        "slump_log": state.get("slump_log", {}),
+        "last_sweep_date": state.get("last_sweep_date", ""),
+    }, indent=2), encoding="utf-8")
 
 
 
@@ -611,18 +616,31 @@ def get_games() -> list[dict]:
         except ValueError:
             log(f"Invalid HITTER_TEST_DATE '{HITTER_TEST_DATE}', falling back to today")
             fetch_date = datetime.now(ET).date()
+        fetch_dates = [fetch_date]
     else:
-        fetch_date = datetime.now(ET).date()
+        now = datetime.now(ET)
+        fetch_date = now.date()
+        # Between midnight and 4 AM ET, also check yesterday's slate for late finishers
+        if now.hour < 4:
+            fetch_dates = [fetch_date - timedelta(days=1), fetch_date]
+        else:
+            fetch_dates = [fetch_date]
 
     games: list[dict] = []
-    try:
-        response = requests.get(f"{SCHEDULE_URL}&date={fetch_date.isoformat()}", timeout=REQUEST_TIMEOUT)
-        response.raise_for_status()
-        payload = response.json()
-        for date_block in payload.get("dates", []):
-            games.extend(date_block.get("games", []))
-    except Exception as exc:
-        log(f"Schedule fetch error for {fetch_date}: {exc}")
+    seen_ids: set = set()
+    for d in fetch_dates:
+        try:
+            response = requests.get(f"{SCHEDULE_URL}&date={d.isoformat()}", timeout=REQUEST_TIMEOUT)
+            response.raise_for_status()
+            payload = response.json()
+            for date_block in payload.get("dates", []):
+                for game in date_block.get("games", []):
+                    gid = game.get("gamePk")
+                    if gid and gid not in seen_ids:
+                        seen_ids.add(gid)
+                        games.append(game)
+        except Exception as exc:
+            log(f"Schedule fetch error for {d}: {exc}")
 
     if HITTER_TEST_LIMIT > 0:
         games = games[:HITTER_TEST_LIMIT]
@@ -4464,6 +4482,123 @@ def format_hitter_season_line(season_stats: dict) -> str:
 
 # ---------------- LOOP ----------------
 
+async def run_morning_sweep(channel, state: dict, posted: set) -> None:
+    """Backfill scan of yesterday's games. Called by sweep_loop at 7:30 AM ET daily.
+    Posts any qualifying cards that were missed overnight."""
+    yesterday = now_et().date() - timedelta(days=1)
+    log(f"Morning sweep: checking {yesterday} for missed cards")
+
+    try:
+        response = requests.get(f"{SCHEDULE_URL}&date={yesterday.isoformat()}", timeout=REQUEST_TIMEOUT)
+        response.raise_for_status()
+        payload = response.json()
+        games = []
+        for date_block in payload.get("dates", []):
+            games.extend(date_block.get("games", []))
+    except Exception as exc:
+        log(f"Morning sweep: schedule fetch failed: {exc}")
+        return
+
+    posts_this_sweep = 0
+    for game in games:
+        if game.get("status", {}).get("detailedState") != "Final":
+            continue
+        game_id = game.get("gamePk")
+        if not game_id:
+            continue
+
+        try:
+            feed = get_feed(game_id)
+        except Exception as exc:
+            log(f"Morning sweep: feed fetch failed for {game_id}: {exc}")
+            continue
+
+        hitters = get_hitters(feed)
+        if not hitters:
+            continue
+
+        game_teams = feed.get("gameData", {}).get("teams", {})
+        away_abbr = normalize_team_abbr(game_teams.get("away", {}).get("abbreviation") or "AWAY")
+        home_abbr = normalize_team_abbr(game_teams.get("home", {}).get("abbreviation") or "HOME")
+        away_score = safe_int(game.get("teams", {}).get("away", {}).get("score", 0), 0)
+        home_score = safe_int(game.get("teams", {}).get("home", {}).get("score", 0), 0)
+        away_name = team_name_from_abbr(away_abbr)
+        home_name = team_name_from_abbr(home_abbr)
+        game_date_et = parse_game_date_et(game)
+
+        ranked = []
+        for hitter in hitters:
+            score_value = score_hitter(hitter["stats"])
+            if score_value < MIN_HITTER_SCORE:
+                continue
+            ranked.append((score_value, hitter))
+        ranked.sort(key=lambda item: item[0], reverse=True)
+
+        for score_value, hitter in ranked:
+            hitter_id = hitter.get("id")
+            if hitter_id is None:
+                continue
+            post_key = f"{game_id}_{hitter_id}"
+            if post_key in posted:
+                continue
+
+            player_team = normalize_team_abbr(hitter.get("team"))
+            opponent = home_name if player_team == away_abbr else away_name
+            opp_abbr = home_abbr if player_team == away_abbr else away_abbr
+            team_won = (player_team == away_abbr and away_score > home_score) or (
+                player_team == home_abbr and home_score > away_score
+            )
+            log(f"Morning sweep posting: {hitter['name']} | {hitter['team']} | score={score_value:.2f}")
+            await post_card(channel, hitter, opponent, team_won, feed, game_date_et,
+                            team_score=away_score if player_team == away_abbr else home_score,
+                            opp_score=home_score if player_team == away_abbr else away_score,
+                            opponent_abbr=opp_abbr)
+            posted.add(post_key)
+            posts_this_sweep += 1
+            state["posted"] = sorted(posted)
+            save_state(state)
+            await asyncio.sleep(POST_DELAY_SECONDS)
+
+        # Bad/slump cards
+        for hitter in hitters:
+            hitter_id = hitter.get("id")
+            if hitter_id is None:
+                continue
+            post_key = f"{game_id}_{hitter_id}"
+            if post_key in posted:
+                continue
+            player_team = normalize_team_abbr(hitter.get("team"))
+            opponent = home_name if player_team == away_abbr else away_name
+            team_won = (player_team == away_abbr and away_score > home_score) or (
+                player_team == home_abbr and home_score > away_score
+            )
+            recent_games_h = get_recent_hitter_games(hitter_id, game_date_et)
+            slumping, hitless_streak = is_slump(recent_games_h, hitter["stats"])
+            if slumping and should_post_slump_card(hitter_id, hitless_streak, state):
+                slump_key = f"{game_id}_{hitter_id}_slump"
+                if slump_key not in posted:
+                    log(f"Morning sweep slump: {hitter['name']} | {hitless_streak} games hitless")
+                    await post_slump_card(channel, hitter, opponent, team_won, feed, game_date_et, hitless_streak)
+                    posted.add(slump_key)
+                    state.setdefault("slump_log", {})[str(hitter_id)] = hitless_streak
+                    posts_this_sweep += 1
+                    state["posted"] = sorted(posted)
+                    save_state(state)
+                    await asyncio.sleep(POST_DELAY_SECONDS)
+                continue
+            bad_key = f"{game_id}_{hitter_id}_bad"
+            if bad_key not in posted and is_bad_night(hitter["stats"]):
+                log(f"Morning sweep bad night: {hitter['name']} | {hitter['team']}")
+                await post_bad_card(channel, hitter, opponent, team_won, feed, game_date_et)
+                posted.add(bad_key)
+                posts_this_sweep += 1
+                state["posted"] = sorted(posted)
+                save_state(state)
+                await asyncio.sleep(POST_DELAY_SECONDS)
+
+    log(f"Morning sweep complete: {posts_this_sweep} posts")
+
+
 async def hitter_loop() -> None:
     assert client is not None
     await client.wait_until_ready()
@@ -4679,16 +4814,44 @@ async def hitter_loop() -> None:
 
 # ---------------- DISCORD LIFECYCLE ----------------
 
+async def sweep_loop() -> None:
+    """Runs the morning sweep every day at 7:30 AM ET regardless of the main sleep window."""
+    assert client is not None
+    await client.wait_until_ready()
+    channel = await client.fetch_channel(CHANNEL_ID)
+
+    while True:
+        now = now_et()
+        # Calculate seconds until next 7:30 AM ET
+        target = now.replace(hour=8, minute=0, second=0, microsecond=0)
+        if now >= target:
+            target += timedelta(days=1)
+        sleep_secs = (target - now).total_seconds()
+        log(f"Sweep loop: next sweep at 7:30 AM ET (sleeping {sleep_secs/3600:.1f}h)")
+        await asyncio.sleep(sleep_secs)
+
+        if RESET_HITTER_STATE:
+            continue
+
+        state = load_state()
+        posted = set(state.get("posted", []))
+        await run_morning_sweep(channel, state, posted)
+
+
 async def on_ready() -> None:
-    global background_task, _ai_session
+    global background_task, _ai_session, sweep_task
     assert client is not None
     log(f"Logged in as {client.user}")
+    await client.change_presence(status=discord.Status.invisible)
     if _ai_session is None or _ai_session.closed:
         _ai_session = aiohttp.ClientSession()
         log("AI HTTP session created")
     if background_task is None or background_task.done():
         background_task = asyncio.create_task(hitter_loop())
         log("Hitter background task created")
+    if sweep_task is None or sweep_task.done():
+        sweep_task = asyncio.create_task(sweep_loop())
+        log("Hitter sweep task created")
 
 
 
@@ -4700,6 +4863,7 @@ async def start_hitter_bot() -> None:
         raise RuntimeError("HITTER_WATCH_CHANNEL_ID is not set")
 
     background_task = None
+    sweep_task = None
     client = discord.Client(intents=intents)
     client.event(on_ready)
 
