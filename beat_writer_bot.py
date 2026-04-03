@@ -452,6 +452,7 @@ class BeatWriterBot(commands.Bot):
         # and tweet content in embed.description
         
         if not message.embeds:
+            log(f"Message {message.id} has no embeds (content preview: {message.content[:100]})")
             return None
         
         embed = message.embeds[0]
@@ -459,6 +460,7 @@ class BeatWriterBot(commands.Bot):
         # Extract author from embed.author.name
         # Format: "Name (@handle)" or just "Name"
         if not embed.author or not embed.author.name:
+            log(f"Message {message.id} embed has no author (description: {embed.description[:100] if embed.description else 'None'})")
             return None
         
         author_text = embed.author.name
