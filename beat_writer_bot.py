@@ -38,6 +38,11 @@ PETER_GAMMONS_BOT_TOKEN = str(cfg("PETER_GAMMONS_BOT_TOKEN", "") or "").strip()
 TWEETSHIFT_CHANNEL_ID = int(str(cfg("TWEETSHIFT_CHANNEL_ID", "0") or "0"))
 ON_THE_BEAT_CHANNEL_ID = int(str(cfg("ON_THE_BEAT_CHANNEL_ID", "0") or "0"))
 
+# Debug logging
+print(f"[BEAT WRITER DEBUG] PETER_GAMMONS_BOT_TOKEN={'SET' if PETER_GAMMONS_BOT_TOKEN else 'NOT SET'}", flush=True)
+print(f"[BEAT WRITER DEBUG] TWEETSHIFT_CHANNEL_ID={TWEETSHIFT_CHANNEL_ID}", flush=True)
+print(f"[BEAT WRITER DEBUG] ON_THE_BEAT_CHANNEL_ID={ON_THE_BEAT_CHANNEL_ID}", flush=True)
+
 STATE_DIR = BASE_DIR / "state" / "beat_writer"
 POSTED_HASHES_FILE = STATE_DIR / "posted_hashes.json"
 PLAYER_CONTENT_FILE = STATE_DIR / "player_content_hashes.json"
