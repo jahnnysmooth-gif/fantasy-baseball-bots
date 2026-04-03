@@ -41,6 +41,7 @@ SLEEP_END_HOUR_ET = int(os.getenv("HITTER_SLEEP_END_HOUR_ET", "13"))
 ESPN_PLAYER_IDS_PATH = os.getenv("ESPN_PLAYER_IDS_PATH", "shared/player_ids/espn_player_ids.json")
 ERROR_CHANNEL_ID = int(os.getenv("HITTER_ERROR_CHANNEL_ID", "0"))
 ANTHROPIC_API_KEY = os.getenv("HITTER_BOT_SUMMARY")
+TOP_300_PATH = os.getenv("TOP_300_PLAYERS_PATH", "top_300_players.json")
 
 intents = discord.Intents.default()
 client: discord.Client | None = None
@@ -50,6 +51,41 @@ hitter_stats_cache: dict = {}
 decisive_event_cache: dict = {}
 _ai_session: aiohttp.ClientSession | None = None
 sweep_task: asyncio.Task | None = None
+_top_300_cache: set | None = None
+
+
+def load_top_300() -> set:
+    """Return a set of normalized player names from the top 300 file."""
+    global _top_300_cache
+    if _top_300_cache is not None:
+        return _top_300_cache
+    _top_300_cache = set()
+    path = Path(TOP_300_PATH)
+    if not path.exists():
+        log(f"Top 300 file not found: {TOP_300_PATH}")
+        return _top_300_cache
+    try:
+        raw = json.loads(path.read_text(encoding="utf-8"))
+        if isinstance(raw, dict):
+            for name in raw.keys():
+                _top_300_cache.add(normalize_lookup_name(name))
+        log(f"Loaded {len(_top_300_cache)} players from top 300 list")
+    except Exception as exc:
+        log(f"Could not load top 300 file: {exc}")
+    return _top_300_cache
+
+
+def is_top_300_player(name: str) -> bool:
+    """Return True if the player is in the top 300 list."""
+    top_300 = load_top_300()
+    if not top_300:
+        return True  # if file missing, don't suppress anyone
+    normalized = normalize_lookup_name(name)
+    if normalized in top_300:
+        return True
+    # also try last-name-only match as fallback
+    last = normalized.split()[-1] if normalized else ""
+    return any(last and entry.split()[-1] == last for entry in top_300)
 
 
 TEAM_COLORS = {
@@ -4576,7 +4612,7 @@ async def run_morning_sweep(channel, state: dict, posted: set) -> None:
             slumping, hitless_streak = is_slump(recent_games_h, hitter["stats"])
             if slumping and should_post_slump_card(hitter_id, hitless_streak, state):
                 slump_key = f"{game_id}_{hitter_id}_slump"
-                if slump_key not in posted:
+                if slump_key not in posted and is_top_300_player(hitter["name"]):
                     log(f"Morning sweep slump: {hitter['name']} | {hitless_streak} games hitless")
                     await post_slump_card(channel, hitter, opponent, team_won, feed, game_date_et, hitless_streak)
                     posted.add(slump_key)
@@ -4587,7 +4623,7 @@ async def run_morning_sweep(channel, state: dict, posted: set) -> None:
                     await asyncio.sleep(POST_DELAY_SECONDS)
                 continue
             bad_key = f"{game_id}_{hitter_id}_bad"
-            if bad_key not in posted and is_bad_night(hitter["stats"]):
+            if bad_key not in posted and is_bad_night(hitter["stats"]) and is_top_300_player(hitter["name"]):
                 log(f"Morning sweep bad night: {hitter['name']} | {hitter['team']}")
                 await post_bad_card(channel, hitter, opponent, team_won, feed, game_date_et)
                 posted.add(bad_key)
@@ -4764,6 +4800,9 @@ async def hitter_loop() -> None:
                     if slumping and should_post_slump_card(hitter_id, hitless_streak, state):
                         slump_key = f"{game_id}_{hitter_id}_slump"
                         if slump_key not in posted and slump_key not in set(load_state().get("posted", [])):
+                            if not is_top_300_player(hitter["name"]):
+                                log(f"Slump card suppressed (not top 300): {hitter['name']}")
+                                continue
                             log(f"Slump card: {hitter['name']} | {hitless_streak} games hitless")
                             await post_slump_card(channel, hitter, opponent, team_won, feed, game_date_et, hitless_streak)
                             posted.add(slump_key)
@@ -4786,6 +4825,10 @@ async def hitter_loop() -> None:
                         continue
 
                     if not is_bad_night(hitter["stats"]):
+                        continue
+
+                    if not is_top_300_player(hitter["name"]):
+                        log(f"Bad night suppressed (not top 300): {hitter['name']}")
                         continue
 
                     log(f"Bad night: {hitter['name']} | {hitter['team']} | {matchup}")
