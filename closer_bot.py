@@ -2,7 +2,7 @@ import asyncio
 import json
 import os
 import random
-from datetime import date, datetime, timedelta, timezone
+from datetime import datetime, timedelta, timezone
 from zoneinfo import ZoneInfo
 
 import discord
@@ -29,11 +29,6 @@ POLL_MINUTES = 10
 POST_STAGGER_SECONDS = 45
 MAX_POSTS_PER_LOOP = 4
 GAME_RECENCY_HOURS = 15  # use start time as proxy; 15h covers a game starting at 10 PM + 3h game + buffer
-
-# Opening Day — used to relax early-season thresholds
-OPENING_DAY = date(2026, 3, 27)
-TREND_APPEARANCE_FLOOR = 4       # appearances needed in last 15 days (mid-season)
-TREND_APPEARANCE_FLOOR_EARLY = 2  # relaxed floor for first 21 days of season
 RESET_CLOSER_STATE = os.getenv("RESET_CLOSER_STATE", "").lower() in {"1", "true", "yes"}
 ANTHROPIC_API_KEY = os.getenv("bullpen_bot_summary", "")
 DEPTH_CHART_OVERRIDE_CHANNEL_ID = int(os.getenv("DEPTH_CHART_OVERRIDE_CHANNEL_ID", "1484232761597366412"))
@@ -306,10 +301,7 @@ def load_state():
 
 def save_state(state):
     with open(STATE_FILE, "w", encoding="utf-8") as f:
-        json.dump({
-            "posted": state.get("posted", []),
-            "last_sweep_date": state.get("last_sweep_date", ""),
-        }, f, indent=2)
+        json.dump({"posted": state.get("posted", [])}, f, indent=2)
 
     trend_payload = {
         "trend_posted": state.get("trend_posted", {}),
@@ -2853,16 +2845,16 @@ async def gather_trend_candidates_from_recent_games(tracked: dict, processed_pit
         pid = p.get("id")
         if pid is None:
             continue
+        # Skip starting pitchers — trend blurbs are bullpen-only
+        if p.get("is_starter"):
+            continue
         norm = normalize_name(p.get("name", ""))
         if norm in tracked_names:
             continue
 
         game_date_et = item.get("game_date_et")
         appearance_count_15 = await count_recent_appearances_in_window(pid, game_date_et, days=15)
-        days_into_season = (datetime.now(ET).date() - OPENING_DAY).days
-        app_floor = TREND_APPEARANCE_FLOOR_EARLY if days_into_season < 21 else TREND_APPEARANCE_FLOOR
-        if appearance_count_15 < app_floor:
-            log(f"Trend suppressed for {p.get('name')} — only {appearance_count_15} appearances in 15 days (need {app_floor})")
+        if appearance_count_15 < 4:
             continue
 
         recent = item.get("recent_appearances") or []
@@ -3055,6 +3047,7 @@ def get_pitchers(feed: dict):
             season_stats = {}
 
             velo = get_fastball_velocity_summary(feed, p.get("person", {}).get("id"))
+            pos_abbr = p.get("position", {}).get("abbreviation", "")
             player_obj = {
                 "id": p.get("person", {}).get("id"),
                 "name": _fix_name(p.get("person", {}).get("fullName", "Unknown Pitcher")),
@@ -3062,6 +3055,7 @@ def get_pitchers(feed: dict):
                 "side": side,
                 "stats": stats,
                 "season_stats": season_stats,
+                "is_starter": pos_abbr == "SP",
                 "avg_fastball_velocity": velo.get("avg_fastball_velocity") if velo else None,
                 "fastball_count": velo.get("fastball_count", 0) if velo else 0,
                 "pitch_count": velo.get("total_pitches", safe_int(stats.get("numberOfPitches", 0), 0)) if velo else safe_int(stats.get("numberOfPitches", 0), 0),
@@ -3508,6 +3502,10 @@ async def loop():
                         if key in posted:
                             continue
 
+                        # Skip starting pitchers — this channel is bullpen-only
+                        if p.get("is_starter"):
+                            continue
+
                         tracked_info = find_tracked_pitcher_info(p["name"], p["team"], tracked)
                         is_save = safe_int(p["stats"].get("saves", 0), 0) > 0
                         is_tracked = tracked_info is not None
@@ -3689,135 +3687,19 @@ async def loop():
 
 # ---------------- START ----------------
 
-async def run_morning_sweep(channel, state: dict, posted: set, tracked: list) -> None:
-    """Backfill of yesterday's final games. Bypasses recency filter.
-    Called by sweep_loop at 7:30 AM ET daily."""
-    yesterday = datetime.now(ET).date() - timedelta(days=1)
-    log(f"Morning sweep: checking {yesterday} for missed closer cards")
-
-    try:
-        yesterday_games = await asyncio.get_event_loop().run_in_executor(
-            None, _fetch_schedule_sync, yesterday.isoformat()
-        )
-    except Exception as exc:
-        log(f"Morning sweep: schedule fetch failed: {exc}")
-        return
-
-    posts_this_sweep = 0
-    for g in (yesterday_games or []):
-        if g.get("status", {}).get("detailedState") != "Final":
-            continue
-        game_id = g.get("gamePk")
-        if not game_id:
-            continue
-        feed = await get_feed(game_id)
-        if not feed:
-            continue
-        pitchers = get_pitchers(feed)
-        game_date_et = parse_game_date_et(g)
-        game_teams = feed.get("gameData", {}).get("teams", {})
-        away_abbr = game_teams.get("away", {}).get("abbreviation") or g.get("teams", {}).get("away", {}).get("team", {}).get("abbreviation") or "AWAY"
-        home_abbr = game_teams.get("home", {}).get("abbreviation") or g.get("teams", {}).get("home", {}).get("team", {}).get("abbreviation") or "HOME"
-        away_team_name = game_teams.get("away", {}).get("teamName") or away_abbr
-        home_team_name = game_teams.get("home", {}).get("teamName") or home_abbr
-        away_score = safe_int(g.get("teams", {}).get("away", {}).get("score", 0), 0)
-        home_score = safe_int(g.get("teams", {}).get("home", {}).get("score", 0), 0)
-        matchup = f"{away_abbr} @ {home_abbr}"
-        score = build_score_line(away_abbr, away_score, home_abbr, home_score)
-
-        for p in pitchers:
-            pitcher_id = p.get("id")
-            if pitcher_id is None:
-                continue
-            key = f"{game_id}_{pitcher_id}"
-            if key in posted:
-                continue
-            tracked_info = find_tracked_pitcher_info(p["name"], p["team"], tracked)
-            is_save = safe_int(p["stats"].get("saves", 0), 0) > 0
-            is_tracked = tracked_info is not None
-            if not (is_save or is_tracked):
-                continue
-            context = get_pitcher_entry_context(feed, pitcher_id, p["side"])
-            recent_appearances = await get_recent_appearances(pitcher_id, game_date_et, limit=5, max_days=21)
-            current_app = {
-                "ip": str(p["stats"].get("inningsPitched", "0.0")),
-                "h": safe_int(p["stats"].get("hits", 0), 0),
-                "er": safe_int(p["stats"].get("earnedRuns", 0), 0),
-                "bb": safe_int(p["stats"].get("baseOnBalls", 0), 0),
-                "k": safe_int(p["stats"].get("strikeOuts", 0), 0),
-                "saves": safe_int(p["stats"].get("saves", 0), 0),
-                "holds": safe_int(p["stats"].get("holds", 0), 0),
-                "blownSaves": safe_int(p["stats"].get("blownSaves", 0), 0),
-                "avg_fastball_velocity": p.get("avg_fastball_velocity"),
-                "fastball_count": safe_int(p.get("fastball_count", 0), 0),
-                "pitch_count": safe_int(p.get("pitch_count", 0), 0),
-            }
-            recent_for_trend = [current_app] + recent_appearances
-            streak_count = await get_streak_count(pitcher_id, game_date_et)
-            usage_note = build_usage_sentence(await get_recent_usage_snapshot(pitcher_id, game_date_et))
-            velocity_alert = build_velocity_alert(current_app, recent_for_trend)
-            log(f"Morning sweep posting: {p['name']} | {p['team']} | {matchup}")
-            await post_card(
-                channel, p, matchup, score, context, streak_count, tracked_info,
-                recent_appearances, usage_note=usage_note,
-                velocity_alert=velocity_alert if is_tracked else None,
-                feed=feed,
-                away_team_name=away_team_name,
-                home_team_name=home_team_name,
-                away_score=away_score,
-                home_score=home_score,
-            )
-            posted.add(key)
-            posts_this_sweep += 1
-            state["posted"] = list(posted)
-            save_state(state)
-            await asyncio.sleep(POST_STAGGER_SECONDS)
-
-    log(f"Morning sweep complete: {posts_this_sweep} posts")
-
-
-async def sweep_loop_closer():
-    """Runs the morning sweep every day at 7:30 AM ET."""
-    await client.wait_until_ready()
-    channel = await client.fetch_channel(CHANNEL_ID)
-    tracked = await refresh_tracked_pitchers()
-
-    while True:
-        now = datetime.now(ET)
-        target = now.replace(hour=8, minute=0, second=0, microsecond=0)
-        if now >= target:
-            target += timedelta(days=1)
-        sleep_secs = (target - now).total_seconds()
-        log(f"Sweep loop: next sweep at 7:30 AM ET (sleeping {sleep_secs/3600:.1f}h)")
-        await asyncio.sleep(sleep_secs)
-
-        if RESET_CLOSER_STATE:
-            continue
-
-        # Refresh tracked list in case it changed overnight
-        tracked = await refresh_tracked_pitchers()
-        state = load_state()
-        posted = set(state.get("posted", []))
-        await run_morning_sweep(channel, state, posted, tracked)
-
-
 intents = discord.Intents.default()
 client = discord.Client(intents=intents)
 background_task = None
-sweep_task = None
 
 
 @client.event
 async def on_ready():
-    global background_task, sweep_task
+    global background_task
     log(f"Logged in as {client.user}")
-    await client.change_presence(status=discord.Status.invisible)
+
     if background_task is None or background_task.done():
         background_task = asyncio.create_task(loop())
         log("Closer background task created")
-    if sweep_task is None or sweep_task.done():
-        sweep_task = asyncio.create_task(sweep_loop_closer())
-        log("Closer sweep task created")
 
 
 async def start_closer_bot():
