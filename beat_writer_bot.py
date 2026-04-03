@@ -580,29 +580,37 @@ class BeatWriterBot(commands.Bot):
         normalized = normalize_text(text)
         
         # Hard skip patterns - instant reject
+        # These are checked FIRST and override everything
         hard_skip = [
+            # Non-baseball/non-injury content
+            "full 2026 schedule", "full schedule", "schedule with", 
+            "handy bookmark", "tv and radio listings",
+            "long distance relationship", "what i mean",
+            "newsletter", "from today's", "padres beat newsletter",
+            "new @crushcityshow", "new crush", "with @tyler",
+            "podcast", "apple:", "spotify:", "youtube:",
+            "early thoughts on", "road trip ahead", 
+            "the infield glut", "how to get everyone",
+            # Game recaps/highlights
             "the five", "probables for", "probable for",
             "walkout video", "channeling his inner",
-            "cold reality", "temperatures in",
-            "trust is a two-way", "compile 16 hits", "pile 16 hits",
+            "compile 16 hits", "pile 16 hits",
             "world series", "curse-breaking", "10 yrs after winning",
             "mailbag", "submit any", "hard hit % leaders",
             "throwback", "merch being sold", "will wear no.",
-            "era begins tomorrow", "planning to run another",
-            "expecting among many", "aggressiveness of some teams",
-            # Game action
-            "didn't realize", "handed him the ball", "will replace",
             "will make his debut", "gave up a run", "got it back",
             "hit his first", "hits the first", "first career", "first homer",
+            "first three rbi", "ties this game",
             "ugliest inning", "not to pile on", "tough first",
-            "hoped to stretch", "played wild games", "beginning the season",
-            "equivalent of the backup", "dealing with the stomach bug",
-            "resorted to using", "talked before the game",
-            # Non-injury references
+            # Non-injury "back" references (very common false positive)
+            "is back on the field", "is back on", "back on the field",
+            "glut is back", "lights just came back", 
+            "back-to-back", "brushed back",
             "looking back at", "back at", "back in", "are back at",
-            "want it bad", "want it back", "came back",
-            "is rocking the", "throw back", "throws back",
+            "came back", "is rocking the", "throw back", "throws back",
+            # Other false positives
             "exit velocities", "exit velo",
+            "imagine hearing", "welcome back to",
         ]
         
         for pattern in hard_skip:
