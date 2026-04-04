@@ -422,7 +422,7 @@ Answer:"""
                     "content-type": "application/json",
                 },
                 json={
-                    "model": "claude-3-sonnet-20240229",
+                    "model": "claude-sonnet-4-6",
                     "max_tokens": 10,
                     "messages": [{"role": "user", "content": prompt}]
                 },
