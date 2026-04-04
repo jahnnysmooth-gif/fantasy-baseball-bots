@@ -477,11 +477,13 @@ Answer:"""
         
         # If borderline, ask Claude for validation
         if is_borderline:
-            log(f"Borderline tweet - asking Claude API...")
+            log(f"Borderline tweet - asking Claude API for validation...")
+            log(f"Tweet preview: {tweet.content[:100]}")
             is_relevant = await self.ask_claude_if_relevant(tweet.content)
             if not is_relevant:
                 log(f"Skipping (LLM rejected): {tweet.author} - {tweet.content[:80]}")
                 return
+            log(f"LLM approved - posting")
         
         # Check if already posted
         content_hash = tweet.content_hash()
@@ -691,6 +693,19 @@ Answer:"""
         # Hard skip patterns - instant reject
         # These are checked FIRST and override everything
         hard_skip = [
+            # Game recaps / play-by-play / performance
+            "perfect game", "no-hitter", "no hitter", "shutout",
+            "final:", "final score", "wp:", "lp:", "record:",
+            "rough night for", "great night for", "big night for",
+            "rbi double", "rbi single", "rbi triple", "solo homer",
+            "went deep", "home run", "smoked an", "crushed",
+            "through five innings", "through six innings", "through seven innings",
+            "filthier than filth", "pure stuff is otherworldly",
+            "developing story", "noticeably less sharp",
+            "apologized in-game", "upset in the moment",
+            "don't have a baserunner", "hasn't allowed a baserunner",
+            "carried a perfect game", "lost his perfect game",
+            "righted themselves", "made him throw",
             # Non-baseball/non-injury content
             "full 2026 schedule", "full schedule", "schedule with", 
             "handy bookmark", "tv and radio listings",
@@ -726,59 +741,42 @@ Answer:"""
             if pattern in normalized:
                 return (False, False)
         
-        # High-confidence phrases - always post, no LLM needed
+        # High-confidence phrases - ONLY definite injury/roster moves
+        # These are so clear they don't need LLM validation
         high_confidence = [
-            # IL transactions
+            # IL transactions - crystal clear
             "to il", "to the il", "on il", "on the il", 
-            "placed on", "activated from", "reinstated from",
+            "placed on the il", "placed on il",
+            "activated from the il", "activated from il",
+            "reinstated from the il", "reinstated from il",
             "10-day il", "15-day il", "60-day il",
             
-            # Roster moves
-            "optioned", "recalled", 
-            "designated for assignment", "designate", "dfa",
-            "claimed off", "released by", "dealt to", "traded to",
+            # Roster moves - unambiguous
+            "optioned to triple-a", "optioned to double-a",
+            "recalled from triple-a", "recalled from double-a", 
+            "designated for assignment",
+            "claimed off waivers",
             "bereavement list",
+            "dfa'd",
             
-            # Clear injury phrases
-            "left the game", "left game", 
-            "removed from", "out of the game",
-            "helped off", "limped off", "carried off",
-            "foul ball off", "hit by pitch", "hit by a pitch",
-            "x-rays", "x rays", "mri", "ct scan",
-            "to injured list", "scratched",
-            "day-to-day", "dtd",
+            # Medical procedures - definite
             "underwent surgery", "scheduled for surgery",
-            "rehab assignment", "rehab start",
-            "second opinion", "as a precaution",
-            "tightness", "soreness", "discomfort",
-            "concussion", "fracture",
-            "tommy john", "ucl", "acl", "mcl",
+            "rehab assignment", "rehab start", "rehab outing",
         ]
         
         for phrase in high_confidence:
             if phrase in normalized:
+                log(f"High-confidence match: '{phrase}' - posting without LLM")
                 return (True, False)  # High confidence, no LLM needed
         
-        # Borderline keywords - need LLM validation
-        borderline_body_parts = ["elbow", "shoulder", "knee", "hip", "ankle",
-                                "wrist", "oblique", "hamstring", "hand", "finger"]
+        # Everything else that passes hard skip is BORDERLINE - needs LLM
+        # This includes: injury mentions, body parts, "exited game", etc.
+        # LLM will determine if it's real injury news or just game commentary
         
-        injury_context = ["injury", "injured", "hurt", "strain", "sprain",
-                         "sore", "tight", "issue", "pain", "looked at", "suffered"]
-        
-        # Body part + injury context = borderline (needs LLM)
-        has_body_part = any(part in normalized for part in borderline_body_parts)
-        has_injury_context = any(ctx in normalized for ctx in injury_context)
-        
-        if has_body_part and has_injury_context:
-            return (True, True)  # Passes but needs LLM validation
-        
-        # "exited" or "exit" with "game" = borderline
-        if ("exited" in normalized or "exit" in normalized) and "game" in normalized:
-            return (True, True)  # Passes but needs LLM validation
-        
-        # No match
-        return (False, False)
+        # If we got here, it passed hard skip but isn't high-confidence
+        # Send to LLM for validation
+        log(f"Borderline tweet - will ask LLM")
+        return (True, True)  # Borderline, needs LLM
 
     def extract_team_color(self, content: str) -> int:
         """Try to extract team from content and return color"""
