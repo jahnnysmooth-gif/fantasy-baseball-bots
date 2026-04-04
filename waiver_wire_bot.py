@@ -17,7 +17,7 @@ CLAUDE_API_KEY = os.getenv('WAIVER_WIRE_KEY')
 # Configuration
 STATE_FILE = 'state/waiver_wire_state.json'
 OWNERSHIP_THRESHOLD = 5.0  # ±5% to qualify as trending
-TOP_N = 10  # Top 10 adds/drops
+TOP_N = 5  # Top 5 adds/drops (keeps embed within Discord 1024-char field limit)
 
 # Discord client
 intents = discord.Intents.default()
@@ -429,7 +429,7 @@ def build_discord_embed(adds, drops, analysis, stats, news):
     
     embed.add_field(
         name="🔥 HOTTEST ADDS (Last 24 Hours)",
-        value=adds_text or "No significant adds",
+        value=(adds_text[:1020] + "...") if len(adds_text) > 1024 else (adds_text or "No significant adds"),
         inline=False
     )
     
@@ -465,7 +465,7 @@ def build_discord_embed(adds, drops, analysis, stats, news):
     
     embed.add_field(
         name="❄️ BIGGEST DROPS (Last 24 Hours)",
-        value=drops_text or "No significant drops",
+        value=(drops_text[:1020] + "...") if len(drops_text) > 1024 else (drops_text or "No significant drops"),
         inline=False
     )
     
@@ -481,7 +481,7 @@ def build_discord_embed(adds, drops, analysis, stats, news):
     
     embed.add_field(
         name="🎯 CLAUDE'S SPICY TAKE",
-        value=take_text,
+        value=(take_text[:1020] + "...") if len(take_text) > 1024 else take_text,
         inline=False
     )
     
