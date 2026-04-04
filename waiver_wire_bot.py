@@ -19,7 +19,7 @@ STATE_FILE = 'state/waiver_wire_state.json'
 OWNERSHIP_THRESHOLD = 5.0   # min % change to qualify as trending
 SPIKE_THRESHOLD = 10.0      # ownership spike that overrides the 50% ownership cap
 MAX_OWNERSHIP = 50.0        # skip players owned in >50% of leagues (unless spiking)
-TOP_N = 8                   # number of adds to show
+TOP_N = 5                   # top 5 must-adds
 
 # Discord client
 intents = discord.Intents.default()
@@ -98,8 +98,8 @@ async def fetch_espn_ownership():
                         pct_owned = ownership.get('percentOwned', 0.0)
                         pct_change = ownership.get('percentChange', 0.0)
 
-                        # Skip completely unowned and zero-change players
-                        if pct_owned == 0.0 and pct_change == 0.0:
+                        # Skip players with absolutely zero ownership (not in any league)
+                        if pct_owned == 0.0:
                             continue
 
                         # Determine position from eligibleSlots
@@ -196,27 +196,19 @@ def filter_trending_players(merged_data, threshold=OWNERSHIP_THRESHOLD):
     for player, data in merged_data.items():
         own = data['espn_ownership']
         change = data['avg_change']
-        player_info = {'name': player, **data}
+
+        # Must be actively being added (positive ownership change)
+        if change <= 0:
+            continue
 
         # Skip heavily owned players unless they are spiking hard
         if own > MAX_OWNERSHIP and change < SPIKE_THRESHOLD:
             continue
 
-        if change >= threshold:
-            adds.append(player_info)
+        adds.append({'name': player, **data})
 
     adds.sort(key=lambda x: x['avg_change'], reverse=True)
-
-    # Fallback: change data flat (early season) — show best available by ownership %
-    if not adds:
-        print("[Filter] No adds above threshold — falling back to top available players")
-        all_players = [
-            {'name': p, **d} for p, d in merged_data.items()
-            if d['espn_ownership'] <= MAX_OWNERSHIP or d['avg_change'] >= SPIKE_THRESHOLD
-        ]
-        all_players.sort(key=lambda x: x['espn_ownership'], reverse=True)
-        adds = all_players[:TOP_N]
-
+    print(f"[Filter] Found {len(adds)} players with positive ownership change")
     return adds[:TOP_N]
 
 
@@ -409,7 +401,10 @@ async def find_breakout_candidates(merged_data, stats, recent_recommendations):
 
     candidates = []
     for name, data in merged_data.items():
-        if data['espn_ownership'] >= MAX_OWNERSHIP:
+        own = data['espn_ownership']
+
+        # Must be owned somewhere meaningful but not a mainstream pickup
+        if own < 1.0 or own >= MAX_OWNERSHIP:
             continue
         if name in recently_recommended:
             continue
@@ -420,6 +415,12 @@ async def find_breakout_candidates(merged_data, stats, recent_recommendations):
         savant = player_stats.get('savant', {})
         last7  = player_stats.get('last7', {})
         last14 = player_stats.get('last14', {})
+
+        # Must have actually played — require at least 1 PA or 1 IP in last 14 days
+        pa14 = int(last14.get('plateAppearances', 0) or last14.get('atBats', 0) or 0)
+        ip14 = float(last14.get('inningsPitched', 0) or 0)
+        if pa14 < 5 and ip14 < 1.0:
+            continue
 
         # Score the player — higher = better breakout candidate
         score = 0.0
@@ -478,7 +479,7 @@ async def find_breakout_candidates(merged_data, stats, recent_recommendations):
         except (ValueError, TypeError):
             pass
 
-        if score > 0:
+        if score >= 3:  # require meaningful evidence, not just one weak signal
             candidates.append({
                 'name': name,
                 'score': score,
