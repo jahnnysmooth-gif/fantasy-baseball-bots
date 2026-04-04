@@ -808,6 +808,14 @@ Answer:"""
         )
         embed.set_author(name="On The Beat | Board Regs Fantasy Baseball")
         
+        # Normalize embed width by padding description to minimum length
+        # Discord embed width is based on content length, so we pad short tweets
+        MIN_WIDTH_CHARS = 200
+        if len(tweet.content) < MIN_WIDTH_CHARS:
+            # Add invisible zero-width spaces to reach minimum
+            padding = "\u200B" * (MIN_WIDTH_CHARS - len(tweet.content))
+            embed.description = tweet.content + padding
+        
         # Add team logo if detected, otherwise use Board Regs logo
         if tweet.team_abbr and tweet.team_abbr in TEAM_LOGOS:
             embed.set_thumbnail(url=TEAM_LOGOS[tweet.team_abbr])
