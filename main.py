@@ -23,6 +23,9 @@ try:
     from beat_writer_bot import start_beat_writer_bot
     print("Loaded beat_writer_bot", flush=True)
 
+    from waiver_wire_bot import start_waiver_wire_bot
+    print("Loaded waiver_wire_bot", flush=True)
+
 except Exception as e:
     print("IMPORT CRASH:", repr(e), flush=True)
     import traceback
@@ -97,6 +100,9 @@ async def main() -> None:
     await asyncio.sleep(3)
 
     tasks.append(asyncio.create_task(run_forever("beat_writer_bot", start_beat_writer_bot)))
+    await asyncio.sleep(3)
+
+    tasks.append(asyncio.create_task(run_forever("waiver_wire_bot", start_waiver_wire_bot)))
 
     await asyncio.gather(*tasks, return_exceptions=True)
 
