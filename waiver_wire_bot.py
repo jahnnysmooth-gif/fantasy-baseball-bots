@@ -184,30 +184,36 @@ def merge_ownership_data(espn_data, previous_data):
 
 def filter_trending_players(merged_data, threshold=OWNERSHIP_THRESHOLD):
     """
-    Filter players with significant ownership changes
-    Returns separate lists for adds (positive) and drops (negative)
+    Filter players with significant ownership changes.
+    Falls back to top/bottom owned if change data is flat (early season).
     """
     adds = []
     drops = []
-    
+
     for player, data in merged_data.items():
         avg_change = data['avg_change']
-        
-        if abs(avg_change) >= threshold:
-            player_info = {
-                'name': player,
-                **data
-            }
-            
-            if avg_change > 0:
-                adds.append(player_info)
-            else:
-                drops.append(player_info)
-    
-    # Sort by absolute change
+        player_info = {'name': player, **data}
+        if avg_change >= threshold:
+            adds.append(player_info)
+        elif avg_change <= -threshold:
+            drops.append(player_info)
+
     adds.sort(key=lambda x: x['avg_change'], reverse=True)
-    drops.sort(key=lambda x: x['avg_change'])  # Most negative first
-    
+    drops.sort(key=lambda x: x['avg_change'])
+
+    # Fallback: if change data is flat, show top/bottom by ownership %
+    if not adds:
+        print("[Filter] No adds above threshold — falling back to top owned players")
+        all_players = [{'name': p, **d} for p, d in merged_data.items()]
+        all_players.sort(key=lambda x: x['espn_ownership'], reverse=True)
+        adds = all_players[:TOP_N]
+
+    if not drops:
+        print("[Filter] No drops below threshold — falling back to lowest owned players")
+        all_players = [{'name': p, **d} for p, d in merged_data.items()]
+        all_players.sort(key=lambda x: x['espn_ownership'])
+        drops = all_players[:TOP_N]
+
     return adds[:TOP_N], drops[:TOP_N]
 
 
@@ -529,10 +535,6 @@ async def post_daily_report():
         
         # Step 3: Filter trending players
         adds, drops = filter_trending_players(merged_data)
-        
-        if not adds and not drops:
-            print("[Waiver Wire Bot] No trending players found - skipping post")
-            return
         
         # Step 4: Fetch recent stats and news
         all_player_names = [p['name'] for p in adds + drops]
