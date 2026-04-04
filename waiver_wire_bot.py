@@ -50,75 +50,110 @@ def save_state(state):
 
 async def scrape_yahoo_ownership():
     """
-    Scrape Yahoo's public player pages for ownership percentages
+    Scrape Yahoo's Buzz Index for trending players
     Returns dict: {player_name: {'ownership': float, 'change': float, 'position': str}}
     """
-    print("[Yahoo Scraper] Starting Yahoo ownership scrape...")
+    print("[Yahoo Scraper] Starting Yahoo buzz index scrape...")
     ownership_data = {}
     
-    # Yahoo's player list URLs (batters and pitchers)
-    urls = [
-        'https://baseball.fantasysports.yahoo.com/b1/playersearch?status=ALL&pos=B&sort=OR&sdir=1',  # Batters
-        'https://baseball.fantasysports.yahoo.com/b1/playersearch?status=ALL&pos=P&sort=OR&sdir=1'   # Pitchers
-    ]
+    # Yahoo's Buzz Index page - shows trending adds/drops
+    url = 'https://baseball.fantasysports.yahoo.com/b1/buzzindex'
+    
+    headers = {
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+        'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
+        'Accept-Language': 'en-US,en;q=0.5',
+        'Referer': 'https://baseball.fantasysports.yahoo.com/'
+    }
     
     async with aiohttp.ClientSession() as session:
-        for url in urls:
-            try:
-                async with session.get(url, timeout=30) as response:
-                    if response.status != 200:
-                        print(f"[Yahoo Scraper] Failed to fetch {url}: {response.status}")
-                        continue
-                    
-                    html = await response.text()
-                    soup = BeautifulSoup(html, 'html.parser')
-                    
-                    # Parse player rows (structure may vary - this is a template)
-                    # Yahoo typically shows ownership % in player tables
-                    # This is a simplified version - may need adjustment based on actual HTML
-                    player_rows = soup.find_all('tr', class_=re.compile('player'))
-                    
-                    for row in player_rows:
-                        try:
-                            # Extract player name
-                            name_elem = row.find('a', class_=re.compile('name|player'))
-                            if not name_elem:
-                                continue
-                            player_name = normalize_player_name(name_elem.get_text(strip=True))
-                            
-                            # Extract position
-                            pos_elem = row.find('span', class_=re.compile('pos'))
-                            position = pos_elem.get_text(strip=True) if pos_elem else 'NA'
-                            
-                            # Extract ownership %
-                            own_elem = row.find('td', class_=re.compile('own|percent'))
-                            if not own_elem:
-                                continue
-                            own_text = own_elem.get_text(strip=True)
-                            ownership_match = re.search(r'(\d+(?:\.\d+)?)%', own_text)
-                            if not ownership_match:
-                                continue
-                            ownership = float(ownership_match.group(1))
-                            
-                            # Extract change (if available - usually shown as +5% or -3%)
-                            change = 0.0
-                            change_match = re.search(r'([+-]?\d+(?:\.\d+)?)%', own_text)
-                            if change_match and change_match.group(0) != ownership_match.group(0):
-                                change = float(change_match.group(1))
-                            
-                            ownership_data[player_name] = {
-                                'ownership': ownership,
-                                'change': change,
-                                'position': position,
-                                'source': 'yahoo'
-                            }
-                        except Exception as e:
-                            print(f"[Yahoo Scraper] Error parsing player row: {e}")
+        try:
+            async with session.get(url, headers=headers, timeout=30) as response:
+                if response.status != 200:
+                    print(f"[Yahoo Scraper] Failed to fetch {url}: {response.status}")
+                    return ownership_data
+                
+                html = await response.text()
+                
+                # Debug: Save HTML to file for inspection
+                debug_file = 'state/yahoo_debug.html'
+                os.makedirs(os.path.dirname(debug_file), exist_ok=True)
+                with open(debug_file, 'w', encoding='utf-8') as f:
+                    f.write(html[:10000])  # First 10k chars
+                print(f"[Yahoo Scraper] Saved debug HTML to {debug_file}")
+                
+                soup = BeautifulSoup(html, 'html.parser')
+                
+                # Yahoo Buzz Index typically has a table with player data
+                # Look for player rows - common patterns:
+                # - Table with id or class containing "buzz" or "player"
+                # - Rows with player info, ownership %, and trend indicators
+                
+                # Try multiple selector patterns
+                player_rows = (
+                    soup.find_all('tr', class_=re.compile('player|row', re.I)) or
+                    soup.find_all('div', class_=re.compile('player-card|player-row', re.I))
+                )
+                
+                print(f"[Yahoo Scraper] Found {len(player_rows)} potential player rows")
+                
+                # Debug: print first row structure
+                if player_rows:
+                    print(f"[Yahoo Scraper] First row HTML: {str(player_rows[0])[:500]}")
+                
+                for row in player_rows:
+                    try:
+                        # Extract player name - try multiple patterns
+                        name_elem = (
+                            row.find('a', class_=re.compile('name|player', re.I)) or
+                            row.find('div', class_=re.compile('name|player', re.I)) or
+                            row.find('span', class_=re.compile('name|player', re.I))
+                        )
+                        if not name_elem:
                             continue
-                            
-            except Exception as e:
-                print(f"[Yahoo Scraper] Error scraping {url}: {e}")
-                continue
+                        
+                        player_name = normalize_player_name(name_elem.get_text(strip=True))
+                        if not player_name or len(player_name) < 3:
+                            continue
+                        
+                        # Extract position
+                        pos_elem = row.find(['span', 'div'], class_=re.compile('pos|position', re.I))
+                        position = pos_elem.get_text(strip=True) if pos_elem else 'NA'
+                        
+                        # Extract ownership % and change
+                        # Yahoo often shows "45% (+12%)" or similar
+                        text_content = row.get_text()
+                        
+                        # Find ownership percentage
+                        ownership_match = re.search(r'(\d+(?:\.\d+)?)%', text_content)
+                        if not ownership_match:
+                            continue
+                        ownership = float(ownership_match.group(1))
+                        
+                        # Find change (look for +/- pattern)
+                        change = 0.0
+                        change_match = re.search(r'([+-]\d+(?:\.\d+)?)%', text_content)
+                        if change_match:
+                            change = float(change_match.group(1))
+                        
+                        ownership_data[player_name] = {
+                            'ownership': ownership,
+                            'change': change,
+                            'position': position,
+                            'source': 'yahoo'
+                        }
+                        
+                        if len(ownership_data) <= 3:  # Debug first few players
+                            print(f"[Yahoo Scraper] Parsed: {player_name} ({position}) - {ownership}% ({change:+.1f}%)")
+                        
+                    except Exception as e:
+                        print(f"[Yahoo Scraper] Error parsing row: {e}")
+                        continue
+                        
+        except Exception as e:
+            print(f"[Yahoo Scraper] Error scraping Yahoo: {e}")
+            import traceback
+            traceback.print_exc()
     
     print(f"[Yahoo Scraper] Scraped {len(ownership_data)} players")
     return ownership_data
@@ -126,19 +161,25 @@ async def scrape_yahoo_ownership():
 
 async def scrape_espn_ownership():
     """
-    Scrape ESPN's public ownership data
+    Scrape ESPN's Added/Dropped page for trending players
     Returns dict: {player_name: {'ownership': float, 'change': float, 'position': str}}
     """
-    print("[ESPN Scraper] Starting ESPN ownership scrape...")
+    print("[ESPN Scraper] Starting ESPN added/dropped scrape...")
     ownership_data = {}
     
-    # ESPN's player rater or availability pages
-    # Note: ESPN's structure varies - this is a template
-    url = 'https://www.espn.com/fantasy/baseball/players/projections'
+    # ESPN's Added/Dropped page
+    url = 'https://fantasy.espn.com/baseball/addeddropped'
+    
+    headers = {
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+        'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
+        'Accept-Language': 'en-US,en;q=0.5',
+        'Referer': 'https://fantasy.espn.com/'
+    }
     
     async with aiohttp.ClientSession() as session:
         try:
-            async with session.get(url, timeout=30) as response:
+            async with session.get(url, headers=headers, timeout=30) as response:
                 if response.status != 200:
                     print(f"[ESPN Scraper] Failed to fetch ESPN data: {response.status}")
                     return ownership_data
@@ -146,41 +187,68 @@ async def scrape_espn_ownership():
                 html = await response.text()
                 soup = BeautifulSoup(html, 'html.parser')
                 
-                # Parse player data (structure depends on ESPN's HTML)
-                # This is a simplified template
-                player_rows = soup.find_all('tr', class_=re.compile('player'))
+                # ESPN typically uses table structure or div-based player cards
+                # Look for player entries
+                player_rows = (
+                    soup.find_all('tr', class_=re.compile('player|row', re.I)) or
+                    soup.find_all('div', class_=re.compile('player-card|playerCard', re.I))
+                )
+                
+                print(f"[ESPN Scraper] Found {len(player_rows)} potential player rows")
                 
                 for row in player_rows:
                     try:
                         # Extract player name
-                        name_elem = row.find('a', class_=re.compile('player|name'))
+                        name_elem = (
+                            row.find('a', class_=re.compile('player|name', re.I)) or
+                            row.find('div', class_=re.compile('player|name', re.I)) or
+                            row.find('span', class_=re.compile('player|name', re.I))
+                        )
                         if not name_elem:
                             continue
+                        
                         player_name = normalize_player_name(name_elem.get_text(strip=True))
+                        if not player_name or len(player_name) < 3:
+                            continue
                         
                         # Extract position
-                        pos_elem = row.find('span', class_=re.compile('position'))
-                        position = pos_elem.get_text(strip=True) if pos_elem else 'NA'
+                        pos_elem = row.find(['span', 'div'], class_=re.compile('pos|position|eligible', re.I))
+                        position = pos_elem.get_text(strip=True)[:2] if pos_elem else 'NA'  # Limit to 2 chars (SP, OF, etc)
                         
-                        # Extract ownership %
-                        own_elem = row.find('td', class_=re.compile('own|roster'))
-                        if not own_elem:
-                            continue
-                        own_text = own_elem.get_text(strip=True)
-                        ownership_match = re.search(r'(\d+(?:\.\d+)?)%', own_text)
+                        # Extract ownership % and change
+                        text_content = row.get_text()
+                        
+                        # Find ownership percentage
+                        ownership_match = re.search(r'(\d+(?:\.\d+)?)%', text_content)
                         if not ownership_match:
                             continue
                         ownership = float(ownership_match.group(1))
                         
-                        # ESPN may not show weekly change directly
-                        # We'll calculate it by comparing to previous scrape
+                        # ESPN may show added/dropped counts instead of % change
+                        # Look for patterns like "Added: 1,234" or "+5.2%"
+                        change = 0.0
+                        change_match = re.search(r'([+-]\d+(?:\.\d+)?)%', text_content)
+                        if change_match:
+                            change = float(change_match.group(1))
+                        else:
+                            # If no % change, look for add/drop counts
+                            added_match = re.search(r'Added[:\s]+(\d+)', text_content, re.I)
+                            dropped_match = re.search(r'Dropped[:\s]+(\d+)', text_content, re.I)
+                            if added_match:
+                                # Estimate change based on add count (rough heuristic)
+                                added_count = int(added_match.group(1))
+                                change = min(added_count / 100, 50.0)  # Cap at 50%
+                            elif dropped_match:
+                                dropped_count = int(dropped_match.group(1))
+                                change = -min(dropped_count / 100, 50.0)
                         
                         ownership_data[player_name] = {
                             'ownership': ownership,
-                            'change': 0.0,  # Will calculate from historical data
+                            'change': change,
                             'position': position,
                             'source': 'espn'
                         }
+                        
                     except Exception as e:
                         print(f"[ESPN Scraper] Error parsing player row: {e}")
                         continue
