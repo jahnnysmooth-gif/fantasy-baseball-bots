@@ -70,29 +70,39 @@ async def fetch_espn_ownership():
         'https://lm-api-reads.fantasy.espn.com/apis/v3/games/flb'
         '/seasons/2026/segments/0/leaguedefaults/3?view=kona_player_info'
     )
+    # X-Fantasy-Filter: sort by ownership change descending, get top 300 active players
+    xff = (
+        '{"players":{"limit":300,"filterActive":{"value":true},"' +
+        'sortPercentChange":{"sortPriority":1,"sortAsc":false}}}' 
+    )
     headers = {
         'User-Agent': 'Mozilla/5.0',
         'Accept': 'application/json',
-        'X-Fantasy-Filter': '{"players": {"limit": 300, "sortPercentChange": {"sortPriority": 1, "sortAsc": false}, "filterActive": {"value": true}}}',
+        'x-fantasy-filter': xff,
+        'x-fantasy-platform': 'kona-PROD-2dc40132dc2070ef47881dc95b633e62cebc9913',
+        'x-fantasy-source': 'kona',
     }
 
     async with aiohttp.ClientSession() as session:
         try:
             async with session.get(url, headers=headers, timeout=30) as response:
                 if response.status != 200:
-                    print(f"[ESPN API] Bad status: {response.status} — retrying without filter header")
-                    # Retry without X-Fantasy-Filter in case the endpoint rejects it
-                    fallback_headers = {'User-Agent': 'Mozilla/5.0', 'Accept': 'application/json'}
-                    async with session.get(url, headers=fallback_headers, timeout=30) as r2:
-                        if r2.status != 200:
-                            print(f"[ESPN API] Fallback also failed: {r2.status}")
-                            return ownership_data
-                        data = await r2.json(content_type=None)
-                else:
-                    data = await response.json(content_type=None)
+                    print(f"[ESPN API] Bad status: {response.status}")
+                    return ownership_data
 
+                data = await response.json(content_type=None)
                 players = data.get('players', [])
                 print(f"[ESPN API] Retrieved {len(players)} players from ESPN")
+                # Debug: log top 5 by percentChange to verify sorting
+                sample = sorted(
+                    [e for e in players if e.get('player', {}).get('ownership', {}).get('percentChange', 0) != 0],
+                    key=lambda e: e.get('player', {}).get('ownership', {}).get('percentChange', 0),
+                    reverse=True
+                )[:5]
+                for e in sample:
+                    p = e.get('player', {})
+                    own = p.get('ownership', {})
+                    print(f"[ESPN API] Sample: {p.get('fullName')} — {own.get('percentOwned'):.1f}% owned, {own.get('percentChange'):+.1f}% change")
 
                 for entry in players:
                     try:
@@ -513,12 +523,19 @@ def check_previous_picks_on_fire(recent_recommendations, stats, merged_data):
     cutoff = (datetime.now() - timedelta(days=10)).strftime('%Y-%m-%d')
     on_fire = []
 
+    today = datetime.now(ZoneInfo('America/New_York')).strftime('%Y-%m-%d')
+
     for rec in recent_recommendations:
-        if rec.get('date', '0000-00-00') < cutoff:
+        rec_date = rec.get('date', '0000-00-00')
+        if rec_date < cutoff:
+            continue
+        # Never show same-day recommendations as "paying off"
+        if rec_date >= today:
             continue
         name = rec['name']
         player_stats = stats.get(name, {})
         last7 = player_stats.get('last7', {})
+        position = merged_data.get(name, {}).get('position', 'OF')
         current_own = merged_data.get(name, {}).get('espn_ownership', 0)
 
         # Hot streak signals
@@ -533,7 +550,7 @@ def check_previous_picks_on_fire(recent_recommendations, stats, merged_data):
                 avg7 >= 0.320 or
                 hr7 >= 2 or
                 (ip7 > 0 and k7 / ip7 >= 1.2) or
-                own_gain >= 10
+                own_gain >= 5
             )
 
             if is_hot:
@@ -541,6 +558,7 @@ def check_previous_picks_on_fire(recent_recommendations, stats, merged_data):
                     'name': name,
                     'rec_date': rec['date'],
                     'last7': last7,
+                    'position': position,
                     'current_ownership': current_own,
                     'ownership_gain': own_gain,
                 })
@@ -731,7 +749,7 @@ def build_discord_embed(adds, breakout_candidates, on_fire_picks, analysis, stat
         for player in on_fire_picks:
             name = player['name']
             last7 = player.get('last7', {})
-            stats_line = format_stats_line(last7, 'OF')  # generic hitter display
+            stats_line = format_stats_line(last7, player.get('position', 'OF'))
             callout_data = next((c for c in on_fire_callouts if c.get('name', '').lower() == name.lower()), {})
             callout = callout_data.get('callout', f"Still cooking — {player['current_ownership']:.1f}% owned and climbing.")
 
