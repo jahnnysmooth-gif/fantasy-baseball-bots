@@ -422,7 +422,7 @@ Answer:"""
                     "content-type": "application/json",
                 },
                 json={
-                    "model": "claude-3-5-haiku-latest",
+                    "model": "claude-3-5-sonnet-20241022",
                     "max_tokens": 10,
                     "messages": [{"role": "user", "content": prompt}]
                 },
