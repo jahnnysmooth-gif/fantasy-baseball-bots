@@ -80,10 +80,17 @@ async def fetch_espn_ownership():
         try:
             async with session.get(url, headers=headers, timeout=30) as response:
                 if response.status != 200:
-                    print(f"[ESPN API] Bad status: {response.status}")
-                    return ownership_data
+                    print(f"[ESPN API] Bad status: {response.status} — retrying without filter header")
+                    # Retry without X-Fantasy-Filter in case the endpoint rejects it
+                    fallback_headers = {'User-Agent': 'Mozilla/5.0', 'Accept': 'application/json'}
+                    async with session.get(url, headers=fallback_headers, timeout=30) as r2:
+                        if r2.status != 200:
+                            print(f"[ESPN API] Fallback also failed: {r2.status}")
+                            return ownership_data
+                        data = await r2.json(content_type=None)
+                else:
+                    data = await response.json(content_type=None)
 
-                data = await response.json(content_type=None)
                 players = data.get('players', [])
                 print(f"[ESPN API] Retrieved {len(players)} players from ESPN")
 
