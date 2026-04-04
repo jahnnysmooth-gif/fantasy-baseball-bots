@@ -636,65 +636,6 @@ Be controversial. Be specific. Reference the actual stats provided."""
         }
 
 
-async def generate_claude_analysis(adds, stats, news):
-    """
-    Send waiver wire adds to Claude for spicy analysis.
-    Returns dict with intro, add_comments, spicy_take, dont_chase.
-    """
-    print("[Claude] Generating analysis...")
-
-    adds_context = []
-    for player in adds:
-        player_stats = stats.get(player['name'], {})
-        player_news = news.get(player['name'], 'No recent news')
-        adds_context.append({
-            'name': player['name'],
-            'position': player['position'],
-            'espn_owned': player['espn_ownership'],
-            'espn_change': player['espn_change'],
-            'stats': player_stats,
-            'news': player_news
-        })
-
-    prompt = f"""You're a sharp, opinionated fantasy baseball analyst covering today's waiver wire adds.
-All players listed are under 50% owned (or spiking hard). These are the players managers should be targeting.
-
-TODAY'S WAIVER WIRE ADDS:
-{json.dumps(adds_context, indent=2)}
-
-Respond ONLY with a JSON object (no markdown):
-{{
-  "intro": "1-2 sentence punchy overview of today's waiver wire landscape",
-  "add_comments": {{"player_name": "10-15 word spicy take on why to add or avoid", ...}},
-  "spicy_take": "2-3 sentence bold hot take — call out overrated hype or underrated gems",
-  "dont_chase_player": "name of the most overhyped player on this list",
-  "dont_chase_reason": "2 sentences on why not to chase them, use stats"
-}}
-
-Be controversial. Be confident. Reference actual stats. No generic takes."""
-
-    try:
-        message = anthropic_client.messages.create(
-            model="claude-sonnet-4-20250514",
-            max_tokens=1200,
-            messages=[{"role": "user", "content": prompt}]
-        )
-        response_text = re.sub(r'```json\s*|\s*```', '', message.content[0].text)
-        analysis = json.loads(response_text)
-        print("[Claude] Analysis generated successfully")
-        return analysis
-
-    except Exception as e:
-        print(f"[Claude] Error generating analysis: {e}")
-        return {
-            "intro": "Today's waiver wire has some interesting names worth a look.",
-            "add_comments": {},
-            "spicy_take": "Do your homework before burning FAAB.",
-            "dont_chase_player": adds[0]['name'] if adds else "N/A",
-            "dont_chase_reason": "Wait and see before committing."
-        }
-
-
 def build_discord_embed(adds, breakout_candidates, on_fire_picks, analysis, stats, news):
     """Build the Discord embed with top adds, breakout candidates, and hot prev picks."""
     embed = discord.Embed(
