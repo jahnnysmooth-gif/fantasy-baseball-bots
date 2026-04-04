@@ -499,18 +499,18 @@ def format_stats_line(stats, position):
         return ""
     
     if position in ['SP', 'RP', 'P']:
-        # Pitcher stats
-        era = stats.get('era', 0)
+        # Pitcher stats - cast to float/int since MLB API returns strings
+        era = float(stats.get('era', 0) or 0)
         ip = stats.get('inningsPitched', '0')
-        k = stats.get('strikeOuts', 0)
-        whip = stats.get('whip', 0)
+        k = int(stats.get('strikeOuts', 0) or 0)
+        whip = float(stats.get('whip', 0) or 0)
         return f"Last 7: {ip} IP, {k} K, {era:.2f} ERA, {whip:.2f} WHIP"
     else:
-        # Hitter stats
-        avg = stats.get('avg', '.000')
-        hr = stats.get('homeRuns', 0)
-        rbi = stats.get('rbi', 0)
-        sb = stats.get('stolenBases', 0)
+        # Hitter stats - cast to float/int since MLB API returns strings
+        avg = stats.get('avg', '.000') or '.000'
+        hr = int(stats.get('homeRuns', 0) or 0)
+        rbi = int(stats.get('rbi', 0) or 0)
+        sb = int(stats.get('stolenBases', 0) or 0)
         return f"Last 7: {avg} AVG, {hr} HR, {rbi} RBI, {sb} SB"
 
 
