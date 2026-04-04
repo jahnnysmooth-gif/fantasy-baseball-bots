@@ -429,8 +429,9 @@ Answer:"""
                 timeout=aiohttp.ClientTimeout(total=10)
             ) as resp:
                 if resp.status != 200:
-                    log(f"Claude API error {resp.status} - defaulting to Yes")
-                    return True
+                    error_text = await resp.text()
+                    log(f"Claude API error {resp.status}: {error_text[:200]}")
+                    return True  # Default to posting on error
                 
                 data = await resp.json()
                 answer = data.get("content", [{}])[0].get("text", "").strip().lower()
