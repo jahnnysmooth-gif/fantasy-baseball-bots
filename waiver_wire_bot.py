@@ -73,6 +73,7 @@ async def fetch_espn_ownership():
     headers = {
         'User-Agent': 'Mozilla/5.0',
         'Accept': 'application/json',
+        'X-Fantasy-Filter': '{"players": {"limit": 300, "sortPercentChange": {"sortPriority": 1, "sortAsc": false}, "filterActive": {"value": true}}}',
     }
 
     async with aiohttp.ClientSession() as session:
@@ -863,13 +864,17 @@ async def post_daily_report():
 @client.event
 async def on_ready():
     print(f'[Waiver Wire Bot] Logged in as {client.user}')
-    
-    # TEST MODE: Run immediately on startup (comment out after testing)
-    TEST_MODE = os.getenv('WAIVER_WIRE_TEST_MODE', 'false').lower() == 'true'
-    if TEST_MODE:
+
+    # Kill switch — set WAIVER_WIRE_ENABLED=false to disable posting entirely
+    if os.getenv('WAIVER_WIRE_ENABLED', 'true').lower() == 'false':
+        print("[Waiver Wire Bot] DISABLED via WAIVER_WIRE_ENABLED=false — not scheduling any posts")
+        return
+
+    # TEST MODE: run immediately on startup
+    if os.getenv('WAIVER_WIRE_TEST_MODE', 'false').lower() == 'true':
         print("[Waiver Wire Bot] TEST MODE: Running report immediately")
         await post_daily_report()
-    
+
     # Schedule daily post at 7:00 AM ET
     scheduler.add_job(
         post_daily_report,
@@ -879,7 +884,7 @@ async def on_ready():
         timezone='America/New_York',
         id='daily_waiver_report'
     )
-    
+
     print("[Waiver Wire Bot] Scheduled daily post for 7:00 AM ET")
     scheduler.start()
 
