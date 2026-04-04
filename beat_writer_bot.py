@@ -609,6 +609,11 @@ Answer:"""
             tweet_content = tweet_content.replace('\\#', '#').replace('\\-', '-').replace('\\.', '.')
             tweet_content = tweet_content.replace('\\*', '*').replace('\\(', '(').replace('\\)', ')')
             
+            # Remove "Tweeted" link that TweetShift adds
+            tweet_content = re.sub(r'\[Tweeted\]\(https?://[^\)]+\)', '', tweet_content, flags=re.IGNORECASE)
+            tweet_content = re.sub(r'Tweeted\s*$', '', tweet_content, flags=re.IGNORECASE)
+            tweet_content = tweet_content.strip()
+            
             # Extract tweet URL from embed.url
             tweet_url = embed.url if embed.url else None
             
@@ -633,11 +638,23 @@ Answer:"""
                 author = author_match.group(1)
                 tweet_content = author_match.group(2).strip()
             else:
-                # Pattern 2: Look for @handle anywhere in the text
-                handle_match = re.search(r'@([A-Za-z0-9_]+)', content)
-                if handle_match:
-                    # Use the first @handle found
-                    author = handle_match.group(1)
+                # Pattern 2: "Name • TweetShift" format
+                # Extract from message.author (Discord user) which is "Name • TweetShift"
+                if message.author and message.author.name:
+                    discord_name = message.author.name
+                    # Remove " • TweetShift" suffix
+                    author_name = re.sub(r'\s*•\s*TweetShift.*$', '', discord_name).strip()
+                    # Now look for @handle in the embed or content
+                    handle_match = re.search(r'@([A-Za-z0-9_]+)', content)
+                    if handle_match:
+                        author = handle_match.group(1)
+                    else:
+                        author = author_name
+                else:
+                    # Pattern 3: Look for @handle anywhere in the text
+                    handle_match = re.search(r'@([A-Za-z0-9_]+)', content)
+                    if handle_match:
+                        author = handle_match.group(1)
             
             # If still no author, check message author (Discord user posting it)
             if not author and message.author:
@@ -802,18 +819,20 @@ Answer:"""
             
             # Add source link
             if tweet.tweet_url:
-                embed.add_field(name="", value=f"[Source: @{tweet.author}]({tweet.tweet_url})", inline=False)
+                embed.add_field(name="", value=f"Source: [@{tweet.author}]({tweet.tweet_url})", inline=False)
             else:
-                embed.set_footer(text=f"Source: @{tweet.author}")
+                embed.add_field(name="", value=f"Source: @{tweet.author}", inline=False)
             
             await channel.send(file=file, embed=embed)
             return
         
         # Add source link
         if tweet.tweet_url:
-            embed.add_field(name="", value=f"[Source: @{tweet.author}]({tweet.tweet_url})", inline=False)
+            # Clickable link in footer-style field
+            embed.add_field(name="", value=f"Source: [@{tweet.author}]({tweet.tweet_url})", inline=False)
         else:
-            embed.set_footer(text=f"Source: @{tweet.author}")
+            # Plain text if no URL
+            embed.add_field(name="", value=f"Source: @{tweet.author}", inline=False)
         
         await channel.send(embed=embed)
 
