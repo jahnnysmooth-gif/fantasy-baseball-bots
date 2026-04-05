@@ -764,6 +764,7 @@ def build_discord_embed(adds, breakout_candidates, analysis, stats, news):
             adds_text += f" [{multi_pos}]"
         adds_text += "\n"
 
+        player_stats = stats.get(name, {})
         stats_line = format_stats_line(player_stats.get('last7', {}), pos)
         if stats_line:
             adds_text += f"   {stats_line}\n"
