@@ -809,18 +809,15 @@ def build_breakout_embed(breakout_pitchers, breakout_hitters, analysis):
         text += "\n"
         return text
 
-    # Pitchers first — one field each
-    if breakout_pitchers:
-        embed.add_field(name="⚾ PITCHERS", value="​", inline=False)
-        for p in breakout_pitchers:
-            embed.add_field(name="​", value=safe_truncate(render_candidate(p)), inline=False)
+    # Pitchers — section label in first player field name
+    for i, p in enumerate(breakout_pitchers):
+        field_name = "⚾ PITCHERS" if i == 0 else "​"
+        embed.add_field(name=field_name, value=safe_truncate(render_candidate(p)), inline=False)
 
-    # Then hitters — one field each
-    if breakout_hitters:
-        embed.add_field(name="🏃 HITTERS", value="​", inline=False)
-        for p in breakout_hitters:
-            embed.add_field(name="​", value=safe_truncate(render_candidate(p)), inline=False)
-
+    # Hitters — section label in first player field name
+    for i, p in enumerate(breakout_hitters):
+        field_name = "🏃 HITTERS" if i == 0 else "​"
+        embed.add_field(name=field_name, value=safe_truncate(render_candidate(p)), inline=False)
     if not breakout_pitchers and not breakout_hitters:
         embed.add_field(
             name="​",
@@ -886,7 +883,7 @@ async def post_daily_report():
             print(f"[Waiver Wire Bot] Channel {CHANNEL_ID} not found")
             return
 
-        reactions = ['🔥', '💎', '🚀', '🌶️']
+        reactions = ['🔥', '🚀', '👎', '🗑️']
 
         for embed in (pitcher_embed, hitter_embed, breakout_embed):
             try:
