@@ -70,15 +70,10 @@ async def fetch_espn_ownership():
         'https://lm-api-reads.fantasy.espn.com/apis/v3/games/flb'
         '/seasons/2026/segments/0/leaguedefaults/3?view=kona_player_info'
     )
-    # X-Fantasy-Filter: sort by ownership change descending, get top 300 active players
-    xff = (
-        '{"players":{"limit":300,"filterActive":{"value":true},"' +
-        'sortPercentChange":{"sortPriority":1,"sortAsc":false}}}' 
-    )
     headers = {
         'User-Agent': 'Mozilla/5.0',
         'Accept': 'application/json',
-        'x-fantasy-filter': xff,
+        'x-fantasy-filter': '{"players":{"limit":300,"filterActive":{"value":true},"sortPercentChange":{"sortPriority":1,"sortAsc":false}}}',
         'x-fantasy-platform': 'kona-PROD-2dc40132dc2070ef47881dc95b633e62cebc9913',
         'x-fantasy-source': 'kona',
     }
