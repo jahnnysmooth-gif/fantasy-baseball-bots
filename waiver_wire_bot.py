@@ -59,11 +59,18 @@ async def fetch_espn_ownership():
     ownership_data = {}
 
     # ESPN position slot ID -> readable position string
+    # ESPN baseball defaultPositionId -> position string
     POSITION_MAP = {
-        1: 'C', 2: '1B', 3: '2B', 4: '3B', 5: 'SS',
-        6: '2B/SS', 7: '1B/3B', 8: 'OF', 9: 'DH',
-        10: 'SP', 11: 'RP', 12: 'P',
-        13: 'UTIL', 14: 'SP', 15: 'RP', 16: 'BN', 17: 'IL'
+        1: 'SP', 2: 'C', 3: '1B', 4: '2B', 5: '3B',
+        6: 'SS', 7: 'OF', 8: 'DH', 9: 'RP',
+    }
+
+    # ESPN proTeamId -> MLB team abbreviation
+    TEAM_MAP = {
+        1:'BAL',2:'BOS',3:'LAA',4:'CHW',5:'CLE',6:'DET',7:'KC',8:'MIL',
+        9:'MIN',10:'NYY',11:'OAK',12:'SEA',13:'TEX',14:'TOR',15:'ATL',
+        16:'CHC',17:'CIN',18:'HOU',19:'LAD',20:'WSH',21:'NYM',22:'PHI',
+        23:'PIT',24:'STL',25:'SD',26:'SF',27:'COL',28:'MIA',29:'ARI',30:'TB',
     }
 
     url = (
@@ -123,19 +130,18 @@ async def fetch_espn_ownership():
                             continue
 
 
-                        # Determine position from eligibleSlots
-                        eligible_slots = player.get('eligibleSlots', [])
-                        position = 'NA'
-                        for slot_id in eligible_slots:
-                            pos = POSITION_MAP.get(slot_id)
-                            if pos and pos not in ('UTIL', 'BN', 'IL'):
-                                position = pos
-                                break
+                        # Use defaultPositionId for accurate position
+                        default_pos_id = player.get('defaultPositionId', 0)
+                        position = POSITION_MAP.get(default_pos_id, 'NA')
+
+                        pro_team_id = player.get('proTeamId', 0)
+                        team = TEAM_MAP.get(pro_team_id, '')
 
                         ownership_data[full_name] = {
                             'ownership': round(pct_owned, 2),
                             'change': round(pct_change, 2),
                             'position': position,
+                            'team': team,
                             'espn_id': player.get('id'),
                             'injury_status': player.get('injuryStatus', 'ACTIVE'),
                         }
@@ -198,6 +204,7 @@ def merge_ownership_data(espn_data, previous_data):
             'espn_change': espn_change,
             'avg_change': espn_change,
             'position': info.get('position', 'NA'),
+            'team': info.get('team', ''),
             'injury_status': info.get('injury_status', 'ACTIVE'),
             'espn_id': info.get('espn_id'),
         }
@@ -424,8 +431,8 @@ async def find_breakout_candidates(merged_data, stats, recent_recommendations):
     for name, data in merged_data.items():
         own = data['espn_ownership']
 
-        # Must be owned somewhere meaningful but not a mainstream pickup
-        if own < 1.0 or own >= MAX_OWNERSHIP:
+        # Must be owned somewhere meaningful but still under-the-radar
+        if own < 1.0 or own > 25.0:
             continue
         if name in recently_recommended:
             continue
@@ -507,6 +514,7 @@ async def find_breakout_candidates(merged_data, stats, recent_recommendations):
                 'espn_ownership': data['espn_ownership'],
                 'espn_change': data['espn_change'],
                 'position': data['position'],
+                'team': data.get('team', ''),
                 'last7': last7,
                 'last14': last14,
                 'savant': savant,
@@ -616,7 +624,7 @@ async def generate_claude_analysis(adds, breakout_candidates, on_fire_picks, sta
 TOP WAIVER WIRE ADDS (sorted by ownership spike):
 {json.dumps(adds_context, indent=2)}
 
-BREAKOUT CANDIDATES (under 50% owned, strong underlying metrics):
+BREAKOUT CANDIDATES (under 25% owned, strong underlying metrics):
 {json.dumps(breakout_context, indent=2)}
 
 PREVIOUSLY RECOMMENDED PLAYERS NOW ON A HOT STREAK:
@@ -624,13 +632,13 @@ PREVIOUSLY RECOMMENDED PLAYERS NOW ON A HOT STREAK:
 
 Respond ONLY with a valid JSON object (no markdown, no explanation):
 {{
-  "intro": "1-2 punchy sentences on today's waiver wire landscape",
-  "add_comments": {{"player_name": "10-15 word take on why to add or avoid", ...}},
+  "intro": "1-2 punchy sentences on today's waiver wire landscape — this appears BELOW the player list as context, not above it",
+  "add_comments": {{"player_name": "2 sentences max. First sentence: specific stat-backed take on why to add or avoid. Second sentence: one piece of context that changes the picture (matchup, workload, trend). Skip the second sentence if it would be filler.", ...}},
   "breakout_writeups": [
     {{
       "name": "player name",
       "headline": "5-8 word punchy header",
-      "why": "2-3 sentences referencing actual metrics — xwOBA, barrel rate, trend from last14 to last7. Be specific and confident."
+      "why": "2-3 sentences. Lead with the most compelling metric. Second sentence adds context (trend, role, matchup). Third sentence only if it adds something material — skip if filler."
     }}
   ],
   "on_fire_callouts": [
@@ -639,10 +647,10 @@ Respond ONLY with a valid JSON object (no markdown, no explanation):
       "callout": "1-2 sentences celebrating the hot streak, referencing stats"
     }}
   ],
-  "spicy_take": "2-3 sentence bold overall take — name names, use numbers"
+  "spicy_take": "2-3 sentences. Bold overall market take — name names, cite numbers. Add a third sentence only if it materially sharpens the argument, not to pad length."
 }}
 
-Be controversial. Be specific. Reference the actual stats provided."""
+Be controversial. Be specific. Reference actual stats. No filler sentences."""
 
     try:
         message = anthropic_client.messages.create(
@@ -670,7 +678,7 @@ def build_discord_embed(adds, breakout_candidates, on_fire_picks, analysis, stat
     """Build the Discord embed with top adds, breakout candidates, and hot prev picks."""
     embed = discord.Embed(
         title="🌶️ SHANDLER'S SPICY SUMMARY",
-        description=f"{datetime.now(ZoneInfo('America/New_York')).strftime('%A, %B %d, %Y')}\n\n{analysis.get('intro', '')}",
+        description=f"⚡ **The Wire Tap | Board Regs Fantasy Baseball**\n{datetime.now(ZoneInfo('America/New_York')).strftime('%A, %B %d, %Y')}",
         color=0x1DB954,
         timestamp=datetime.now(ZoneInfo('UTC'))
     )
@@ -681,10 +689,16 @@ def build_discord_embed(adds, breakout_candidates, on_fire_picks, analysis, stat
         emoji = "🔥" if i <= 3 else "📈"
         name = player['name']
         pos = player['position']
+        team = player.get('team', '')
         espn_own = f"{player['espn_ownership']:.1f}%"
         espn_change = f"⬆️ +{player['espn_change']:.1f}%" if player['espn_change'] > 0 else f"⬇️ {player['espn_change']:.1f}%"
 
-        adds_text += f"{emoji} **{name}** - {pos}\n"
+        name_line = f"**{name} | {pos}"
+        if team:
+            name_line += f" | {team}"
+        name_line += "**"
+
+        adds_text += f"{emoji} {name_line}\n"
         adds_text += f"   ESPN: {espn_own} owned ({espn_change})\n"
 
         player_stats = stats.get(name, {})
@@ -697,8 +711,13 @@ def build_discord_embed(adds, breakout_candidates, on_fire_picks, analysis, stat
             adds_text += f"   📰 {comment}\n"
         adds_text += "\n"
 
+    # Intro goes below the player list as context
+    intro = analysis.get('intro', '')
+    if intro:
+        adds_text += f"\n*{intro}*"
+
     embed.add_field(
-        name="🔥 TOP WAIVER WIRE ADDS",
+        name="🎯 TOP WAIVER WIRE ADDS",
         value=(adds_text[:1020] + "...") if len(adds_text) > 1024 else (adds_text or "No significant adds"),
         inline=False
     )
@@ -719,7 +738,12 @@ def build_discord_embed(adds, breakout_candidates, on_fire_picks, analysis, stat
         headline = writeup.get('headline', 'Under-the-radar pick')
         why = writeup.get('why', '')
 
-        breakout_text += f"💎 **{name}** - {pos} ({own} owned)\n"
+        team = player.get('team', '')
+        name_line = f"**{name} | {pos}"
+        if team:
+            name_line += f" | {team}"
+        name_line += f"** ({own} owned)"
+        breakout_text += f"💎 {name_line}\n"
         breakout_text += f"   *{headline}*\n"
 
         # Savant metrics line
