@@ -706,7 +706,6 @@ def build_adds_embed(players, analysis, stats, news, is_pitcher):
         timestamp=datetime.now(ZoneInfo('UTC'))
     )
 
-    field_text = ""
     for i, player in enumerate(players, 1):
         emoji  = "🔥" if i <= 3 else "📈"
         name   = player['name']
@@ -723,25 +722,23 @@ def build_adds_embed(players, analysis, stats, news, is_pitcher):
         if multi:
             name_line += f" [{multi}]"
 
-        field_text += f"{emoji} {name_line}\n"
-        field_text += f"   ESPN: {own} owned ({change})\n"
+        field_text = f"{emoji} {name_line}\n"
+        field_text += f"ESPN: {own} owned ({change})\n"
 
         ps = stats.get(name, {})
         stats_line = format_stats_line(ps.get('last7', {}), pos)
         if stats_line:
-            field_text += f"   {stats_line}\n"
+            field_text += f"{stats_line}\n"
 
         comment = analysis.get(comments_key, {}).get(name, news.get(name, ''))
         if comment:
-            field_text += f"   📰 {comment}\n"
+            field_text += f"📰 {comment}"
 
-        field_text += "\n"
-
-    embed.add_field(
-        name="\u200b",
-        value=safe_truncate(field_text) or "No significant adds today.",
-        inline=False
-    )
+        embed.add_field(
+            name="​",
+            value=safe_truncate(field_text),
+            inline=False
+        )
 
     embed.set_footer(text=f"Updated daily at 7:00 AM ET • {datetime.now(ZoneInfo('America/New_York')).strftime('%B %d, %Y')}")
     return embed
@@ -800,27 +797,21 @@ def build_breakout_embed(breakout_pitchers, breakout_hitters, analysis):
         text += "\n"
         return text
 
-    # Pitchers first
+    # Pitchers first — one field each
     if breakout_pitchers:
-        pitcher_text = "".join(render_candidate(p) for p in breakout_pitchers)
-        embed.add_field(
-            name="⚾ PITCHERS",
-            value=safe_truncate(pitcher_text),
-            inline=False
-        )
-    
-    # Then hitters
+        embed.add_field(name="⚾ PITCHERS", value="​", inline=False)
+        for p in breakout_pitchers:
+            embed.add_field(name="​", value=safe_truncate(render_candidate(p)), inline=False)
+
+    # Then hitters — one field each
     if breakout_hitters:
-        hitter_text = "".join(render_candidate(p) for p in breakout_hitters)
-        embed.add_field(
-            name="🏃 HITTERS",
-            value=safe_truncate(hitter_text),
-            inline=False
-        )
+        embed.add_field(name="🏃 HITTERS", value="​", inline=False)
+        for p in breakout_hitters:
+            embed.add_field(name="​", value=safe_truncate(render_candidate(p)), inline=False)
 
     if not breakout_pitchers and not breakout_hitters:
         embed.add_field(
-            name="\u200b",
+            name="​",
             value="*No candidates cleared the bar today — Savant data is thin this early. Check back as the sample builds.*",
             inline=False
         )
