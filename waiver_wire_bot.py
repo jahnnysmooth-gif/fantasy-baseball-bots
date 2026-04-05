@@ -651,11 +651,17 @@ Respond ONLY with a valid JSON object. No markdown, no explanation:
   ]
 }}
 
-Be opinionated. Reference actual stats. No filler. No ellipses."""
+Be opinionated. No filler. No ellipses.
+CRITICAL STAT FORMATTING — use these exactly as provided, do not reformat:
+- AVG, OBP, SLG, xwOBA, xBA, xSLG: already formatted as .357, .433 — NO leading zero
+- ERA, WHIP, xERA: already formatted as 0.71, 3.38 — KEEP leading zero
+- K%, BB%, Barrel%, HH%: already formatted as 15.2% — use as-is
+- Ownership %: write as "26% owned" not "26.33% owned" — round to whole number
+Do not write 0.433, write .433. Do not write 0.914, write .914."""
 
     try:
         message = anthropic_client.messages.create(
-            model="claude-haiku-4-5-20251001",
+            model="claude-sonnet-4-6",
             max_tokens=2500,
             messages=[{"role": "user", "content": prompt}]
         )
