@@ -782,7 +782,6 @@ def build_discord_embed(adds, breakout_candidates, analysis, stats, news):
         inline=False
     )
 
-    embed.add_field(name="\u200b", value="━━━━━━━━━━━━━━━━━━━", inline=False)
 
     # ── SECTION 2: BREAKOUT CANDIDATES ──
     breakout_writeups = analysis.get('breakout_writeups', [])
@@ -857,13 +856,12 @@ def build_discord_embed(adds, breakout_candidates, analysis, stats, news):
             inline=False
         )
 
-    embed.add_field(name="\u200b", value="━━━━━━━━━━━━━━━━━━━", inline=False)
 
     # ── SECTION 3: SPICY TAKE ──
     take_text = analysis.get('spicy_take', 'No take today.')
     embed.add_field(
         name="🌶️ SHANDLER'S SPICY TAKE",
-        value=take_text[:1024] if len(take_text) > 1024 else take_text,
+        value=safe_truncate(take_text),
         inline=False
     )
 
