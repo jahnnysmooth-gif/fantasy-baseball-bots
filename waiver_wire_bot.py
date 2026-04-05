@@ -136,6 +136,20 @@ async def fetch_espn_ownership():
                         default_pos_id = player.get('defaultPositionId', 0)
                         position = POSITION_MAP.get(default_pos_id, 'NA')
 
+                        # Two-way player fix: if eligible at hitter AND pitcher slots,
+                        # prefer hitter designation (more fantasy-relevant)
+                        hitter_slots = {0,1,2,3,4,5,6,7,9}  # C,1B,2B,3B,SS,OF,2B/SS,1B/3B,DH
+                        pitcher_slots = {10, 11}
+                        slot_set = set(player.get('eligibleSlots', []))
+                        if (slot_set & hitter_slots) and (slot_set & pitcher_slots):
+                            # Has both — find primary hitter position
+                            for slot in player.get('eligibleSlots', []):
+                                if slot in hitter_slots:
+                                    hitter_pos = SLOT_TO_POS.get(slot)
+                                    if hitter_pos:
+                                        position = hitter_pos
+                                        break
+
                         # Multi-position eligibility (deduplicated, excluding default)
                         eligible_slots = player.get('eligibleSlots', [])
                         seen = set()
@@ -587,7 +601,6 @@ Respond ONLY with a valid JSON object. No markdown, no explanation:
       "headline": "5-8 word punchy header",
       "league_fit": "Roto" or "H2H" or "Both",
       "why": "2-3 sentences. Lead with the best metric. Add role/trend context. Third sentence only if it materially adds — not filler. No ellipses.",
-      "faab_range": "e.g. 5-10% or Low priority"
     }}
   ],
   "pitcher_intro": "One punchy sentence on the overall pitcher waiver landscape today.",
@@ -647,7 +660,6 @@ def build_adds_embed(players, analysis, stats, news, is_pitcher):
 
     embed = discord.Embed(
         title=title,
-        description=build_header(),
         color=color,
         timestamp=datetime.now(ZoneInfo('UTC'))
     )
@@ -689,10 +701,6 @@ def build_adds_embed(players, analysis, stats, news, is_pitcher):
         inline=False
     )
 
-    intro = analysis.get(intro_key, '')
-    if intro:
-        embed.add_field(name="\u200b", value=f"*{intro}*", inline=False)
-
     embed.set_footer(text=f"Updated daily at 7:00 AM ET • {datetime.now(ZoneInfo('America/New_York')).strftime('%B %d, %Y')}")
     return embed
 
@@ -701,14 +709,9 @@ def build_breakout_embed(breakout_pitchers, breakout_hitters, analysis):
     """Build the breakout candidates embed with 2 pitchers + 2 hitters."""
     embed = discord.Embed(
         title="🚀 BREAKOUT CANDIDATES",
-        description=build_header(),
         color=0x9B59B6,  # purple
         timestamp=datetime.now(ZoneInfo('UTC'))
     )
-
-    intro = analysis.get('breakout_intro', '')
-    if intro:
-        embed.add_field(name="\u200b", value=f"*{intro}*", inline=False)
 
     writeups = analysis.get('breakout_writeups', [])
 
@@ -725,7 +728,6 @@ def build_breakout_embed(breakout_pitchers, breakout_hitters, analysis):
         headline   = wu.get('headline', 'Under-the-radar pick')
         league_fit = wu.get('league_fit', '')
         why        = wu.get('why', '')
-        faab       = wu.get('faab_range', '')
 
         name_line = f"**{name} | {pos} | {team}**" if team else f"**{name} | {pos}**"
         name_line += f" ({own} owned)"
@@ -757,8 +759,6 @@ def build_breakout_embed(breakout_pitchers, breakout_hitters, analysis):
 
         if why:
             text += f"   {why}\n"
-        if faab:
-            text += f"   💰 FAAB: {faab}\n"
         text += "\n"
         return text
 
