@@ -596,7 +596,6 @@ Respond ONLY with a valid JSON object. No markdown, no explanation:
     {{
       "name": "player name",
       "headline": "5-8 word punchy header",
-      "league_fit": "Roto" or "H2H" or "Both",
       "why": "2-3 sentences. Lead with the best metric. Add role/trend context. Third sentence only if it materially adds — not filler. No ellipses.",
     }}
   ],
@@ -721,9 +720,8 @@ def build_breakout_embed(breakout_pitchers, breakout_hitters, analysis):
         injury = player.get('injury_status', 'ACTIVE')
         savant = player.get('savant', {})
 
-        wu = next((w for w in writeups if w.get('name', '').lower() == name.lower()), {})
+        wu = next((w for w in writeups if name.lower() in w.get('name', '').lower() or w.get('name', '').lower() in name.lower()), {})
         headline   = wu.get('headline', 'Under-the-radar pick')
-        league_fit = wu.get('league_fit', '')
         why        = wu.get('why', '')
 
         name_line = f"**{name} | {pos} | {team}**" if team else f"**{name} | {pos}**"
@@ -735,22 +733,44 @@ def build_breakout_embed(breakout_pitchers, breakout_hitters, analysis):
 
         text = f"💎 {name_line}\n"
         text += f"   *{headline}*"
-        if league_fit:
-            text += f" [{league_fit}]"
         text += "\n"
 
         # Savant metrics
         metrics = []
+
+        def fmt_rate(val, decimals=1):
+            """Format a rate stat like 15.2% — no leading zero needed."""
+            try:
+                return f"{float(val):.{decimals}f}%"
+            except (ValueError, TypeError):
+                return str(val)
+
+        def fmt_avg(val):
+            """Format AVG-style stat: .357 (no leading zero, 3 decimals)."""
+            try:
+                f = float(val)
+                # Remove leading zero: 0.357 -> .357
+                return f"{f:.3f}".lstrip('0') or '.000'
+            except (ValueError, TypeError):
+                return str(val)
+
+        def fmt_era(val):
+            """ERA-style: keep leading zero, 2 decimals (0.71, 3.38)."""
+            try:
+                return f"{float(val):.2f}"
+            except (ValueError, TypeError):
+                return str(val)
+
         if savant.get('xwoba') and savant['xwoba'] != 'N/A':
-            metrics.append(f"xwOBA: {savant['xwoba']}")
+            metrics.append(f"xwOBA: {fmt_avg(savant['xwoba'])}")
         if savant.get('barrel_rate') and savant['barrel_rate'] != 'N/A':
-            metrics.append(f"Barrel%: {savant['barrel_rate']}")
+            metrics.append(f"Barrel%: {fmt_rate(savant['barrel_rate'])}")
         if savant.get('hard_hit_pct') and savant['hard_hit_pct'] != 'N/A':
-            metrics.append(f"HH%: {savant['hard_hit_pct']}")
+            metrics.append(f"HH%: {fmt_rate(savant['hard_hit_pct'])}")
         if savant.get('k_pct') and savant['k_pct'] != 'N/A' and pos in PITCHERS:
-            metrics.append(f"K%: {savant['k_pct']}")
+            metrics.append(f"K%: {fmt_rate(savant['k_pct'])}")
         if savant.get('xera') and savant['xera'] != 'N/A' and pos in PITCHERS:
-            metrics.append(f"xERA: {savant['xera']}")
+            metrics.append(f"xERA: {fmt_era(savant['xera'])}")
         if metrics:
             text += f"   📊 {' • '.join(metrics)}\n"
 
