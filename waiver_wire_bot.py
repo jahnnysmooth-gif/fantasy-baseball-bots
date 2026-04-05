@@ -415,11 +415,8 @@ async def find_breakout_candidates(merged_data, stats, recent_recommendations):
     """2 hitters + 2 pitchers under 35% owned with strong underlying metrics."""
     print("[Breakout] Finding breakout candidates...")
 
-    cutoff = (datetime.now() - timedelta(days=10)).strftime('%Y-%m-%d')
-    recently_recommended = {
-        r['name'] for r in recent_recommendations
-        if r.get('date', '0000-00-00') >= cutoff
-    }
+    # No-repeat rule disabled during testing
+    recently_recommended = set()
 
     hitter_candidates  = []
     pitcher_candidates = []
@@ -655,7 +652,7 @@ def build_adds_embed(players, analysis, stats, news, is_pitcher):
     """Build a top-5 adds embed for either pitchers or hitters."""
     comments_key = "pitcher_add_comments" if is_pitcher else "hitter_add_comments"
     intro_key    = "pitcher_intro" if is_pitcher else "hitter_intro"
-    title        = "🔥 TOP PITCHER ADDS" if is_pitcher else "🔥 TOP HITTER ADDS"
+    title        = "🚀 TOP PITCHER ADDS" if is_pitcher else "🚀 TOP HITTER ADDS"
     color        = 0xE74C3C if is_pitcher else 0x2ECC71  # red for pitchers, green for hitters
 
     embed = discord.Embed(
