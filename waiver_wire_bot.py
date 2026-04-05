@@ -86,13 +86,18 @@ async def fetch_espn_ownership():
     async with aiohttp.ClientSession() as session:
         try:
             async with session.get(url, headers=headers, timeout=30) as response:
+                print(f"[ESPN API] Response status: {response.status}")
                 if response.status != 200:
-                    print(f"[ESPN API] Bad status: {response.status}")
+                    body = await response.text()
+                    print(f"[ESPN API] Error body: {body[:300]}")
                     return ownership_data
 
                 data = await response.json(content_type=None)
                 players = data.get('players', [])
                 print(f"[ESPN API] Retrieved {len(players)} players from ESPN")
+                if not players:
+                    print(f"[ESPN API] Response keys: {list(data.keys())}")
+                    print(f"[ESPN API] Full response (first 500 chars): {str(data)[:500]}")
                 # Debug: log top 5 by percentChange to verify sorting
                 sample = sorted(
                     [e for e in players if e.get('player', {}).get('ownership', {}).get('percentChange', 0) != 0],
@@ -643,7 +648,7 @@ Be controversial. Be specific. Reference the actual stats provided."""
 
     try:
         message = anthropic_client.messages.create(
-            model="claude-sonnet-4-20250514",
+            model="claude-haiku-4-5-20251001",
             max_tokens=1800,
             messages=[{"role": "user", "content": prompt}]
         )
