@@ -214,12 +214,12 @@ def filter_adds(merged_data, position_group, recent_adds=None):
     Return top 5 adds for either pitchers or hitters.
     Must have positive ownership change and be under MAX_OWNERSHIP
     unless spiking over SPIKE_THRESHOLD.
-    Same player won't appear within a 5-day window.
+    Only top-3 finishers from the last 3 days are blocked from re-appearing.
     """
-    cutoff = (datetime.now() - timedelta(days=5)).strftime('%Y-%m-%d')
+    cutoff = (datetime.now() - timedelta(days=3)).strftime('%Y-%m-%d')
     recently_added = {
         r['name'] for r in (recent_adds or [])
-        if r.get('date', '0000-00-00') >= cutoff
+        if r.get('date', '0000-00-00') >= cutoff and r.get('rank', 99) <= 3
     }
 
     adds = []
@@ -554,6 +554,8 @@ async def generate_claude_analysis(pitcher_adds, hitter_adds, breakout_pitchers,
                 'espn_change':    p['espn_change'],
                 'injury_status':  p.get('injury_status', 'ACTIVE'),
                 'last7':          fmt_last7(ps.get('last7', {}), p['position'] in PITCHERS),
+                'last14':         fmt_last7(ps.get('last14', {}), p['position'] in PITCHERS),
+                'games_played':   p.get('games_played', 0),
                 'news':           news.get(p['name'], ''),
             }
             if p['position'] in PITCHERS:
@@ -689,6 +691,11 @@ Do not write 0.433, write .433. Do not write 0.914, write .914."""
         }
 
 
+MULTI_POS_MAP = {
+    '2B/SS': 'MI', '1B/3B': 'CI',
+    'SS/2B': 'MI', '3B/1B': 'CI',
+}
+
 def format_stats_line(stats, position):
     if not stats:
         return ""
@@ -697,13 +704,36 @@ def format_stats_line(stats, position):
         ip   = stats.get('inningsPitched', '0')
         k    = int(stats.get('strikeOuts', 0) or 0)
         whip = float(stats.get('whip', 0) or 0)
-        return f"Last 7: {ip} IP, {k} K, {era:.2f} ERA, {whip:.2f} WHIP"
+        return f"**Last 7: {ip} IP, {k} K, {era:.2f} ERA, {whip:.2f} WHIP**"
     else:
         avg = stats.get('avg', '.000') or '.000'
         hr  = int(stats.get('homeRuns', 0) or 0)
         rbi = int(stats.get('rbi', 0) or 0)
         sb  = int(stats.get('stolenBases', 0) or 0)
-        return f"Last 7: {avg} AVG, {hr} HR, {rbi} RBI, {sb} SB"
+        return f"**Last 7: {avg} AVG, {hr} HR, {rbi} RBI, {sb} SB**"
+
+def format_multi_pos(multi_pos):
+    """
+    Convert multi-pos string to clean display format.
+    ESPN eligibleSlots produce strings like '2B/3B/SS/2B/SS/1B/3B'.
+    We deduplicate, map combo slots to MI/CI, and list clean positions.
+    """
+    if not multi_pos:
+        return ""
+    raw_parts = [p.strip() for p in multi_pos.split('/')]
+    seen = set()
+    result = []
+    for p in raw_parts:
+        if p in ('2B/SS', 'SS/2B'):
+            display = 'MI'
+        elif p in ('1B/3B', '3B/1B'):
+            display = 'CI'
+        else:
+            display = p
+        if display not in seen:
+            seen.add(display)
+            result.append(display)
+    return ', '.join(result)
 
 
 def build_adds_embed(players, analysis, stats, news, is_pitcher):
@@ -718,6 +748,13 @@ def build_adds_embed(players, analysis, stats, news, is_pitcher):
         timestamp=datetime.now(ZoneInfo('UTC'))
     )
 
+    if not players:
+        embed.add_field(
+            name="​",
+            value="*No new adds cleared the bar today — either the wire is quiet or recent picks are still in the 3-day no-repeat window.*",
+            inline=False
+        )
+
     for i, player in enumerate(players, 1):
         emoji  = "🔥" if i <= 3 else "📈"
         name   = player['name']
@@ -728,23 +765,39 @@ def build_adds_embed(players, analysis, stats, news, is_pitcher):
         own    = f"{player['espn_ownership']:.1f}%"
         change = f"⬆️ +{player['espn_change']:.1f}%" if player['espn_change'] > 0 else f"⬇️ {player['espn_change']:.1f}%"
 
+        # Line 1: player name bold
         name_line = f"**{name} | {pos} | {team}**" if team else f"**{name} | {pos}**"
         if injury not in ('ACTIVE', ''):
-            name_line += f" ⚠️"
-        if multi:
-            name_line += f" [{multi}]"
+            name_line += " ⚠️"
 
-        field_text = f"{emoji} {name_line}\n"
-        field_text += f"ESPN: {own} owned ({change})\n"
+        # Line 2: ownership bold
+        own_line = f"**ESPN: {own} owned | {change}**"
 
+        # Line 3: comment with player last name bolded, no emoji
         ps = stats.get(name, {})
-        stats_line = format_stats_line(ps.get('last7', {}), pos)
-        if stats_line:
-            field_text += f"{stats_line}\n"
-
         comment = analysis.get(comments_key, {}).get(name, news.get(name, ''))
         if comment:
-            field_text += f"📰 {comment}"
+            last_name = name.split()[-1]
+            comment = comment.replace(last_name, f"**{last_name}**", 1) if last_name in comment else comment
+
+        # Line 4: stats bold, moved below summary
+        stats_line = format_stats_line(ps.get('last7', {}), pos)
+
+        # Line 5: additional positions for hitters only
+        addl_pos_line = ""
+        if pos not in PITCHERS and multi:
+            addl_pos = format_multi_pos(multi)
+            if addl_pos:
+                addl_pos_line = f"**Add'l Pos: {addl_pos}**"
+
+        field_text = f"{emoji} {name_line}\n"
+        field_text += f"{own_line}\n"
+        if comment:
+            field_text += f"{comment}\n"
+        if stats_line:
+            field_text += f"{stats_line}\n"
+        if addl_pos_line:
+            field_text += f"{addl_pos_line}\n"
 
         embed.add_field(
             name="​",
@@ -796,17 +849,41 @@ def build_breakout_embed(breakout_pitchers, breakout_hitters, analysis):
         wu  = find_writeup(name)
         why = wu.get('why', '')
 
+        # Line 1: player name bold
         name_line = f"**{name} | {pos} | {team}**" if team else f"**{name} | {pos}**"
-        name_line += f" ({own} owned)"
         if injury not in ('ACTIVE', ''):
             name_line += " ⚠️"
         if multi:
-            name_line += f" [{multi}]"
+            addl = format_multi_pos(multi)
+            if addl:
+                name_line += f" [{addl}]"
+
+        # Line 2: ownership bold
+        own_line = f"**ESPN: {own} owned**"
+
+        # Line 3: writeup with last name bolded
+        if why:
+            last_name = name.split()[-1]
+            why = why.replace(last_name, f"**{last_name}**", 1) if last_name in why else why
+
+        # Line 4: last 7 stats bold (below summary)
+        stats_line = format_stats_line(player.get('last7', {}), pos)
+
+        # Add'l pos line for hitters (below stats)
+        addl_pos_line = ""
+        if pos not in PITCHERS and multi:
+            addl = format_multi_pos(multi)
+            if addl:
+                addl_pos_line = f"**Add'l Pos: {addl}**"
 
         text = f"💎 {name_line}\n"
+        text += f"{own_line}\n"
         if why:
-            text += f"   {why}\n"
-        text += "\n"
+            text += f"{why}\n"
+        if stats_line:
+            text += f"{stats_line}\n"
+        if addl_pos_line:
+            text += f"{addl_pos_line}\n"
         return text
 
     # Pitchers — section label in first player field name
@@ -845,7 +922,7 @@ async def post_daily_report():
         # 2. Merge
         merged_data = merge_ownership_data(espn_data, previous_ownership)
 
-        # 3. Filter adds by type (5-day no-repeat)
+        # 3. Filter adds by type (3-day no-repeat, top 3 only)
         adds_history = state.get('adds_history', [])
         pitcher_adds = filter_adds(merged_data, PITCHERS, adds_history)
         hitter_adds  = filter_adds(merged_data, HITTERS, adds_history)
@@ -898,7 +975,8 @@ async def post_daily_report():
                 print(f"[Waiver Wire Bot] Failed to post embed: {e}")
                 continue
 
-        # 9. Save state
+        # 9. Save state (skipped in test mode)
+        test_mode = os.getenv('WAIVER_WIRE_TEST_MODE', 'false').lower() == 'true'
         today   = datetime.now(ZoneInfo('America/New_York')).strftime('%Y-%m-%d')
 
         # Save breakout recommendations (10-day no-repeat)
@@ -912,20 +990,28 @@ async def post_daily_report():
         cutoff30 = (datetime.now() - timedelta(days=30)).strftime('%Y-%m-%d')
         history = [r for r in history if r.get('date', '0000-00-00') >= cutoff30]
 
-        # Save adds (5-day no-repeat)
+        # Save adds — only top 3 get 3-day no-repeat block
         adds_hist = state.get('adds_history', [])
-        for player in pitcher_adds + hitter_adds:
-            adds_hist.append({'name': player['name'], 'date': today})
-        cutoff5 = (datetime.now() - timedelta(days=5)).strftime('%Y-%m-%d')
-        adds_hist = [r for r in adds_hist if r.get('date', '0000-00-00') >= cutoff5]
+        for rank, player in enumerate(pitcher_adds[:3] + hitter_adds[:3], 1):
+            adds_hist.append({'name': player['name'], 'date': today, 'rank': rank})
+        cutoff3 = (datetime.now() - timedelta(days=3)).strftime('%Y-%m-%d')
+        adds_hist = [r for r in adds_hist if r.get('date', '0000-00-00') >= cutoff3]
 
-        state['last_post_time']         = datetime.now(ZoneInfo('UTC')).isoformat()
-        state['last_ownership_data']    = merged_data
-        state['recommendation_history'] = history
-        state['adds_history']           = adds_hist
-        save_state(state)
+        if not test_mode:
+            state['last_post_time']         = datetime.now(ZoneInfo('UTC')).isoformat()
+            state['last_ownership_data']    = merged_data
+            state['recommendation_history'] = history
+            state['adds_history']           = adds_hist
+            save_state(state)
+            print("[Waiver Wire Bot] State saved.")
+        else:
+            print("[Waiver Wire Bot] TEST MODE — state not saved.")
 
         print(f"[Waiver Wire Bot] All embeds posted successfully at {datetime.now(ZoneInfo('America/New_York'))}")
+        print(f"[Waiver Wire Bot] Pitcher adds: {[p['name'] for p in pitcher_adds]}")
+        print(f"[Waiver Wire Bot] Hitter adds:  {[p['name'] for p in hitter_adds]}")
+        print(f"[Waiver Wire Bot] Breakout pitchers: {[p['name'] for p in breakout_pitchers]}")
+        print(f"[Waiver Wire Bot] Breakout hitters:  {[p['name'] for p in breakout_hitters]}")
 
     except Exception as e:
         print(f"[Waiver Wire Bot] Error in daily report: {e}")
