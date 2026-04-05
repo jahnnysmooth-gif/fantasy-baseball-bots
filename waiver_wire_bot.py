@@ -40,7 +40,7 @@ def load_state():
         with open(STATE_FILE, 'r') as f:
             return json.load(f)
     except FileNotFoundError:
-        return {'last_post_time': None, 'last_ownership_data': {}, 'recommendation_history': []}
+        return {'last_post_time': None, 'last_ownership_data': {}, 'recommendation_history': [], 'adds_history': []}
 
 
 def save_state(state):
@@ -209,12 +209,19 @@ def merge_ownership_data(espn_data, previous_data):
     return merged
 
 
-def filter_adds(merged_data, position_group):
+def filter_adds(merged_data, position_group, recent_adds=None):
     """
     Return top 5 adds for either pitchers or hitters.
     Must have positive ownership change and be under MAX_OWNERSHIP
     unless spiking over SPIKE_THRESHOLD.
+    Same player won't appear within a 5-day window.
     """
+    cutoff = (datetime.now() - timedelta(days=5)).strftime('%Y-%m-%d')
+    recently_added = {
+        r['name'] for r in (recent_adds or [])
+        if r.get('date', '0000-00-00') >= cutoff
+    }
+
     adds = []
     for player, data in merged_data.items():
         pos    = data['position']
@@ -226,6 +233,8 @@ def filter_adds(merged_data, position_group):
         if change <= 0:
             continue
         if own > MAX_OWNERSHIP and change < SPIKE_THRESHOLD:
+            continue
+        if player in recently_added:
             continue
 
         adds.append({'name': player, **data})
@@ -415,8 +424,11 @@ async def find_breakout_candidates(merged_data, stats, recent_recommendations):
     """2 hitters + 2 pitchers under 35% owned with strong underlying metrics."""
     print("[Breakout] Finding breakout candidates...")
 
-    # TODO: Re-enable for production by restoring 10-day cutoff logic
-    recently_recommended = set()  # disabled during testing
+    cutoff = (datetime.now() - timedelta(days=10)).strftime('%Y-%m-%d')
+    recently_recommended = {
+        r['name'] for r in recent_recommendations
+        if r.get('date', '0000-00-00') >= cutoff
+    }
 
     hitter_candidates  = []
     pitcher_candidates = []
@@ -836,9 +848,10 @@ async def post_daily_report():
         # 2. Merge
         merged_data = merge_ownership_data(espn_data, previous_ownership)
 
-        # 3. Filter adds by type
-        pitcher_adds = filter_adds(merged_data, PITCHERS)
-        hitter_adds  = filter_adds(merged_data, HITTERS)
+        # 3. Filter adds by type (5-day no-repeat)
+        adds_history = state.get('adds_history', [])
+        pitcher_adds = filter_adds(merged_data, PITCHERS, adds_history)
+        hitter_adds  = filter_adds(merged_data, HITTERS, adds_history)
         print(f"[Filter] {len(pitcher_adds)} pitcher adds, {len(hitter_adds)} hitter adds")
 
         # 4. Collect all names needing stats
@@ -890,6 +903,8 @@ async def post_daily_report():
 
         # 9. Save state
         today   = datetime.now(ZoneInfo('America/New_York')).strftime('%Y-%m-%d')
+
+        # Save breakout recommendations (10-day no-repeat)
         history = state.get('recommendation_history', [])
         for player in breakout_pitchers + breakout_hitters:
             history.append({
@@ -897,12 +912,20 @@ async def post_daily_report():
                 'date':             today,
                 'ownership_at_rec': player['espn_ownership'],
             })
-        cutoff  = (datetime.now() - timedelta(days=30)).strftime('%Y-%m-%d')
-        history = [r for r in history if r.get('date', '0000-00-00') >= cutoff]
+        cutoff30 = (datetime.now() - timedelta(days=30)).strftime('%Y-%m-%d')
+        history = [r for r in history if r.get('date', '0000-00-00') >= cutoff30]
 
-        state['last_post_time']        = datetime.now(ZoneInfo('UTC')).isoformat()
-        state['last_ownership_data']   = merged_data
+        # Save adds (5-day no-repeat)
+        adds_hist = state.get('adds_history', [])
+        for player in pitcher_adds + hitter_adds:
+            adds_hist.append({'name': player['name'], 'date': today})
+        cutoff5 = (datetime.now() - timedelta(days=5)).strftime('%Y-%m-%d')
+        adds_hist = [r for r in adds_hist if r.get('date', '0000-00-00') >= cutoff5]
+
+        state['last_post_time']         = datetime.now(ZoneInfo('UTC')).isoformat()
+        state['last_ownership_data']    = merged_data
         state['recommendation_history'] = history
+        state['adds_history']           = adds_hist
         save_state(state)
 
         print(f"[Waiver Wire Bot] All embeds posted successfully at {datetime.now(ZoneInfo('America/New_York'))}")
