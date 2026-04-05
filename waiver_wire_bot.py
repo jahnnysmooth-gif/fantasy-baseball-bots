@@ -67,8 +67,7 @@ async def fetch_espn_ownership():
     # eligibleSlots that map to actual positions (not UTIL/BN/IL)
     SLOT_TO_POS = {
         0:'C', 1:'1B', 2:'2B', 3:'3B', 4:'SS',
-        5:'OF', 6:'2B/SS', 7:'1B/3B', 9:'DH',
-        14:'SP', 15:'RP',
+        5:'OF', 6:'2B/SS', 7:'1B/3B', 9:'DH', 10:'SP', 11:'RP',
     }
 
     url = (
@@ -731,8 +730,8 @@ def safe_truncate(text, limit=1024):
 
 def build_discord_embed(adds, breakout_candidates, analysis, stats, news):
     embed = discord.Embed(
-        title="🌶️ SHANDLER'S SPICY SUMMARY",
-        description=f"⚡ **The Wire Tap | Board Regs Fantasy Baseball**\n{datetime.now(ZoneInfo('America/New_York')).strftime('%A, %B %d, %Y')}",
+        title="⚡ The Wire Tap | Board Regs Fantasy Baseball",
+        description=datetime.now(ZoneInfo('America/New_York')).strftime('%A, %B %d, %Y'),
         color=0x1DB954,
         timestamp=datetime.now(ZoneInfo('UTC'))
     )
@@ -774,16 +773,17 @@ def build_discord_embed(adds, breakout_candidates, analysis, stats, news):
             adds_text += f"   📰 {comment}\n"
         adds_text += "\n"
 
-    intro = analysis.get('intro', '')
-    if intro:
-        adds_text += f"\n*{intro}*"
-
     embed.add_field(
         name="🎯 TOP WAIVER WIRE ADDS",
         value=safe_truncate(adds_text) or "No significant adds",
         inline=False
     )
 
+
+    # Intro as standalone context below adds
+    intro = analysis.get('intro', '')
+    if intro:
+        embed.add_field(name="​", value=f"*{intro}*", inline=False)
 
     # ── SECTION 2: BREAKOUT CANDIDATES ──
     breakout_writeups = analysis.get('breakout_writeups', [])
@@ -815,8 +815,7 @@ def build_discord_embed(adds, breakout_candidates, analysis, stats, news):
         breakout_text += f"💎 {name_line}\n"
         breakout_text += f"   *{headline}*"
         if league_fit:
-            fit_emoji = "📊" if league_fit == "Roto" else "⚔️" if league_fit == "H2H" else "✅"
-            breakout_text += f" — {fit_emoji} {league_fit}"
+            breakout_text += f" [{league_fit}]"
         breakout_text += "\n"
 
         # Savant metrics
@@ -832,12 +831,6 @@ def build_discord_embed(adds, breakout_candidates, analysis, stats, news):
         if metrics:
             breakout_text += f"   📊 {' • '.join(metrics)}\n"
 
-        # Schedule for pitchers
-        starts = player.get('starts_next_7', 0)
-        schedule = player.get('schedule', [])
-        if pos in ('SP', 'RP') and starts > 0:
-            opponents = ', '.join([f"vs {g['opponent']}" if g['home'] else f"@ {g['opponent']}" for g in schedule[:starts]])
-            breakout_text += f"   📅 {starts} start{'s' if starts > 1 else ''} this week: {opponents}\n"
 
         if why:
             breakout_text += f"   {why}\n"
