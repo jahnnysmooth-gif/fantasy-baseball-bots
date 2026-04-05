@@ -720,6 +720,15 @@ def format_stats_line(stats, position):
         return f"Last 7: {avg} AVG, {hr} HR, {rbi} RBI, {sb} SB"
 
 
+def safe_truncate(text, limit=1024):
+    """Trim to last complete sentence within Discord field limit."""
+    if len(text) <= limit:
+        return text
+    truncated = text[:limit]
+    last_period = max(truncated.rfind('. '), truncated.rfind('.\n'))
+    return truncated[:last_period + 1] if last_period > 0 else truncated
+
+
 def build_discord_embed(adds, breakout_candidates, analysis, stats, news):
     embed = discord.Embed(
         title="🌶️ SHANDLER'S SPICY SUMMARY",
@@ -778,7 +787,7 @@ def build_discord_embed(adds, breakout_candidates, analysis, stats, news):
 
     embed.add_field(
         name="🎯 TOP WAIVER WIRE ADDS",
-        value=adds_text[:1024] if len(adds_text) > 1024 else (adds_text or "No significant adds"),
+        value=safe_truncate(adds_text) or "No significant adds",
         inline=False
     )
 
@@ -846,7 +855,7 @@ def build_discord_embed(adds, breakout_candidates, analysis, stats, news):
     if breakout_text:
         embed.add_field(
             name="🚀 BREAKOUT CANDIDATES",
-            value=breakout_text[:1024] if len(breakout_text) > 1024 else breakout_text,
+            value=safe_truncate(breakout_text),
             inline=False
         )
     else:
