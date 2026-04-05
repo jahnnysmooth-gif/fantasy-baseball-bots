@@ -732,8 +732,7 @@ def build_breakout_embed(breakout_pitchers, breakout_hitters, analysis):
             name_line += f" [{multi}]"
 
         text = f"💎 {name_line}\n"
-        text += f"   *{headline}*"
-        text += "\n"
+
 
         # Savant metrics
         metrics = []
@@ -771,8 +770,7 @@ def build_breakout_embed(breakout_pitchers, breakout_hitters, analysis):
             metrics.append(f"K%: {fmt_rate(savant['k_pct'])}")
         if savant.get('xera') and savant['xera'] != 'N/A' and pos in PITCHERS:
             metrics.append(f"xERA: {fmt_era(savant['xera'])}")
-        if metrics:
-            text += f"   📊 {' • '.join(metrics)}\n"
+
 
         if why:
             text += f"   {why}\n"
