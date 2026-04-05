@@ -16,10 +16,9 @@ CLAUDE_API_KEY = os.getenv('WAIVER_WIRE_KEY')
 
 # Configuration
 STATE_FILE = 'state/waiver_wire_state.json'
-OWNERSHIP_THRESHOLD = 5.0
 SPIKE_THRESHOLD = 10.0
 MAX_OWNERSHIP = 50.0
-TOP_N = 5
+TOP_N = 5  # top 5 per category
 
 # Discord client
 intents = discord.Intents.default()
@@ -31,6 +30,9 @@ anthropic_client = Anthropic(api_key=CLAUDE_API_KEY)
 
 # Scheduler
 scheduler = AsyncIOScheduler(timezone='America/New_York')
+
+PITCHERS = ('SP', 'RP')
+HITTERS  = ('C', '1B', '2B', '3B', 'SS', 'OF', 'DH')
 
 
 def load_state():
@@ -47,8 +49,17 @@ def save_state(state):
         json.dump(state, f, indent=2)
 
 
+def safe_truncate(text, limit=1024):
+    """Trim to last complete sentence within Discord field limit."""
+    if len(text) <= limit:
+        return text
+    truncated = text[:limit]
+    last = max(truncated.rfind('. '), truncated.rfind('.\n'))
+    return truncated[:last + 1] if last > 0 else truncated
+
+
 async def fetch_espn_ownership():
-    """Fetch player ownership + eligibility from ESPN kona_player_info."""
+    """Fetch player ownership data from ESPN's kona_player_info API."""
     print("[ESPN API] Fetching player ownership data...")
     ownership_data = {}
 
@@ -58,13 +69,13 @@ async def fetch_espn_ownership():
     }
 
     TEAM_MAP = {
-        1:'BAL',2:'BOS',3:'LAA',4:'CHW',5:'CLE',6:'DET',7:'KC',8:'MIL',
-        9:'MIN',10:'NYY',11:'OAK',12:'SEA',13:'TEX',14:'TOR',15:'ATL',
-        16:'CHC',17:'CIN',18:'HOU',19:'LAD',20:'WSH',21:'NYM',22:'PHI',
-        23:'PIT',24:'STL',25:'SD',26:'SF',27:'COL',28:'MIA',29:'ARI',30:'TB',
+        1:'BAL', 2:'BOS', 3:'LAA', 4:'CHW', 5:'CLE', 6:'DET', 7:'KC',  8:'MIL',
+        9:'MIN', 10:'NYY', 11:'OAK', 12:'SEA', 13:'TEX', 14:'TOR', 15:'ATL',
+        16:'CHC', 17:'CIN', 18:'HOU', 19:'LAD', 20:'WSH', 21:'NYM', 22:'PHI',
+        23:'PIT', 24:'STL', 25:'SD',  26:'SF',  27:'COL', 28:'MIA', 29:'ARI', 30:'TB',
     }
 
-    # eligibleSlots that map to actual positions (not UTIL/BN/IL)
+    # Roster slot ID → eligible position (excludes UTIL/BN/IL)
     SLOT_TO_POS = {
         0:'C', 1:'1B', 2:'2B', 3:'3B', 4:'SS',
         5:'OF', 6:'2B/SS', 7:'1B/3B', 9:'DH', 10:'SP', 11:'RP',
@@ -93,198 +104,125 @@ async def fetch_espn_ownership():
                 players = data.get('players', [])
                 print(f"[ESPN API] Retrieved {len(players)} players from ESPN")
 
+                # Debug: top movers
                 sample = sorted(
-                    [e for e in players if e.get('player', {}).get('ownership', {}).get('percentChange', 0) != 0],
-                    key=lambda e: e.get('player', {}).get('ownership', {}).get('percentChange', 0),
+                    [e for e in players if e.get('player', {}).get('ownership', {}).get('percentChange', 0) > 0],
+                    key=lambda e: e['player']['ownership']['percentChange'],
                     reverse=True
                 )[:5]
                 for e in sample:
-                    p = e.get('player', {})
-                    own = p.get('ownership', {})
+                    p = e['player']
+                    own = p['ownership']
                     print(f"[ESPN API] Sample: {p.get('fullName')} — {own.get('percentOwned'):.1f}% owned, {own.get('percentChange'):+.1f}% change")
-
-                with_ownership = sum(1 for e in players if e.get('player', {}).get('ownership', {}).get('percentOwned', 0) > 0)
-                with_change = sum(1 for e in players if e.get('player', {}).get('ownership', {}).get('percentChange', 0) != 0)
-                print(f"[ESPN API] Players with >0% owned: {with_ownership}, with non-zero change: {with_change}")
 
                 for entry in players:
                     try:
-                        player = entry.get('player', {})
+                        player   = entry.get('player', {})
                         ownership = player.get('ownership', {})
-
                         full_name = player.get('fullName', '').strip()
                         if not full_name:
                             continue
 
-                        pct_owned = ownership.get('percentOwned', 0.0)
+                        pct_owned  = ownership.get('percentOwned', 0.0)
                         pct_change = ownership.get('percentChange', 0.0)
-
                         if pct_owned == 0.0:
+                            continue
+
+                        # IL60 only hard filter
+                        injury_status = player.get('injuryStatus', 'ACTIVE')
+                        if injury_status == 'SIXTY_DAY_DL':
                             continue
 
                         default_pos_id = player.get('defaultPositionId', 0)
                         position = POSITION_MAP.get(default_pos_id, 'NA')
 
-                        # Build multi-position eligibility string
+                        # Multi-position eligibility (deduplicated, excluding default)
                         eligible_slots = player.get('eligibleSlots', [])
+                        seen = set()
                         eligible_positions = []
                         for slot in eligible_slots:
-                            pos = SLOT_TO_POS.get(slot)
-                            if pos and pos not in eligible_positions:
-                                eligible_positions.append(pos)
-                        multi_pos = '/'.join(eligible_positions) if len(eligible_positions) > 1 else ''
+                            pos_str = SLOT_TO_POS.get(slot)
+                            if pos_str and pos_str not in seen and pos_str != position:
+                                seen.add(pos_str)
+                                eligible_positions.append(pos_str)
+                        multi_pos = '/'.join(eligible_positions) if eligible_positions else ''
 
-                        pro_team_id = player.get('proTeamId', 0)
-                        team = TEAM_MAP.get(pro_team_id, '')
+                        team = TEAM_MAP.get(player.get('proTeamId', 0), '')
 
-                        # Injury status — flag but don't filter (early season, be permissive)
-                        injury_status = player.get('injuryStatus', 'ACTIVE')
-                        # Only hard-filter IL60
-                        if injury_status in ('SIXTY_DAY_DL',):
-                            continue
-
-                        # Extract season stats from ESPN payload directly (stat key map)
-                        # statSplitTypeId=0 = full season, seasonId=2026
-                        espn_stats = {}
-                        for stat_entry in player.get('stats', []):
-                            if (stat_entry.get('seasonId') == 2026 and
-                                    stat_entry.get('statSplitTypeId') == 0 and
-                                    stat_entry.get('statSourceId') == 0):
-                                espn_stats = stat_entry.get('stats', {})
-                                break
-
-                        # Games played (pitchers use GS, hitters use AB proxy)
-                        games_played = entry.get('player', {}).get('gamesPlayedByPosition', {})
-                        total_games = sum(games_played.values()) if games_played else 0
+                        games_played = sum(entry.get('player', {}).get('gamesPlayedByPosition', {}).values())
 
                         ownership_data[full_name] = {
-                            'ownership': round(pct_owned, 2),
-                            'change': round(pct_change, 2),
-                            'position': position,
-                            'multi_pos': multi_pos,
-                            'team': team,
-                            'espn_id': player.get('id'),
-                            'injury_status': injury_status,
-                            'espn_stats': espn_stats,
-                            'games_played': total_games,
+                            'ownership':      round(pct_owned, 2),
+                            'change':         round(pct_change, 2),
+                            'position':       position,
+                            'multi_pos':      multi_pos,
+                            'team':           team,
+                            'injury_status':  injury_status,
+                            'games_played':   games_played,
+                            'espn_id':        player.get('id'),
                         }
 
                     except Exception as e:
-                        print(f"[ESPN API] Error parsing player entry: {e}")
+                        print(f"[ESPN API] Error parsing entry: {e}")
                         continue
 
         except Exception as e:
             print(f"[ESPN API] Request failed: {e}")
-            import traceback
-            traceback.print_exc()
+            import traceback; traceback.print_exc()
 
-    print(f"[ESPN API] Parsed {len(ownership_data)} owned/trending players")
+    print(f"[ESPN API] Parsed {len(ownership_data)} players")
     return ownership_data
-
-
-def normalize_player_name(name):
-    name = re.sub(r'\s+(Jr\.|Sr\.|III|IV|II)$', '', name, flags=re.IGNORECASE)
-    if ',' in name:
-        parts = name.split(',')
-        if len(parts) == 2:
-            last, first = parts[0].strip(), parts[1].strip()
-            name = f"{first} {last}"
-    name = re.sub(r'\s+[A-Z]\.\s+', ' ', name)
-    name = ' '.join(name.split())
-    return name.strip()
 
 
 def merge_ownership_data(espn_data, previous_data):
     merged = {}
     for player, info in espn_data.items():
-        prev_own = previous_data.get(player, {}).get('espn_ownership', 0)
-        espn_own = info.get('ownership', 0)
+        prev_own   = previous_data.get(player, {}).get('espn_ownership', 0)
+        espn_own   = info['ownership']
         espn_change = info.get('change', espn_own - prev_own)
 
         merged[player] = {
             'espn_ownership': espn_own,
-            'espn_change': espn_change,
-            'avg_change': espn_change,
-            'position': info.get('position', 'NA'),
-            'multi_pos': info.get('multi_pos', ''),
-            'team': info.get('team', ''),
-            'injury_status': info.get('injury_status', 'ACTIVE'),
-            'espn_id': info.get('espn_id'),
-            'espn_stats': info.get('espn_stats', {}),
-            'games_played': info.get('games_played', 0),
+            'espn_change':    espn_change,
+            'avg_change':     espn_change,
+            'position':       info.get('position', 'NA'),
+            'multi_pos':      info.get('multi_pos', ''),
+            'team':           info.get('team', ''),
+            'injury_status':  info.get('injury_status', 'ACTIVE'),
+            'games_played':   info.get('games_played', 0),
+            'espn_id':        info.get('espn_id'),
         }
-
     return merged
 
 
-def filter_trending_players(merged_data, threshold=OWNERSHIP_THRESHOLD):
-    """Top 5 adds — positive ownership change, under 50% owned unless spiking."""
+def filter_adds(merged_data, position_group):
+    """
+    Return top 5 adds for either pitchers or hitters.
+    Must have positive ownership change and be under MAX_OWNERSHIP
+    unless spiking over SPIKE_THRESHOLD.
+    """
     adds = []
-
     for player, data in merged_data.items():
-        own = data['espn_ownership']
+        pos    = data['position']
+        own    = data['espn_ownership']
         change = data['avg_change']
 
+        if pos not in position_group:
+            continue
         if change <= 0:
             continue
-
         if own > MAX_OWNERSHIP and change < SPIKE_THRESHOLD:
             continue
 
-        # Soft flag IL10/DTD but don't exclude — Claude can mention it
         adds.append({'name': player, **data})
 
     adds.sort(key=lambda x: x['avg_change'], reverse=True)
-    print(f"[Filter] Found {len(adds)} players with positive ownership change")
     return adds[:TOP_N]
 
 
-async def fetch_schedule(session, team_abbrev, days=7):
-    """
-    Fetch upcoming starts/games for a team from MLB Stats API.
-    Returns list of {date, opponent, home} for next N days.
-    """
-    TEAM_ID_MAP = {
-        'BAL':110,'BOS':111,'LAA':108,'CHW':145,'CLE':114,'DET':116,'KC':118,
-        'MIL':158,'MIN':142,'NYY':147,'OAK':133,'SEA':136,'TEX':140,'TOR':141,
-        'ATL':144,'CHC':112,'CIN':113,'HOU':117,'LAD':119,'WSH':120,'NYM':121,
-        'PHI':143,'PIT':134,'STL':138,'SD':135,'SF':137,'COL':115,'MIA':146,
-        'ARI':109,'TB':139,
-    }
-    team_id = TEAM_ID_MAP.get(team_abbrev)
-    if not team_id:
-        return []
-
-    start = datetime.now().strftime('%Y-%m-%d')
-    end = (datetime.now() + timedelta(days=days)).strftime('%Y-%m-%d')
-    url = f"https://statsapi.mlb.com/api/v1/schedule?teamId={team_id}&startDate={start}&endDate={end}&sportId=1"
-
-    try:
-        async with session.get(url, timeout=10) as r:
-            if r.status != 200:
-                return []
-            data = await r.json()
-            games = []
-            for date_entry in data.get('dates', []):
-                for game in date_entry.get('games', []):
-                    home_team = game.get('teams', {}).get('home', {}).get('team', {}).get('abbreviation', '')
-                    away_team = game.get('teams', {}).get('away', {}).get('team', {}).get('abbreviation', '')
-                    is_home = home_team == team_abbrev
-                    opponent = away_team if is_home else home_team
-                    games.append({
-                        'date': date_entry['date'],
-                        'opponent': opponent,
-                        'home': is_home,
-                    })
-            return games
-    except Exception:
-        return []
-
-
 async def fetch_player_id(session, player_name):
-    base_url = "https://statsapi.mlb.com/api/v1"
     try:
-        url = f"{base_url}/people/search?names={player_name}"
+        url = f"https://statsapi.mlb.com/api/v1/people/search?names={player_name}"
         async with session.get(url, timeout=10) as r:
             if r.status != 200:
                 return None
@@ -296,12 +234,10 @@ async def fetch_player_id(session, player_name):
 
 
 async def fetch_splits(session, player_id, days):
-    base_url = "https://statsapi.mlb.com/api/v1"
-    end_date = datetime.now().strftime('%Y-%m-%d')
+    end_date   = datetime.now().strftime('%Y-%m-%d')
     start_date = (datetime.now() - timedelta(days=days)).strftime('%Y-%m-%d')
-    url = (f"{base_url}/people/{player_id}/stats"
-           f"?stats=statsSingleSeason&season=2026"
-           f"&startDate={start_date}&endDate={end_date}")
+    url = (f"https://statsapi.mlb.com/api/v1/people/{player_id}/stats"
+           f"?stats=statsSingleSeason&season=2026&startDate={start_date}&endDate={end_date}")
     try:
         async with session.get(url, timeout=10) as r:
             if r.status != 200:
@@ -316,57 +252,47 @@ async def fetch_splits(session, player_id, days):
     return {}
 
 
-async def fetch_savant_pitcher_metrics(session):
-    """Fetch pitcher Savant leaderboard — K%, BB%, GB%."""
+async def fetch_schedule(session, team_abbrev, days=7):
+    TEAM_ID_MAP = {
+        'BAL':110,'BOS':111,'LAA':108,'CHW':145,'CLE':114,'DET':116,'KC':118,
+        'MIL':158,'MIN':142,'NYY':147,'OAK':133,'SEA':136,'TEX':140,'TOR':141,
+        'ATL':144,'CHC':112,'CIN':113,'HOU':117,'LAD':119,'WSH':120,'NYM':121,
+        'PHI':143,'PIT':134,'STL':138,'SD':135,'SF':137,'COL':115,'MIA':146,
+        'ARI':109,'TB':139,
+    }
+    team_id = TEAM_ID_MAP.get(team_abbrev)
+    if not team_id:
+        return []
+    start = datetime.now().strftime('%Y-%m-%d')
+    end   = (datetime.now() + timedelta(days=days)).strftime('%Y-%m-%d')
+    url   = f"https://statsapi.mlb.com/api/v1/schedule?teamId={team_id}&startDate={start}&endDate={end}&sportId=1"
     try:
-        url = (
-            "https://baseballsavant.mlb.com/leaderboard/expected_statistics"
-            "?type=pitcher&year=2026&position=&team=&min=5&csv=true"
-        )
-        async with session.get(url, timeout=15) as r:
+        async with session.get(url, timeout=10) as r:
             if r.status != 200:
-                return {}
-            text = await r.text()
-            lines = text.strip().split("\n")
-            if len(lines) < 2:
-                return {}
-            headers = [h.strip().strip('"') for h in lines[0].split(",")]
-            cache = {}
-            for line in lines[1:]:
-                parts = [p.strip().strip('"') for p in line.split(",")]
-                if len(parts) < len(headers):
-                    continue
-                row = dict(zip(headers, parts))
-                pid = row.get('player_id', '')
-                if pid:
-                    cache[pid] = {
-                        'xera':    row.get('est_woba', 'N/A'),
-                        'k_pct':   row.get('strikeout', 'N/A'),
-                        'bb_pct':  row.get('walk', 'N/A'),
-                        'gb_pct':  row.get('groundballs_percent', 'N/A'),
-                    }
-            return cache
-    except Exception as e:
-        print(f"[Savant Pitcher] Fetch failed: {e}")
-        return {}
+                return []
+            data = await r.json()
+            games = []
+            for date_entry in data.get('dates', []):
+                for game in date_entry.get('games', []):
+                    home = game.get('teams', {}).get('home', {}).get('team', {}).get('abbreviation', '')
+                    away = game.get('teams', {}).get('away', {}).get('team', {}).get('abbreviation', '')
+                    is_home = home == team_abbrev
+                    games.append({'date': date_entry['date'], 'opponent': away if is_home else home, 'home': is_home})
+            return games
+    except Exception:
+        return []
 
 
 async def fetch_recent_stats(player_names, merged_data=None):
-    """
-    Fetch last-7 + last-14 splits, Savant hitter + pitcher metrics,
-    and upcoming schedule for each player.
-    """
+    """Fetch last-7 + last-14 splits, Savant metrics, and schedule for each player."""
     print(f"[MLB Stats] Fetching stats for {len(player_names)} players...")
     stats = {}
 
     async with aiohttp.ClientSession() as session:
-        # Pre-fetch Savant hitter leaderboard
+        # Hitter Savant leaderboard
         hitter_savant = {}
         try:
-            url = (
-                "https://baseballsavant.mlb.com/leaderboard/expected_statistics"
-                "?type=batter&year=2026&position=&team=&min=5&csv=true"
-            )
+            url = "https://baseballsavant.mlb.com/leaderboard/expected_statistics?type=batter&year=2026&position=&team=&min=5&csv=true"
             async with session.get(url, timeout=15) as r:
                 if r.status == 200:
                     text = await r.text()
@@ -389,13 +315,36 @@ async def fetch_recent_stats(player_names, merged_data=None):
                                     'k_pct':        row.get('strikeout', 'N/A'),
                                     'bb_pct':       row.get('walk', 'N/A'),
                                 }
-            print(f"[Savant] Loaded {len(hitter_savant)} hitters from leaderboard")
+            print(f"[Savant] {len(hitter_savant)} hitters loaded")
         except Exception as e:
             print(f"[Savant] Hitter fetch failed: {e}")
 
-        # Pre-fetch Savant pitcher leaderboard
-        pitcher_savant = await fetch_savant_pitcher_metrics(session)
-        print(f"[Savant] Loaded {len(pitcher_savant)} pitchers from leaderboard")
+        # Pitcher Savant leaderboard
+        pitcher_savant = {}
+        try:
+            url = "https://baseballsavant.mlb.com/leaderboard/expected_statistics?type=pitcher&year=2026&position=&team=&min=5&csv=true"
+            async with session.get(url, timeout=15) as r:
+                if r.status == 200:
+                    text = await r.text()
+                    lines = text.strip().split("\n")
+                    if len(lines) >= 2:
+                        headers = [h.strip().strip('"') for h in lines[0].split(",")]
+                        for line in lines[1:]:
+                            parts = [p.strip().strip('"') for p in line.split(",")]
+                            if len(parts) < len(headers):
+                                continue
+                            row = dict(zip(headers, parts))
+                            pid = row.get('player_id', '')
+                            if pid:
+                                pitcher_savant[pid] = {
+                                    'xera':   row.get('est_woba', 'N/A'),
+                                    'k_pct':  row.get('strikeout', 'N/A'),
+                                    'bb_pct': row.get('walk', 'N/A'),
+                                    'gb_pct': row.get('groundballs_percent', 'N/A'),
+                                }
+            print(f"[Savant] {len(pitcher_savant)} pitchers loaded")
+        except Exception as e:
+            print(f"[Savant] Pitcher fetch failed: {e}")
 
         for player in player_names:
             try:
@@ -406,30 +355,22 @@ async def fetch_recent_stats(player_names, merged_data=None):
                 last7  = await fetch_splits(session, player_id, 7)
                 last14 = await fetch_splits(session, player_id, 14)
 
-                # Determine if pitcher or hitter for Savant lookup
-                position = (merged_data or {}).get(player, {}).get('position', 'OF')
-                is_pitcher = position in ('SP', 'RP')
+                pos        = (merged_data or {}).get(player, {}).get('position', 'OF')
+                is_pitcher = pos in PITCHERS
+                savant     = pitcher_savant.get(str(player_id), {}) if is_pitcher else hitter_savant.get(str(player_id), {})
 
-                if is_pitcher:
-                    savant = pitcher_savant.get(str(player_id), {})
-                else:
-                    savant = hitter_savant.get(str(player_id), {})
-
-                # Fetch upcoming schedule
-                team = (merged_data or {}).get(player, {}).get('team', '')
-                schedule = await fetch_schedule(session, team) if team else []
-
-                # Count starts in next 7 days for pitchers
+                team        = (merged_data or {}).get(player, {}).get('team', '')
+                schedule    = await fetch_schedule(session, team) if team else []
                 starts_next_7 = len(schedule) if is_pitcher else 0
 
                 stats[player] = {
-                    'last7':          last7,
-                    'last14':         last14,
-                    'savant':         savant,
-                    'mlb_id':         player_id,
-                    'schedule':       schedule,
-                    'starts_next_7':  starts_next_7,
-                    'is_pitcher':     is_pitcher,
+                    'last7':         last7,
+                    'last14':        last14,
+                    'savant':        savant,
+                    'mlb_id':        player_id,
+                    'schedule':      schedule,
+                    'starts_next_7': starts_next_7,
+                    'is_pitcher':    is_pitcher,
                 }
 
             except Exception as e:
@@ -441,30 +382,23 @@ async def fetch_recent_stats(player_names, merged_data=None):
 
 
 async def fetch_recent_news(player_names):
-    print(f"[News Fetcher] Fetching news for {len(player_names)} players...")
     news = {}
     async with aiohttp.ClientSession() as session:
         for player in player_names:
             try:
-                search_query = player.replace(' ', '+')
-                url = f"https://www.espn.com/apis/fantasy/v2/news?player={search_query}"
-                async with session.get(url, timeout=10) as response:
-                    if response.status == 200:
-                        data = await response.json()
+                url = f"https://www.espn.com/apis/fantasy/v2/news?player={player.replace(' ', '+')}"
+                async with session.get(url, timeout=10) as r:
+                    if r.status == 200:
+                        data = await r.json()
                         if data.get('headlines'):
                             news[player] = data['headlines'][0]['headline']
             except:
                 continue
-    print(f"[News Fetcher] Retrieved news for {len(news)} players")
     return news
 
 
 async def find_breakout_candidates(merged_data, stats, recent_recommendations):
-    """
-    Under 35% owned, at least 5 PA or 1 IP in last 14 days,
-    not recommended in last 10 days, score >= 2.
-    Pitchers and hitters scored separately.
-    """
+    """2 hitters + 2 pitchers under 35% owned with strong underlying metrics."""
     print("[Breakout] Finding breakout candidates...")
 
     cutoff = (datetime.now() - timedelta(days=10)).strftime('%Y-%m-%d')
@@ -473,9 +407,12 @@ async def find_breakout_candidates(merged_data, stats, recent_recommendations):
         if r.get('date', '0000-00-00') >= cutoff
     }
 
-    candidates = []
+    hitter_candidates  = []
+    pitcher_candidates = []
+
     for name, data in merged_data.items():
         own = data['espn_ownership']
+        pos = data['position']
 
         if own < 1.0 or own > 35.0:
             continue
@@ -488,7 +425,7 @@ async def find_breakout_candidates(merged_data, stats, recent_recommendations):
         savant = player_stats.get('savant', {})
         last7  = player_stats.get('last7', {})
         last14 = player_stats.get('last14', {})
-        is_pitcher = player_stats.get('is_pitcher', False)
+        is_pitcher = pos in PITCHERS
 
         pa14 = int(last14.get('plateAppearances', 0) or last14.get('atBats', 0) or 0)
         ip14 = float(last14.get('inningsPitched', 0) or 0)
@@ -498,214 +435,191 @@ async def find_breakout_candidates(merged_data, stats, recent_recommendations):
         score = 0.0
 
         if is_pitcher:
-            # Pitcher scoring: K%, BB%, GB%, K/IP trend
             try:
                 k_pct = float(savant.get('k_pct', 0) or 0)
-                if k_pct >= 28:
-                    score += 3
-                elif k_pct >= 22:
-                    score += 2
-                elif k_pct >= 18:
-                    score += 1
-            except (ValueError, TypeError):
-                pass
-
+                if k_pct >= 28: score += 3
+                elif k_pct >= 22: score += 2
+                elif k_pct >= 18: score += 1
+            except: pass
             try:
                 bb_pct = float(savant.get('bb_pct', 0) or 0)
-                if bb_pct <= 7:
-                    score += 2
-                elif bb_pct <= 10:
-                    score += 1
-            except (ValueError, TypeError):
-                pass
-
+                if bb_pct <= 7: score += 2
+                elif bb_pct <= 10: score += 1
+            except: pass
             try:
                 k7  = int(last7.get('strikeOuts', 0) or 0)
                 ip7 = float(last7.get('inningsPitched', 0) or 0)
-                if ip7 > 0 and (k7 / ip7) >= 1.2:
-                    score += 3
-                elif ip7 > 0 and (k7 / ip7) >= 1.0:
-                    score += 2
-            except (ValueError, TypeError):
-                pass
-
-            # Upcoming starts bonus
+                if ip7 > 0 and (k7 / ip7) >= 1.2: score += 3
+                elif ip7 > 0 and (k7 / ip7) >= 1.0: score += 2
+            except: pass
             if player_stats.get('starts_next_7', 0) >= 2:
                 score += 1
-
         else:
-            # Hitter scoring: xwOBA, barrel rate, hard hit%, trend
             try:
                 xwoba = float(savant.get('xwoba', 0) or 0)
-                if xwoba >= 0.370:
-                    score += 3
-                elif xwoba >= 0.340:
-                    score += 2
-                elif xwoba >= 0.310:
-                    score += 1
-            except (ValueError, TypeError):
-                pass
-
+                if xwoba >= 0.370: score += 3
+                elif xwoba >= 0.340: score += 2
+                elif xwoba >= 0.310: score += 1
+            except: pass
             try:
                 barrel = float(savant.get('barrel_rate', 0) or 0)
-                if barrel >= 12:
-                    score += 3
-                elif barrel >= 8:
-                    score += 2
-                elif barrel >= 5:
-                    score += 1
-            except (ValueError, TypeError):
-                pass
-
+                if barrel >= 12: score += 3
+                elif barrel >= 8: score += 2
+                elif barrel >= 5: score += 1
+            except: pass
             try:
                 hard_hit = float(savant.get('hard_hit_pct', 0) or 0)
-                if hard_hit >= 48:
-                    score += 2
-                elif hard_hit >= 40:
-                    score += 1
-            except (ValueError, TypeError):
-                pass
-
+                if hard_hit >= 48: score += 2
+                elif hard_hit >= 40: score += 1
+            except: pass
             try:
                 avg7  = float(last7.get('avg', 0) or 0)
                 avg14 = float(last14.get('avg', 0) or 0)
-                if avg7 > avg14 + 0.030:
-                    score += 2
-                elif avg7 > avg14:
-                    score += 1
-            except (ValueError, TypeError):
-                pass
+                if avg7 > avg14 + 0.030: score += 2
+                elif avg7 > avg14: score += 1
+            except: pass
 
-        if score >= 2:
-            candidates.append({
-                'name':           name,
-                'score':          score,
-                'espn_ownership': data['espn_ownership'],
-                'espn_change':    data['espn_change'],
-                'position':       data['position'],
-                'multi_pos':      data.get('multi_pos', ''),
-                'team':           data.get('team', ''),
-                'injury_status':  data.get('injury_status', 'ACTIVE'),
-                'games_played':   data.get('games_played', 0),
-                'last7':          last7,
-                'last14':         last14,
-                'savant':         savant,
-                'schedule':       player_stats.get('schedule', []),
-                'starts_next_7':  player_stats.get('starts_next_7', 0),
-                'is_pitcher':     is_pitcher,
-            })
+        if score < 2:
+            continue
 
-    candidates.sort(key=lambda x: x['score'], reverse=True)
-    top3 = candidates[:3]
-    print(f"[Breakout] Selected {len(top3)} candidates from {len(candidates)} scored players")
-    return top3
+        candidate = {
+            'name':           name,
+            'score':          score,
+            'espn_ownership': own,
+            'espn_change':    data['espn_change'],
+            'position':       pos,
+            'multi_pos':      data.get('multi_pos', ''),
+            'team':           data.get('team', ''),
+            'injury_status':  data.get('injury_status', 'ACTIVE'),
+            'games_played':   data.get('games_played', 0),
+            'last7':          last7,
+            'last14':         last14,
+            'savant':         savant,
+            'starts_next_7':  player_stats.get('starts_next_7', 0),
+            'is_pitcher':     is_pitcher,
+        }
+
+        if is_pitcher:
+            pitcher_candidates.append(candidate)
+        else:
+            hitter_candidates.append(candidate)
+
+    hitter_candidates.sort(key=lambda x: x['score'], reverse=True)
+    pitcher_candidates.sort(key=lambda x: x['score'], reverse=True)
+
+    top2_hitters  = hitter_candidates[:2]
+    top2_pitchers = pitcher_candidates[:2]
+
+    print(f"[Breakout] {len(top2_pitchers)} pitchers, {len(top2_hitters)} hitters selected")
+    return top2_pitchers, top2_hitters
 
 
-async def generate_claude_analysis(adds, breakout_candidates, stats, news):
-    """Claude analyzes adds + breakout candidates."""
+async def generate_claude_analysis(pitcher_adds, hitter_adds, breakout_pitchers, breakout_hitters, stats, news):
+    """Single Claude call covering all three embeds."""
     print("[Claude] Generating analysis...")
 
-    adds_context = []
-    for player in adds:
-        player_stats = stats.get(player['name'], {})
-        schedule = player_stats.get('schedule', [])
-        starts_next_7 = player_stats.get('starts_next_7', 0)
-        pos = player['position']
-        is_pitcher = pos in ('SP', 'RP')
+    def build_add_context(players):
+        out = []
+        for p in players:
+            ps = stats.get(p['name'], {})
+            entry = {
+                'name':           p['name'],
+                'position':       p['position'],
+                'team':           p.get('team', ''),
+                'multi_pos':      p.get('multi_pos', ''),
+                'espn_owned':     p['espn_ownership'],
+                'espn_change':    p['espn_change'],
+                'injury_status':  p.get('injury_status', 'ACTIVE'),
+                'last7':          ps.get('last7', {}),
+                'news':           news.get(p['name'], ''),
+            }
+            if p['position'] in PITCHERS:
+                entry['starts_next_7'] = ps.get('starts_next_7', 0)
+                entry['upcoming_opponents'] = [g['opponent'] for g in ps.get('schedule', [])[:2]]
+            out.append(entry)
+        return out
 
-        entry = {
-            'name':         player['name'],
-            'position':     pos,
-            'team':         player.get('team', ''),
-            'multi_pos':    player.get('multi_pos', ''),
-            'espn_owned':   player['espn_ownership'],
-            'espn_change':  player['espn_change'],
-            'injury_status': player.get('injury_status', 'ACTIVE'),
-            'last7':        player_stats.get('last7', {}),
-            'news':         news.get(player['name'], ''),
-        }
-        if is_pitcher:
-            entry['starts_next_7'] = starts_next_7
-            entry['upcoming_opponents'] = [g['opponent'] for g in schedule[:2]]
-        adds_context.append(entry)
+    def build_breakout_context(players):
+        out = []
+        for p in players:
+            entry = {
+                'name':          p['name'],
+                'position':      p['position'],
+                'team':          p.get('team', ''),
+                'multi_pos':     p.get('multi_pos', ''),
+                'espn_owned':    p['espn_ownership'],
+                'games_played':  p.get('games_played', 0),
+                'injury_status': p.get('injury_status', 'ACTIVE'),
+                'last7':         p['last7'],
+                'last14':        p['last14'],
+                'savant':        p['savant'],
+            }
+            if p['is_pitcher']:
+                entry['starts_next_7'] = p.get('starts_next_7', 0)
+            out.append(entry)
+        return out
 
-    breakout_context = []
-    for player in breakout_candidates:
-        player_stats = stats.get(player['name'], {})
-        pos = player['position']
-        is_pitcher = pos in ('SP', 'RP')
+    prompt = f"""You are a sharp, opinionated fantasy baseball analyst. Today is {datetime.now(ZoneInfo('America/New_York')).strftime('%B %d, %Y')}. It is 10 days into the 2026 MLB season.
 
-        entry = {
-            'name':          player['name'],
-            'position':      pos,
-            'team':          player.get('team', ''),
-            'multi_pos':     player.get('multi_pos', ''),
-            'espn_owned':    player['espn_ownership'],
-            'games_played':  player.get('games_played', 0),
-            'injury_status': player.get('injury_status', 'ACTIVE'),
-            'last7':         player['last7'],
-            'last14':        player['last14'],
-            'savant':        player['savant'],
-        }
-        if is_pitcher:
-            entry['starts_next_7'] = player.get('starts_next_7', 0)
-            entry['upcoming_opponents'] = [g['opponent'] for g in player.get('schedule', [])[:2]]
-        breakout_context.append(entry)
+TOP PITCHER ADDS:
+{json.dumps(build_add_context(pitcher_adds), indent=2)}
 
-    prompt = f"""You are a sharp, opinionated fantasy baseball analyst. Today is {datetime.now(ZoneInfo('America/New_York')).strftime('%B %d, %Y')}. It is 10 days into the 2026 MLB season — small samples, but real signals exist.
+TOP HITTER ADDS:
+{json.dumps(build_add_context(hitter_adds), indent=2)}
 
-TOP WAIVER WIRE ADDS (sorted by 7-day ownership spike):
-{json.dumps(adds_context, indent=2)}
+BREAKOUT PITCHER CANDIDATES (under 35% owned):
+{json.dumps(build_breakout_context(breakout_pitchers), indent=2)}
 
-BREAKOUT CANDIDATES (under 35% owned, strong underlying metrics):
-{json.dumps(breakout_context, indent=2)}
+BREAKOUT HITTER CANDIDATES (under 35% owned):
+{json.dumps(build_breakout_context(breakout_hitters), indent=2)}
 
-Respond ONLY with a valid JSON object (no markdown, no explanation):
+Respond ONLY with a valid JSON object. No markdown, no explanation:
 {{
-  "intro": "1-2 punchy sentences on today's waiver wire landscape. Appears below the player list as editorial context.",
-  "add_comments": {{
-    "player_name": "2 sentences max. First: stat-backed take on why to add or avoid. Second: one piece of context that changes the picture — upcoming starts, opponent quality, injury flag, multi-position value, or workload concern. Skip second sentence if it would be filler. No ellipses.",
-    "...": "..."
+  "pitcher_add_comments": {{
+    "player_name": "2 sentences max. First: specific stat-backed take. Second: one key context — starts, health, matchup, regression risk. Skip second if filler. No ellipses."
+  }},
+  "hitter_add_comments": {{
+    "player_name": "2 sentences max. Same rules as pitchers."
   }},
   "breakout_writeups": [
     {{
       "name": "player name",
       "headline": "5-8 word punchy header",
       "league_fit": "Roto" or "H2H" or "Both",
-      "why": "2-3 sentences. Lead with most compelling metric. Add schedule/role/trend context. Third sentence only if it sharpens the argument. No ellipses.",
-      "faab_range": "e.g. 5-10% or $3-5 or Low priority"
+      "why": "2-3 sentences. Lead with the best metric. Add role/trend context. Third sentence only if it materially adds — not filler. No ellipses.",
+      "faab_range": "e.g. 5-10% or Low priority"
     }}
   ],
-  "spicy_take": "2-3 sentences. Bold overall market take — name names, cite numbers. Third sentence only if it materially sharpens the argument. No ellipses."
+  "pitcher_intro": "One punchy sentence on the overall pitcher waiver landscape today.",
+  "hitter_intro": "One punchy sentence on the overall hitter waiver landscape today.",
+  "breakout_intro": "One punchy sentence setting up the breakout candidates."
 }}
 
-Rules: Be controversial. Be specific. Reference actual stats. No filler. No ellipses anywhere."""
+Be opinionated. Reference actual stats. No filler. No ellipses."""
 
     try:
         message = anthropic_client.messages.create(
             model="claude-haiku-4-5-20251001",
-            max_tokens=2000,
+            max_tokens=2500,
             messages=[{"role": "user", "content": prompt}]
         )
         response_text = re.sub(r'```json\s*|\s*```', '', message.content[0].text)
         analysis = json.loads(response_text)
         print("[Claude] Analysis generated successfully")
         return analysis
-
     except Exception as e:
-        print(f"[Claude] Error generating analysis: {e}")
+        print(f"[Claude] Error: {e}")
         return {
-            "intro": "Today's waiver wire has some interesting names worth a look.",
-            "add_comments": {},
+            "pitcher_add_comments": {}, "hitter_add_comments": {},
             "breakout_writeups": [],
-            "spicy_take": "Do your homework before burning FAAB.",
+            "pitcher_intro": "", "hitter_intro": "", "breakout_intro": "",
         }
 
 
 def format_stats_line(stats, position):
     if not stats:
         return ""
-    if position in ['SP', 'RP']:
+    if position in PITCHERS:
         era  = float(stats.get('era', 0) or 0)
         ip   = stats.get('inningsPitched', '0')
         k    = int(stats.get('strikeOuts', 0) or 0)
@@ -719,104 +633,112 @@ def format_stats_line(stats, position):
         return f"Last 7: {avg} AVG, {hr} HR, {rbi} RBI, {sb} SB"
 
 
-def safe_truncate(text, limit=1024):
-    """Trim to last complete sentence within Discord field limit."""
-    if len(text) <= limit:
-        return text
-    truncated = text[:limit]
-    last_period = max(truncated.rfind('. '), truncated.rfind('.\n'))
-    return truncated[:last_period + 1] if last_period > 0 else truncated
+def build_header():
+    """Shared header line for all three embeds."""
+    return f"⚡ **The Wire Tap | Board Regs Fantasy Baseball**\n{datetime.now(ZoneInfo('America/New_York')).strftime('%A, %B %d, %Y')}"
 
 
-def build_discord_embed(adds, breakout_candidates, analysis, stats, news):
+def build_adds_embed(players, analysis, stats, news, is_pitcher):
+    """Build a top-5 adds embed for either pitchers or hitters."""
+    comments_key = "pitcher_add_comments" if is_pitcher else "hitter_add_comments"
+    intro_key    = "pitcher_intro" if is_pitcher else "hitter_intro"
+    title        = "🔥 TOP PITCHER ADDS" if is_pitcher else "🔥 TOP HITTER ADDS"
+    color        = 0xE74C3C if is_pitcher else 0x2ECC71  # red for pitchers, green for hitters
+
     embed = discord.Embed(
-        title="⚡ The Wire Tap | Board Regs Fantasy Baseball",
-        description=datetime.now(ZoneInfo('America/New_York')).strftime('%A, %B %d, %Y'),
-        color=0x1DB954,
+        title=title,
+        description=build_header(),
+        color=color,
         timestamp=datetime.now(ZoneInfo('UTC'))
     )
 
-    # ── SECTION 1: TOP ADDS ──
-    adds_text = ""
-    for i, player in enumerate(adds, 1):
-        emoji = "🔥" if i <= 3 else "📈"
-        name = player['name']
-        pos = player['position']
-        team = player.get('team', '')
-        multi_pos = player.get('multi_pos', '')
-        espn_own = f"{player['espn_ownership']:.1f}%"
-        espn_change = f"⬆️ +{player['espn_change']:.1f}%" if player['espn_change'] > 0 else f"⬇️ {player['espn_change']:.1f}%"
+    field_text = ""
+    for i, player in enumerate(players, 1):
+        emoji  = "🔥" if i <= 3 else "📈"
+        name   = player['name']
+        pos    = player['position']
+        team   = player.get('team', '')
+        multi  = player.get('multi_pos', '')
         injury = player.get('injury_status', 'ACTIVE')
+        own    = f"{player['espn_ownership']:.1f}%"
+        change = f"⬆️ +{player['espn_change']:.1f}%" if player['espn_change'] > 0 else f"⬇️ {player['espn_change']:.1f}%"
 
-        name_line = f"**{name} | {pos}"
-        if team:
-            name_line += f" | {team}"
-        name_line += "**"
+        name_line = f"**{name} | {pos} | {team}**" if team else f"**{name} | {pos}**"
         if injury not in ('ACTIVE', ''):
-            name_line += f" ⚠️ {injury.replace('_', ' ').title()}"
+            name_line += f" ⚠️"
+        if multi:
+            name_line += f" [{multi}]"
 
-        adds_text += f"{emoji} {name_line}\n"
-        adds_text += f"   ESPN: {espn_own} owned ({espn_change})"
+        field_text += f"{emoji} {name_line}\n"
+        field_text += f"   ESPN: {own} owned ({change})\n"
 
-        # Multi-position flag
-        if multi_pos:
-            adds_text += f" [{multi_pos}]"
-        adds_text += "\n"
-
-        player_stats = stats.get(name, {})
-        stats_line = format_stats_line(player_stats.get('last7', {}), pos)
+        ps = stats.get(name, {})
+        stats_line = format_stats_line(ps.get('last7', {}), pos)
         if stats_line:
-            adds_text += f"   {stats_line}\n"
+            field_text += f"   {stats_line}\n"
 
-        comment = analysis.get('add_comments', {}).get(name, news.get(name, ''))
+        comment = analysis.get(comments_key, {}).get(name, news.get(name, ''))
         if comment:
-            adds_text += f"   📰 {comment}\n"
-        adds_text += "\n"
+            field_text += f"   📰 {comment}\n"
+
+        field_text += "\n"
 
     embed.add_field(
-        name="🎯 TOP WAIVER WIRE ADDS",
-        value=safe_truncate(adds_text) or "No significant adds",
+        name="\u200b",
+        value=safe_truncate(field_text) or "No significant adds today.",
         inline=False
     )
 
-
-    # Intro as standalone context below adds
-    intro = analysis.get('intro', '')
+    intro = analysis.get(intro_key, '')
     if intro:
-        embed.add_field(name="​", value=f"*{intro}*", inline=False)
+        embed.add_field(name="\u200b", value=f"*{intro}*", inline=False)
 
-    # ── SECTION 2: BREAKOUT CANDIDATES ──
-    breakout_writeups = analysis.get('breakout_writeups', [])
-    breakout_text = ""
-    for player in breakout_candidates:
-        name = player['name']
-        pos = player['position']
-        team = player.get('team', '')
-        multi_pos = player.get('multi_pos', '')
-        own = f"{player['espn_ownership']:.1f}%"
-        savant = player.get('savant', {})
+    embed.set_footer(text=f"Updated daily at 7:00 AM ET • {datetime.now(ZoneInfo('America/New_York')).strftime('%B %d, %Y')}")
+    return embed
+
+
+def build_breakout_embed(breakout_pitchers, breakout_hitters, analysis):
+    """Build the breakout candidates embed with 2 pitchers + 2 hitters."""
+    embed = discord.Embed(
+        title="🚀 BREAKOUT CANDIDATES",
+        description=build_header(),
+        color=0x9B59B6,  # purple
+        timestamp=datetime.now(ZoneInfo('UTC'))
+    )
+
+    intro = analysis.get('breakout_intro', '')
+    if intro:
+        embed.add_field(name="\u200b", value=f"*{intro}*", inline=False)
+
+    writeups = analysis.get('breakout_writeups', [])
+
+    def render_candidate(player):
+        name   = player['name']
+        pos    = player['position']
+        team   = player.get('team', '')
+        multi  = player.get('multi_pos', '')
+        own    = f"{player['espn_ownership']:.1f}%"
         injury = player.get('injury_status', 'ACTIVE')
+        savant = player.get('savant', {})
 
-        writeup = next((w for w in breakout_writeups if w.get('name', '').lower() == name.lower()), {})
-        headline = writeup.get('headline', 'Under-the-radar pick')
-        why = writeup.get('why', '')
-        league_fit = writeup.get('league_fit', '')
-        faab = writeup.get('faab_range', '')
+        wu = next((w for w in writeups if w.get('name', '').lower() == name.lower()), {})
+        headline   = wu.get('headline', 'Under-the-radar pick')
+        league_fit = wu.get('league_fit', '')
+        why        = wu.get('why', '')
+        faab       = wu.get('faab_range', '')
 
-        name_line = f"**{name} | {pos}"
-        if team:
-            name_line += f" | {team}"
-        name_line += f"** ({own} owned)"
+        name_line = f"**{name} | {pos} | {team}**" if team else f"**{name} | {pos}**"
+        name_line += f" ({own} owned)"
         if injury not in ('ACTIVE', ''):
-            name_line += f" ⚠️"
-        if multi_pos:
-            name_line += f" [{multi_pos}]"
+            name_line += " ⚠️"
+        if multi:
+            name_line += f" [{multi}]"
 
-        breakout_text += f"💎 {name_line}\n"
-        breakout_text += f"   *{headline}*"
+        text = f"💎 {name_line}\n"
+        text += f"   *{headline}*"
         if league_fit:
-            breakout_text += f" [{league_fit}]"
-        breakout_text += "\n"
+            text += f" [{league_fit}]"
+        text += "\n"
 
         # Savant metrics
         metrics = []
@@ -826,121 +748,139 @@ def build_discord_embed(adds, breakout_candidates, analysis, stats, news):
             metrics.append(f"Barrel%: {savant['barrel_rate']}")
         if savant.get('hard_hit_pct') and savant['hard_hit_pct'] != 'N/A':
             metrics.append(f"HH%: {savant['hard_hit_pct']}")
-        if savant.get('k_pct') and savant['k_pct'] != 'N/A' and pos in ('SP', 'RP'):
+        if savant.get('k_pct') and savant['k_pct'] != 'N/A' and pos in PITCHERS:
             metrics.append(f"K%: {savant['k_pct']}")
+        if savant.get('xera') and savant['xera'] != 'N/A' and pos in PITCHERS:
+            metrics.append(f"xERA: {savant['xera']}")
         if metrics:
-            breakout_text += f"   📊 {' • '.join(metrics)}\n"
-
+            text += f"   📊 {' • '.join(metrics)}\n"
 
         if why:
-            breakout_text += f"   {why}\n"
+            text += f"   {why}\n"
         if faab:
-            breakout_text += f"   💰 FAAB: {faab}\n"
-        breakout_text += "\n"
+            text += f"   💰 FAAB: {faab}\n"
+        text += "\n"
+        return text
 
-    if breakout_text:
+    # Pitchers first
+    if breakout_pitchers:
+        pitcher_text = "".join(render_candidate(p) for p in breakout_pitchers)
         embed.add_field(
-            name="🚀 BREAKOUT CANDIDATES",
-            value=safe_truncate(breakout_text),
+            name="⚾ PITCHERS",
+            value=safe_truncate(pitcher_text),
             inline=False
         )
-    else:
+    
+    # Then hitters
+    if breakout_hitters:
+        hitter_text = "".join(render_candidate(p) for p in breakout_hitters)
         embed.add_field(
-            name="🚀 BREAKOUT CANDIDATES",
-            value="*No candidates cleared the bar today — the Savant data is thin this early. Check back as the sample builds.*",
+            name="🏃 HITTERS",
+            value=safe_truncate(hitter_text),
             inline=False
         )
 
-
-    # ── SECTION 3: SPICY TAKE ──
-    take_text = analysis.get('spicy_take', 'No take today.')
-    embed.add_field(
-        name="🌶️ SHANDLER'S SPICY TAKE",
-        value=safe_truncate(take_text),
-        inline=False
-    )
+    if not breakout_pitchers and not breakout_hitters:
+        embed.add_field(
+            name="\u200b",
+            value="*No candidates cleared the bar today — Savant data is thin this early. Check back as the sample builds.*",
+            inline=False
+        )
 
     embed.set_footer(text=f"Updated daily at 7:00 AM ET • {datetime.now(ZoneInfo('America/New_York')).strftime('%B %d, %Y')}")
     return embed
 
 
 async def post_daily_report():
-    print(f"\n[Waiver Wire Bot] Starting daily report generation at {datetime.now(ZoneInfo('America/New_York'))}")
+    print(f"\n[Waiver Wire Bot] Starting daily report at {datetime.now(ZoneInfo('America/New_York'))}")
 
     try:
         state = load_state()
         previous_ownership = state.get('last_ownership_data', {})
 
-        # Step 1: ESPN ownership data
+        # 1. ESPN ownership
         espn_data = await fetch_espn_ownership()
         if not espn_data:
-            print("[Waiver Wire Bot] ESPN fetch returned no data - skipping post")
+            print("[Waiver Wire Bot] ESPN fetch returned no data — skipping post")
             return
 
-        # Step 2: Merge
+        # 2. Merge
         merged_data = merge_ownership_data(espn_data, previous_ownership)
 
-        # Step 3: Top adds
-        adds = filter_trending_players(merged_data)
+        # 3. Filter adds by type
+        pitcher_adds = filter_adds(merged_data, PITCHERS)
+        hitter_adds  = filter_adds(merged_data, HITTERS)
+        print(f"[Filter] {len(pitcher_adds)} pitcher adds, {len(hitter_adds)} hitter adds")
 
-        # Step 4: Stats — adds + breakout pool
-        all_names = [p['name'] for p in adds]
-        breakout_pool_names = [
+        # 4. Collect all names needing stats
+        add_names = list({p['name'] for p in pitcher_adds + hitter_adds})
+        breakout_pool = [
             name for name, data in merged_data.items()
-            if data['espn_ownership'] <= 35.0 and name not in all_names
-        ][:50]
+            if data['espn_ownership'] <= 35.0 and name not in add_names
+        ][:60]
 
-        stats = await fetch_recent_stats(all_names + breakout_pool_names, merged_data)
-        news = await fetch_recent_news(all_names)
+        stats = await fetch_recent_stats(add_names + breakout_pool, merged_data)
+        news  = await fetch_recent_news(add_names)
 
-        # Step 5: Breakout candidates
-        recent_recommendations = state.get('recommendation_history', [])
-        breakout_candidates = await find_breakout_candidates(merged_data, stats, recent_recommendations)
+        # 5. Breakout candidates
+        recent_recs = state.get('recommendation_history', [])
+        breakout_pitchers, breakout_hitters = await find_breakout_candidates(merged_data, stats, recent_recs)
 
-        # Step 6: Claude
-        analysis = await generate_claude_analysis(adds, breakout_candidates, stats, news)
+        # 6. Claude analysis
+        analysis = await generate_claude_analysis(
+            pitcher_adds, hitter_adds,
+            breakout_pitchers, breakout_hitters,
+            stats, news
+        )
 
-        # Step 7: Build embed
-        embed = build_discord_embed(adds, breakout_candidates, analysis, stats, news)
+        # 7. Build embeds
+        pitcher_embed  = build_adds_embed(pitcher_adds,  analysis, stats, news, is_pitcher=True)
+        hitter_embed   = build_adds_embed(hitter_adds,   analysis, stats, news, is_pitcher=False)
+        breakout_embed = build_breakout_embed(breakout_pitchers, breakout_hitters, analysis)
 
-        # Step 8: Post
+        # 8. Post — pitchers first, then hitters, then breakouts
         channel = client.get_channel(CHANNEL_ID)
         if not channel:
             print(f"[Waiver Wire Bot] Channel {CHANNEL_ID} not found")
             return
 
-        message = await channel.send(embed=embed)
-
         reactions = ['🔥', '💎', '🚀', '🌶️']
-        for emoji in reactions:
-            try:
-                await message.add_reaction(emoji)
-            except:
-                pass
 
-        # Step 9: Save state
-        today = datetime.now(ZoneInfo('America/New_York')).strftime('%Y-%m-%d')
+        for embed in (pitcher_embed, hitter_embed, breakout_embed):
+            try:
+                msg = await channel.send(embed=embed)
+                for emoji in reactions:
+                    try:
+                        await msg.add_reaction(emoji)
+                    except:
+                        pass
+                await asyncio.sleep(1)  # small stagger between embeds
+            except Exception as e:
+                print(f"[Waiver Wire Bot] Failed to post embed: {e}")
+                continue
+
+        # 9. Save state
+        today   = datetime.now(ZoneInfo('America/New_York')).strftime('%Y-%m-%d')
         history = state.get('recommendation_history', [])
-        for player in breakout_candidates:
+        for player in breakout_pitchers + breakout_hitters:
             history.append({
-                'name': player['name'],
-                'date': today,
+                'name':             player['name'],
+                'date':             today,
                 'ownership_at_rec': player['espn_ownership'],
             })
-        cutoff = (datetime.now() - timedelta(days=30)).strftime('%Y-%m-%d')
+        cutoff  = (datetime.now() - timedelta(days=30)).strftime('%Y-%m-%d')
         history = [r for r in history if r.get('date', '0000-00-00') >= cutoff]
 
-        state['last_post_time'] = datetime.now(ZoneInfo('UTC')).isoformat()
-        state['last_ownership_data'] = merged_data
+        state['last_post_time']        = datetime.now(ZoneInfo('UTC')).isoformat()
+        state['last_ownership_data']   = merged_data
         state['recommendation_history'] = history
         save_state(state)
 
-        print(f"[Waiver Wire Bot] Daily report posted successfully at {datetime.now(ZoneInfo('America/New_York'))}")
+        print(f"[Waiver Wire Bot] All embeds posted successfully at {datetime.now(ZoneInfo('America/New_York'))}")
 
     except Exception as e:
         print(f"[Waiver Wire Bot] Error in daily report: {e}")
-        import traceback
-        traceback.print_exc()
+        import traceback; traceback.print_exc()
 
 
 @client.event
@@ -948,7 +888,7 @@ async def on_ready():
     print(f'[Waiver Wire Bot] Logged in as {client.user}')
 
     if os.getenv('WAIVER_WIRE_ENABLED', 'true').lower() == 'false':
-        print("[Waiver Wire Bot] DISABLED via WAIVER_WIRE_ENABLED=false — not scheduling any posts")
+        print("[Waiver Wire Bot] DISABLED via WAIVER_WIRE_ENABLED=false")
         return
 
     if os.getenv('WAIVER_WIRE_TEST_MODE', 'false').lower() == 'true':
@@ -963,7 +903,6 @@ async def on_ready():
         timezone='America/New_York',
         id='daily_waiver_report'
     )
-
     print("[Waiver Wire Bot] Scheduled daily post for 7:00 AM ET")
     scheduler.start()
 
