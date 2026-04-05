@@ -761,16 +761,8 @@ def build_discord_embed(adds, breakout_candidates, analysis, stats, news):
 
         # Multi-position flag
         if multi_pos:
-            adds_text += f" • 🔀 {multi_pos}"
+            adds_text += f" [{multi_pos}]"
         adds_text += "\n"
-
-        # Upcoming starts for pitchers
-        player_stats = stats.get(name, {})
-        starts = player_stats.get('starts_next_7', 0)
-        schedule = player_stats.get('schedule', [])
-        if pos in ('SP', 'RP') and starts > 0:
-            opponents = ', '.join([f"vs {g['opponent']}" if g['home'] else f"@ {g['opponent']}" for g in schedule[:starts]])
-            adds_text += f"   📅 {starts} start{'s' if starts > 1 else ''} this week: {opponents}\n"
 
         stats_line = format_stats_line(player_stats.get('last7', {}), pos)
         if stats_line:
@@ -817,7 +809,7 @@ def build_discord_embed(adds, breakout_candidates, analysis, stats, news):
         if injury not in ('ACTIVE', ''):
             name_line += f" ⚠️"
         if multi_pos:
-            name_line += f" • 🔀 {multi_pos}"
+            name_line += f" [{multi_pos}]"
 
         breakout_text += f"💎 {name_line}\n"
         breakout_text += f"   *{headline}*"
