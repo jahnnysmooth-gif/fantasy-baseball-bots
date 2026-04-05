@@ -73,9 +73,6 @@ async def fetch_espn_ownership():
     headers = {
         'User-Agent': 'Mozilla/5.0',
         'Accept': 'application/json',
-        'x-fantasy-filter': '{"players":{"limit":300,"filterActive":{"value":true},"sortPercentChange":{"sortPriority":1,"sortAsc":false}}}',
-        'x-fantasy-platform': 'kona-PROD-2dc40132dc2070ef47881dc95b633e62cebc9913',
-        'x-fantasy-source': 'kona',
     }
 
     async with aiohttp.ClientSession() as session:
@@ -104,6 +101,10 @@ async def fetch_espn_ownership():
                     own = p.get('ownership', {})
                     print(f"[ESPN API] Sample: {p.get('fullName')} — {own.get('percentOwned'):.1f}% owned, {own.get('percentChange'):+.1f}% change")
 
+                with_ownership = sum(1 for e in players if e.get('player', {}).get('ownership', {}).get('percentOwned', 0) > 0)
+                with_change = sum(1 for e in players if e.get('player', {}).get('ownership', {}).get('percentChange', 0) != 0)
+                print(f"[ESPN API] Players with >0% owned: {with_ownership}, with non-zero change: {with_change}")
+
                 for entry in players:
                     try:
                         player = entry.get('player', {})
@@ -119,6 +120,7 @@ async def fetch_espn_ownership():
                         # Skip players with absolutely zero ownership (not in any league)
                         if pct_owned == 0.0:
                             continue
+
 
                         # Determine position from eligibleSlots
                         eligible_slots = player.get('eligibleSlots', [])
