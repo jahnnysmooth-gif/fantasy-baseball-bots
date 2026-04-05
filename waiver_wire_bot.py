@@ -415,8 +415,8 @@ async def find_breakout_candidates(merged_data, stats, recent_recommendations):
     """2 hitters + 2 pitchers under 35% owned with strong underlying metrics."""
     print("[Breakout] Finding breakout candidates...")
 
-    # No-repeat rule disabled during testing
-    recently_recommended = set()
+    # TODO: Re-enable for production by restoring 10-day cutoff logic
+    recently_recommended = set()  # disabled during testing
 
     hitter_candidates  = []
     pitcher_candidates = []
@@ -541,7 +541,7 @@ async def generate_claude_analysis(pitcher_adds, hitter_adds, breakout_pitchers,
                 'espn_owned':     p['espn_ownership'],
                 'espn_change':    p['espn_change'],
                 'injury_status':  p.get('injury_status', 'ACTIVE'),
-                'last7':          ps.get('last7', {}),
+                'last7':          fmt_last7(ps.get('last7', {}), p['position'] in PITCHERS),
                 'news':           news.get(p['name'], ''),
             }
             if p['position'] in PITCHERS:
@@ -550,22 +550,73 @@ async def generate_claude_analysis(pitcher_adds, hitter_adds, breakout_pitchers,
             out.append(entry)
         return out
 
+    def fmt_savant(savant, is_pitcher):
+        """Pre-format Savant values so Claude writes them correctly."""
+        def avg_fmt(v):
+            try: return f"{float(v):.3f}".lstrip('0') or '.000'
+            except: return v
+        def era_fmt(v):
+            try: return f"{float(v):.2f}"
+            except: return v
+        def rate_fmt(v):
+            try: return f"{float(v):.1f}%"
+            except: return v
+
+        if is_pitcher:
+            return {
+                'xERA':   era_fmt(savant.get('xera', 'N/A')),
+                'K%':     rate_fmt(savant.get('k_pct', 'N/A')),
+                'BB%':    rate_fmt(savant.get('bb_pct', 'N/A')),
+            }
+        else:
+            return {
+                'xwOBA':    avg_fmt(savant.get('xwoba', 'N/A')),
+                'xBA':      avg_fmt(savant.get('xba', 'N/A')),
+                'xSLG':     avg_fmt(savant.get('xslg', 'N/A')),
+                'Barrel%':  rate_fmt(savant.get('barrel_rate', 'N/A')),
+                'HH%':      rate_fmt(savant.get('hard_hit_pct', 'N/A')),
+            }
+
+    def fmt_last7(stats, is_pitcher):
+        """Pre-format last7 stats so Claude writes them correctly."""
+        if is_pitcher:
+            era  = stats.get('era', 0) or 0
+            whip = stats.get('whip', 0) or 0
+            ip   = stats.get('inningsPitched', '0')
+            k    = int(stats.get('strikeOuts', 0) or 0)
+            return {
+                'IP': ip, 'K': k,
+                'ERA': f"{float(era):.2f}",
+                'WHIP': f"{float(whip):.2f}",
+            }
+        else:
+            avg = stats.get('avg', '.000') or '.000'
+            hr  = int(stats.get('homeRuns', 0) or 0)
+            rbi = int(stats.get('rbi', 0) or 0)
+            sb  = int(stats.get('stolenBases', 0) or 0)
+            obp = stats.get('obp', '.000') or '.000'
+            slg = stats.get('slg', '.000') or '.000'
+            return {
+                'AVG': avg, 'HR': hr, 'RBI': rbi, 'SB': sb,
+                'OBP': obp, 'SLG': slg,
+            }
+
     def build_breakout_context(players):
         out = []
         for p in players:
+            is_p = p['is_pitcher']
             entry = {
                 'name':          p['name'],
                 'position':      p['position'],
                 'team':          p.get('team', ''),
-                'multi_pos':     p.get('multi_pos', ''),
                 'espn_owned':    p['espn_ownership'],
                 'games_played':  p.get('games_played', 0),
                 'injury_status': p.get('injury_status', 'ACTIVE'),
-                'last7':         p['last7'],
-                'last14':        p['last14'],
-                'savant':        p['savant'],
+                'last7':         fmt_last7(p['last7'], is_p),
+                'last14':        fmt_last7(p['last14'], is_p),
+                'savant':        fmt_savant(p['savant'], is_p),
             }
-            if p['is_pitcher']:
+            if is_p:
                 entry['starts_next_7'] = p.get('starts_next_7', 0)
             out.append(entry)
         return out
@@ -595,13 +646,9 @@ Respond ONLY with a valid JSON object. No markdown, no explanation:
   "breakout_writeups": [
     {{
       "name": "player name",
-      "headline": "5-8 word punchy header",
-      "why": "2-3 sentences. Lead with the best metric. Add role/trend context. Third sentence only if it materially adds — not filler. No ellipses.",
+      "why": "2-3 sentences. Lead with the best metric. Add role/trend context. Third sentence only if it materially adds — not filler. No ellipses."
     }}
-  ],
-  "pitcher_intro": "One punchy sentence on the overall pitcher waiver landscape today.",
-  "hitter_intro": "One punchy sentence on the overall hitter waiver landscape today.",
-  "breakout_intro": "One punchy sentence setting up the breakout candidates."
+  ]
 }}
 
 Be opinionated. Reference actual stats. No filler. No ellipses."""
@@ -621,7 +668,6 @@ Be opinionated. Reference actual stats. No filler. No ellipses."""
         return {
             "pitcher_add_comments": {}, "hitter_add_comments": {},
             "breakout_writeups": [],
-            "pitcher_intro": "", "hitter_intro": "", "breakout_intro": "",
         }
 
 
@@ -642,15 +688,9 @@ def format_stats_line(stats, position):
         return f"Last 7: {avg} AVG, {hr} HR, {rbi} RBI, {sb} SB"
 
 
-def build_header():
-    """Shared header line for all three embeds."""
-    return f"⚡ **The Wire Tap | Board Regs Fantasy Baseball**\n{datetime.now(ZoneInfo('America/New_York')).strftime('%A, %B %d, %Y')}"
-
-
 def build_adds_embed(players, analysis, stats, news, is_pitcher):
     """Build a top-5 adds embed for either pitchers or hitters."""
     comments_key = "pitcher_add_comments" if is_pitcher else "hitter_add_comments"
-    intro_key    = "pitcher_intro" if is_pitcher else "hitter_intro"
     title        = "🚀 TOP PITCHER ADDS" if is_pitcher else "🚀 TOP HITTER ADDS"
     color        = 0xE74C3C if is_pitcher else 0x2ECC71  # red for pitchers, green for hitters
 
@@ -710,6 +750,25 @@ def build_breakout_embed(breakout_pitchers, breakout_hitters, analysis):
     )
 
     writeups = analysis.get('breakout_writeups', [])
+    print(f"[Breakout Embed] Claude returned {len(writeups)} writeups: {[w.get('name') for w in writeups]}")
+
+    def find_writeup(name):
+        # Exact match
+        for w in writeups:
+            if w.get('name', '').lower() == name.lower():
+                return w
+        # Last name match
+        last = name.split()[-1].lower()
+        for w in writeups:
+            if last in w.get('name', '').lower():
+                return w
+        # Any shared token
+        tokens = set(name.lower().split())
+        for w in writeups:
+            if tokens & set(w.get('name', '').lower().split()):
+                return w
+        print(f"[Breakout Embed] WARNING: No writeup found for '{name}'")
+        return {}
 
     def render_candidate(player):
         name   = player['name']
@@ -718,11 +777,9 @@ def build_breakout_embed(breakout_pitchers, breakout_hitters, analysis):
         multi  = player.get('multi_pos', '')
         own    = f"{player['espn_ownership']:.1f}%"
         injury = player.get('injury_status', 'ACTIVE')
-        savant = player.get('savant', {})
 
-        wu = next((w for w in writeups if name.lower() in w.get('name', '').lower() or w.get('name', '').lower() in name.lower()), {})
-        headline   = wu.get('headline', 'Under-the-radar pick')
-        why        = wu.get('why', '')
+        wu  = find_writeup(name)
+        why = wu.get('why', '')
 
         name_line = f"**{name} | {pos} | {team}**" if team else f"**{name} | {pos}**"
         name_line += f" ({own} owned)"
@@ -732,46 +789,6 @@ def build_breakout_embed(breakout_pitchers, breakout_hitters, analysis):
             name_line += f" [{multi}]"
 
         text = f"💎 {name_line}\n"
-
-
-        # Savant metrics
-        metrics = []
-
-        def fmt_rate(val, decimals=1):
-            """Format a rate stat like 15.2% — no leading zero needed."""
-            try:
-                return f"{float(val):.{decimals}f}%"
-            except (ValueError, TypeError):
-                return str(val)
-
-        def fmt_avg(val):
-            """Format AVG-style stat: .357 (no leading zero, 3 decimals)."""
-            try:
-                f = float(val)
-                # Remove leading zero: 0.357 -> .357
-                return f"{f:.3f}".lstrip('0') or '.000'
-            except (ValueError, TypeError):
-                return str(val)
-
-        def fmt_era(val):
-            """ERA-style: keep leading zero, 2 decimals (0.71, 3.38)."""
-            try:
-                return f"{float(val):.2f}"
-            except (ValueError, TypeError):
-                return str(val)
-
-        if savant.get('xwoba') and savant['xwoba'] != 'N/A':
-            metrics.append(f"xwOBA: {fmt_avg(savant['xwoba'])}")
-        if savant.get('barrel_rate') and savant['barrel_rate'] != 'N/A':
-            metrics.append(f"Barrel%: {fmt_rate(savant['barrel_rate'])}")
-        if savant.get('hard_hit_pct') and savant['hard_hit_pct'] != 'N/A':
-            metrics.append(f"HH%: {fmt_rate(savant['hard_hit_pct'])}")
-        if savant.get('k_pct') and savant['k_pct'] != 'N/A' and pos in PITCHERS:
-            metrics.append(f"K%: {fmt_rate(savant['k_pct'])}")
-        if savant.get('xera') and savant['xera'] != 'N/A' and pos in PITCHERS:
-            metrics.append(f"xERA: {fmt_era(savant['xera'])}")
-
-
         if why:
             text += f"   {why}\n"
         text += "\n"
