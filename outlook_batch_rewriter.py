@@ -237,9 +237,10 @@ async def find_outlook_message(thread: discord.Thread) -> discord.Message | None
     async for message in thread.history(limit=50):
         if message.author.bot and message.embeds:
             for embed in message.embeds:
-                # Look for "2026 Outlook" in description
-                if embed.description and "2026 outlook" in embed.description.lower():
-                    return message
+                # Look for "2026 Outlook" field
+                for field in embed.fields:
+                    if "outlook" in field.name.lower() and "2026" in field.name:
+                        return message
     return None
 
 
@@ -250,37 +251,22 @@ async def update_outlook_in_message(message: discord.Message, new_outlook: str) 
     
     embed = message.embeds[0]
     
-    # Find and replace the outlook section in the description
-    if not embed.description:
+    # Find and replace the outlook field
+    updated = False
+    for i, field in enumerate(embed.fields):
+        if "outlook" in field.name.lower() and "2026" in field.name:
+            # Update the field value
+            embed.set_field_at(
+                i,
+                name=field.name,
+                value=new_outlook,
+                inline=field.inline
+            )
+            updated = True
+            break
+    
+    if not updated:
         return False
-    
-    lines = embed.description.split('\n')
-    new_lines = []
-    in_outlook = False
-    outlook_replaced = False
-    
-    for line in lines:
-        if "2026 outlook" in line.lower():
-            in_outlook = True
-            new_lines.append(line)  # Keep the header
-            new_lines.append(new_outlook)  # Add new outlook
-            outlook_replaced = True
-            continue
-        
-        if in_outlook:
-            # Skip old outlook lines until we hit the next section
-            if line.startswith("MLB_ID:") or line.startswith("**") or line == "":
-                in_outlook = False
-                new_lines.append(line)
-            continue
-        
-        new_lines.append(line)
-    
-    if not outlook_replaced:
-        return False
-    
-    # Update the embed
-    embed.description = '\n'.join(new_lines)
     
     try:
         await message.edit(embed=embed)
