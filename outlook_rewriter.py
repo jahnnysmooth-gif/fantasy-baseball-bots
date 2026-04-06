@@ -58,76 +58,79 @@ async def generate_outlook_with_claude(player_bundle: dict) -> str:
     """
     profile = player_bundle["profile"]
     is_pitcher = player_bundle["is_pitcher"]
+    curr_metrics = player_bundle.get("curr_metrics", {})
+    prev_metrics = player_bundle.get("prev_metrics", {})
     
     # Extract relevant stats
-    player_name = profile.get("fullName", "Unknown")
+    player_name = profile.get("full_name", "Unknown")
     team = profile.get("team", "Unknown")
     position = profile.get("position", "Unknown")
     age = profile.get("age", "Unknown")
     
-    # Build stats summary
-    stats_2025 = player_bundle.get("stats_2025", {})
-    stats_2024 = player_bundle.get("stats_2024", {})
-    
-    # Statcast metrics
-    batting_ev = player_bundle.get("batting_ev_2025", {})
-    batting_x = player_bundle.get("batting_x_2025", {})
-    pitching_ev = player_bundle.get("pitching_ev_2025", {})
-    pitching_x = player_bundle.get("pitching_x_2025", {})
-    
     # Build context for Claude
     if is_pitcher:
+        p = profile.get("pitching_stats") or {}
+        prev_profile = player_bundle.get("previous_profile") or {}
+        prev_p = prev_profile.get("pitching_stats") or {}
+        
         stats_context = f"""
 Pitcher: {player_name} ({team} - {position}, Age {age})
 
 2025 Stats:
-- IP: {stats_2025.get('ip', 'N/A')}
-- ERA: {stats_2025.get('era', 'N/A')}
-- WHIP: {stats_2025.get('whip', 'N/A')}
-- K/9: {stats_2025.get('k9', 'N/A')}
-- BB/9: {stats_2025.get('bb9', 'N/A')}
-- Wins: {stats_2025.get('w', 'N/A')}
-- Saves: {stats_2025.get('sv', 'N/A')}
+- IP: {p.get('inningsPitched', 'N/A')}
+- ERA: {p.get('era', 'N/A')}
+- WHIP: {p.get('whip', 'N/A')}
+- K/9: {p.get('strikeoutsPer9Inn', 'N/A')}
+- BB/9: {p.get('walksPer9Inn', 'N/A')}
+- Wins: {p.get('wins', 'N/A')}
+- Saves: {p.get('saves', 'N/A')}
 
 2024 Stats (for comparison):
-- IP: {stats_2024.get('ip', 'N/A')}
-- ERA: {stats_2024.get('era', 'N/A')}
-- WHIP: {stats_2024.get('whip', 'N/A')}
-- K/9: {stats_2024.get('k9', 'N/A')}
+- IP: {prev_p.get('inningsPitched', 'N/A')}
+- ERA: {prev_p.get('era', 'N/A')}
+- WHIP: {prev_p.get('whip', 'N/A')}
+- K/9: {prev_p.get('strikeoutsPer9Inn', 'N/A')}
 
 Statcast Metrics 2025:
-- Avg Exit Velo Against: {pitching_ev.get('avg_hit_speed', 'N/A')} mph
-- Barrel% Against: {pitching_ev.get('barrel_batted_rate', 'N/A')}%
-- Hard Hit%: {pitching_ev.get('hard_hit_percent', 'N/A')}%
-- xERA: {pitching_x.get('est_era', 'N/A')}
-- xwOBA: {pitching_x.get('est_woba', 'N/A')}
+- Avg Exit Velo Against: {curr_metrics.get('avg_ev', 'N/A')} mph
+- Barrel% Against: {curr_metrics.get('barrel_pct', 'N/A')}%
+- Hard Hit%: {curr_metrics.get('hard_hit_pct', 'N/A')}%
+- xERA: {curr_metrics.get('xera', 'N/A')}
+- xwOBA: {curr_metrics.get('xwoba', 'N/A')}
+- K%: {curr_metrics.get('k_pct', 'N/A')}%
+- BB%: {curr_metrics.get('bb_pct', 'N/A')}%
 """
     else:
+        h = profile.get("hitting_stats") or {}
+        prev_profile = player_bundle.get("previous_profile") or {}
+        prev_h = prev_profile.get("hitting_stats") or {}
+        
         stats_context = f"""
 Hitter: {player_name} ({team} - {position}, Age {age})
 
 2025 Stats:
-- AVG: {stats_2025.get('avg', 'N/A')}
-- HR: {stats_2025.get('hr', 'N/A')}
-- RBI: {stats_2025.get('rbi', 'N/A')}
-- R: {stats_2025.get('r', 'N/A')}
-- SB: {stats_2025.get('sb', 'N/A')}
-- OPS: {stats_2025.get('ops', 'N/A')}
+- AVG: {h.get('avg', 'N/A')}
+- HR: {h.get('homeRuns', 'N/A')}
+- RBI: {h.get('rbi', 'N/A')}
+- R: {h.get('runs', 'N/A')}
+- SB: {h.get('stolenBases', 'N/A')}
+- OPS: {h.get('ops', 'N/A')}
 
 2024 Stats (for comparison):
-- AVG: {stats_2024.get('avg', 'N/A')}
-- HR: {stats_2024.get('hr', 'N/A')}
-- RBI: {stats_2024.get('rbi', 'N/A')}
-- OPS: {stats_2024.get('ops', 'N/A')}
+- AVG: {prev_h.get('avg', 'N/A')}
+- HR: {prev_h.get('homeRuns', 'N/A')}
+- RBI: {prev_h.get('rbi', 'N/A')}
+- OPS: {prev_h.get('ops', 'N/A')}
 
 Statcast Metrics 2025:
-- Avg Exit Velocity: {batting_ev.get('avg_hit_speed', 'N/A')} mph
-- Barrel%: {batting_ev.get('barrel_batted_rate', 'N/A')}%
-- Hard Hit%: {batting_ev.get('hard_hit_percent', 'N/A')}%
-- K%: {batting_ev.get('k_percent', 'N/A')}%
-- BB%: {batting_ev.get('bb_percent', 'N/A')}%
-- xBA: {batting_x.get('est_ba', 'N/A')}
-- xSLG: {batting_x.get('est_slg', 'N/A')}
+- Avg Exit Velocity: {curr_metrics.get('avg_ev', 'N/A')} mph
+- Barrel%: {curr_metrics.get('barrel_pct', 'N/A')}%
+- Hard Hit%: {curr_metrics.get('hard_hit_pct', 'N/A')}%
+- K%: {curr_metrics.get('k_pct', 'N/A')}%
+- BB%: {curr_metrics.get('bb_pct', 'N/A')}%
+- xBA: {curr_metrics.get('xba', 'N/A')}
+- xSLG: {curr_metrics.get('xslg', 'N/A')}
+- xwOBA: {curr_metrics.get('xwoba', 'N/A')}
 """
     
     # System prompt for Claude
