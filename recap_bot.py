@@ -321,9 +321,10 @@ class RecapBot:
     ) -> Optional[str]:
         """Search YouTube for the game's highlights video from MLB's official channel."""
         
-        # Clean team names for search
-        away_clean = away_team.replace("Los Angeles ", "").replace("New York ", "").replace("Chicago ", "").replace("San Francisco ", "")
-        home_clean = home_team.replace("Los Angeles ", "").replace("New York ", "").replace("Chicago ", "").replace("San Francisco ", "")
+        # Use shortened team names to match MLB's title format
+        # MLB uses: "Astros vs. A's", "Braves vs. D-backs", "Cardinals vs. Tigers"
+        away_short = self._shorten_team_name(away_team)
+        home_short = self._shorten_team_name(home_team)
         
         # Format date as "(4/5/26)" to match MLB's title format
         try:
@@ -337,11 +338,12 @@ class RecapBot:
         
         # Search ONLY MLB's official channel
         # Query format matches MLB's title: "Astros vs. A's Game Highlights (4/5/26)"
-        query = f"{away_clean} vs {home_clean} {date_str}"
+        query = f"{away_short} vs {home_short} {date_str}"
         channel_url = "https://www.youtube.com/@MLB/videos"
         
         logger.info("RECAP_BOT_YT: === SEARCHING MLB OFFICIAL CHANNEL ONLY ===")
-        logger.info("RECAP_BOT_YT: Away: %s, Home: %s", away_clean, home_clean)
+        logger.info("RECAP_BOT_YT: Away: %s -> %s", away_team, away_short)
+        logger.info("RECAP_BOT_YT: Home: %s -> %s", home_team, home_short)
         logger.info("RECAP_BOT_YT: Date: %s", date_str)
         logger.info("RECAP_BOT_YT: Query: %s", query)
         
@@ -355,26 +357,50 @@ class RecapBot:
                 html = await response.text()
                 logger.info("RECAP_BOT_YT: HTML length: %d bytes", len(html))
                 
-                # Extract video IDs - simpler now since we're only on MLB's channel
+                # Extract video IDs and their surrounding context to check titles
                 video_pattern = r'"videoId":"([a-zA-Z0-9_-]{11})"'
                 matches = re.finditer(video_pattern, html)
                 
                 found_videos = []
                 for match in matches:
                     video_id = match.group(1)
-                    found_videos.append(video_id)
-                    logger.info("RECAP_BOT_YT: Found video: %s", video_id)
+                    
+                    # Get context around this video ID to find its title
+                    start = max(0, match.start() - 500)
+                    end = min(len(html), match.end() + 500)
+                    context = html[start:end]
+                    
+                    # Try to extract the title from the context
+                    title_match = re.search(r'"title":\{"runs":\[\{"text":"([^"]+)"\}\]', context)
+                    if not title_match:
+                        title_match = re.search(r'"text":"([^"]*' + re.escape(away_short) + '[^"]*' + re.escape(home_short) + '[^"]*)"', context, re.IGNORECASE)
+                    
+                    if title_match:
+                        title = title_match.group(1).lower()
+                        logger.info("RECAP_BOT_YT: Found video %s with title: %s", video_id, title[:100])
+                        
+                        # Check if title contains both teams and the date
+                        has_away = away_short.lower() in title
+                        has_home = home_short.lower() in title
+                        has_date = date_str in title or f"{month}/{day}" in title
+                        
+                        if has_away and has_home and has_date:
+                            logger.info("RECAP_BOT_YT: ✓ MATCH - Video has both teams and date")
+                            found_videos.append(video_id)
+                            break  # Take first matching video
+                        else:
+                            logger.info("RECAP_BOT_YT: ✗ SKIP - away:%s home:%s date:%s", has_away, has_home, has_date)
                 
-                logger.info("RECAP_BOT_YT: Found %d videos total", len(found_videos))
+                logger.info("RECAP_BOT_YT: Found %d matching videos", len(found_videos))
                 
                 if found_videos:
-                    # Return first video (most recent/relevant)
+                    # Return first matching video
                     video_id = found_videos[0]
                     video_url = f"https://www.youtube.com/watch?v={video_id}"
                     logger.info("RECAP_BOT_YT: ✓ SUCCESS - Using video: %s", video_url)
                     return video_url
                 else:
-                    logger.warning("RECAP_BOT_YT: ✗ No videos found on MLB channel for: %s", query)
+                    logger.warning("RECAP_BOT_YT: ✗ No matching videos found on MLB channel for: %s", query)
                     return None
                     
         except Exception as e:
@@ -450,6 +476,43 @@ class RecapBot:
             return parsed.astimezone(EASTERN).strftime("%b %d, %Y")
         except ValueError:
             return game_date_raw[:10]
+    
+    def _shorten_team_name(self, full_name: str) -> str:
+        """Convert full team name to MLB's shortened format used in video titles."""
+        # MLB uses shortened versions like: "D-backs", "A's", "Rays", "Tigers"
+        shortenings = {
+            "Arizona Diamondbacks": "D-backs",
+            "Atlanta Braves": "Braves",
+            "Baltimore Orioles": "Orioles",
+            "Boston Red Sox": "Red Sox",
+            "Chicago Cubs": "Cubs",
+            "Chicago White Sox": "White Sox",
+            "Cincinnati Reds": "Reds",
+            "Cleveland Guardians": "Guardians",
+            "Colorado Rockies": "Rockies",
+            "Detroit Tigers": "Tigers",
+            "Houston Astros": "Astros",
+            "Kansas City Royals": "Royals",
+            "Los Angeles Angels": "Angels",
+            "Los Angeles Dodgers": "Dodgers",
+            "Miami Marlins": "Marlins",
+            "Milwaukee Brewers": "Brewers",
+            "Minnesota Twins": "Twins",
+            "New York Mets": "Mets",
+            "New York Yankees": "Yankees",
+            "Athletics": "A's",
+            "Philadelphia Phillies": "Phillies",
+            "Pittsburgh Pirates": "Pirates",
+            "San Diego Padres": "Padres",
+            "San Francisco Giants": "Giants",
+            "Seattle Mariners": "Mariners",
+            "St. Louis Cardinals": "Cardinals",
+            "Tampa Bay Rays": "Rays",
+            "Texas Rangers": "Rangers",
+            "Toronto Blue Jays": "Blue Jays",
+            "Washington Nationals": "Nationals",
+        }
+        return shortenings.get(full_name, full_name)
 
 
 # ============================================================================
