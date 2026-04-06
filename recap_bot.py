@@ -393,10 +393,9 @@ class RecapBot:
         
         embed.add_field(name="Final", value=score_text, inline=False)
         
-        # Add winner team logo on the right side using set_thumbnail (ESPN CDN)
+        # Add winner team logo (ESPN CDN)
         if winner_id:
-            logo_url = f"https://a.espncdn.com/i/teamlogos/mlb/500/{winner_id}.png"
-            embed.set_thumbnail(url=logo_url)
+            embed.set_thumbnail(url=f"https://a.espncdn.com/i/teamlogos/mlb/500/{winner_id}.png")
         
         embed.set_footer(text=f"MLB Highlights • {display_date}")
         return embed
