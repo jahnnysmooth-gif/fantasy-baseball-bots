@@ -255,9 +255,10 @@ class RecapBot:
         )
 
         # Post YouTube URL - Discord will auto-embed the video
-        await channel.send(content=youtube_url, embed=embed)
+        # Try posting JUST the URL first to see if that embeds
+        await channel.send(content=youtube_url)
 
-        logger.info("Posted highlights for %s at %s | %s", away, home, youtube_url)
+        logger.info("RECAP_BOT_YT: Posted highlights for %s at %s | %s", away, home, youtube_url)
         self.posted_game_ids.add(game_pk)
         self._save_state()
         
