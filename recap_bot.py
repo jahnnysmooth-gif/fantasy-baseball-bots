@@ -352,7 +352,7 @@ class RecapBot:
         payload = await self._fetch_json(content_url)
         
         # Debug: Log the structure to see what we're getting
-        logger.debug("Fetched content for game %s", game_pk)
+        logger.info("=== Fetching recap for game %s ===", game_pk)
 
         candidates: list[RecapCandidate] = []
 
@@ -364,11 +364,13 @@ class RecapBot:
         self._collect_candidates(editorial_recap, candidates)
 
         if not candidates:
+            logger.warning("No recap candidates found for game %s", game_pk)
             return None
 
         candidates.sort(key=lambda c: (-c.score, c.title.lower(), c.url))
-        logger.info("Found %d recap candidates for game %s, best: %s (score: %d)", 
-                    len(candidates), game_pk, candidates[0].url, candidates[0].score)
+        logger.info("Found %d recap candidates for game %s", len(candidates), game_pk)
+        logger.info("Best candidate: title='%s', url='%s', score=%d", 
+                    candidates[0].title, candidates[0].url, candidates[0].score)
         return candidates[0]
 
     def _collect_candidates(self, node: Any, out: list[RecapCandidate]) -> None:
@@ -398,7 +400,7 @@ class RecapBot:
         # First priority: Direct playback URLs (MP4, M3U8) for Discord embedding
         playbacks = node.get("playbacks")
         if isinstance(playbacks, list):
-            logger.debug("Found playbacks array with %d items", len(playbacks))
+            logger.info("Found playbacks array with %d items", len(playbacks))
             mp4_url = ""
             m3u8_url = ""
             for playback in playbacks:
@@ -409,21 +411,21 @@ class RecapBot:
                     if not isinstance(value, str):
                         continue
                     url = self._normalize_url(value)
-                    logger.debug("Found playback URL: %s", url)
+                    logger.info("Found playback URL: %s", url)
                     # Prefer MP4 for Discord native playback
                     if url.endswith(".mp4"):
                         mp4_url = url
-                        logger.info("Found MP4 URL: %s", url)
+                        logger.info("✓ Found MP4 URL: %s", url)
                     elif "m3u8" in url and not m3u8_url:
                         m3u8_url = url
-                        logger.debug("Found M3U8 URL: %s", url)
+                        logger.info("Found M3U8 URL: %s", url)
             
             # Return MP4 first (best for Discord), then M3U8
             if mp4_url:
-                logger.info("Using MP4 URL for Discord embed")
+                logger.info(">>> Using MP4 URL for Discord embed")
                 return mp4_url
             if m3u8_url:
-                logger.info("Using M3U8 URL (no MP4 found)")
+                logger.info(">>> Using M3U8 URL (no MP4 found)")
                 return m3u8_url
         
         # Second priority: MLB video page URLs (fallback if no direct video)
@@ -438,16 +440,17 @@ class RecapBot:
             if isinstance(value, str):
                 url = self._normalize_url(value)
                 if self._looks_like_video_page(url):
-                    logger.info("Using MLB video page URL: %s", url)
+                    logger.info(">>> Using MLB video page URL (no direct video found): %s", url)
                     return url
 
         # Third priority: construct from slug
         slug = node.get("slug") or node.get("seoName")
         if isinstance(slug, str) and slug.strip():
             url = f"https://www.mlb.com/video/{slug.strip('/')}"
-            logger.info("Constructed URL from slug: %s", url)
+            logger.info(">>> Constructed URL from slug: %s", url)
             return url
 
+        logger.warning("No URL found for this node")
         return ""
 
     def _normalize_url(self, value: str) -> str:
@@ -497,11 +500,18 @@ async def start_recap_bot() -> None:
     """Entry point called by main.py's run_forever wrapper."""
     import os
     
+    logger.info("Recap bot starting up...")
+    
     HIGHLIGHTS_BOT_TOKEN = os.getenv("HIGHLIGHTS_BOT_TOKEN", "")
     RECAP_CHANNEL_ID = int(os.getenv("RECAP_CHANNEL_ID", "0"))
     RECAP_BOT_POLL_SECONDS = int(os.getenv("RECAP_BOT_POLL_SECONDS", "300"))
     
+    logger.info("Token present: %s", "Yes" if HIGHLIGHTS_BOT_TOKEN else "NO - MISSING!")
+    logger.info("Channel ID: %s", RECAP_CHANNEL_ID)
+    logger.info("Poll interval: %s seconds", RECAP_BOT_POLL_SECONDS)
+    
     if not HIGHLIGHTS_BOT_TOKEN:
+        logger.error("FATAL: Missing HIGHLIGHTS_BOT_TOKEN environment variable")
         raise SystemExit("Missing HIGHLIGHTS_BOT_TOKEN environment variable")
     if RECAP_CHANNEL_ID <= 0:
         logger.warning("RECAP_CHANNEL_ID not set - recap bot will not run")
@@ -541,7 +551,11 @@ async def start_recap_bot() -> None:
         logger.info("Recap bot started - polling every %s seconds", RECAP_BOT_POLL_SECONDS)
     
     try:
+        logger.info("Attempting to connect to Discord...")
         await client.start(HIGHLIGHTS_BOT_TOKEN)
+    except Exception as e:
+        logger.exception("Failed to start Discord client: %s", e)
+        raise
     finally:
         # Cleanup
         if recap_bot_instance:
