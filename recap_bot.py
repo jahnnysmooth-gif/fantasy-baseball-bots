@@ -279,9 +279,11 @@ class RecapBot:
         # Format date as "April 5 2026"
         try:
             date_obj = datetime.fromisoformat(game_date.replace("Z", "+00:00"))
-            month_day = date_obj.strftime("%B %-d").replace(" 0", " ")
+            # Format as "April 5 2026" (remove leading zero from day)
+            month = date_obj.strftime("%B")
+            day = str(date_obj.day)  # No leading zero
             year = date_obj.strftime("%Y")
-            date_str = f"{month_day} {year}"
+            date_str = f"{month} {day} {year}"
         except:
             date_str = ""
         
