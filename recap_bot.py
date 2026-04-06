@@ -309,13 +309,42 @@ class RecapBot:
                 html = await response.text()
                 logger.info("RECAP_BOT_YT: YouTube HTML length: %d bytes", len(html))
                 
-                # Extract video ID from search results
+                # Extract video IDs and their context from search results
                 # Look for "videoId":"XXXXXXXXXXX" pattern
-                video_ids = re.findall(r'"videoId":"([^"]{11})"', html)
-                logger.info("RECAP_BOT_YT: Found %d video IDs in HTML", len(video_ids))
+                # Also check for channel indicators to filter out ads
+                import json as json_module
                 
-                if video_ids:
-                    video_id = video_ids[0]
+                # Find all video renderer objects in the page
+                video_pattern = r'"videoRenderer":\{[^}]*"videoId":"([^"]{11})"[^}]*\}'
+                matches = re.finditer(video_pattern, html)
+                
+                valid_videos = []
+                for match in matches:
+                    video_id = match.group(1)
+                    # Get the surrounding context (500 chars around the match)
+                    start = max(0, match.start() - 500)
+                    end = min(len(html), match.end() + 500)
+                    context = html[start:end].lower()
+                    
+                    # Filter out ads and non-MLB content
+                    # Skip if it contains ad indicators
+                    if any(indicator in context for indicator in ['ad_tag', 'ad_format', 'promoted']):
+                        logger.info("RECAP_BOT_YT: Skipping ad video: %s", video_id)
+                        continue
+                    
+                    # Prefer MLB official channels
+                    is_mlb = 'mlb' in context or 'espn' in context or 'house of highlights' in context
+                    
+                    valid_videos.append((video_id, is_mlb))
+                    logger.info("RECAP_BOT_YT: Found valid video: %s (MLB channel: %s)", video_id, is_mlb)
+                
+                # Sort by MLB channel preference (MLB channels first)
+                valid_videos.sort(key=lambda x: (not x[1], x[0]))
+                
+                logger.info("RECAP_BOT_YT: Found %d valid video IDs", len(valid_videos))
+                
+                if valid_videos:
+                    video_id = valid_videos[0][0]
                     video_url = f"https://www.youtube.com/watch?v={video_id}"
                     logger.info("RECAP_BOT_YT: ✓ SUCCESS - Found video: %s", video_url)
                     return video_url
@@ -348,16 +377,17 @@ class RecapBot:
         if game_number > 1:
             title += f" (Game {game_number})"
 
+        # No URL in embed - it's already posted above
         embed = discord.Embed(
             title=title,
-            url=video_url,
             color=color,
         )
         
-        # Single field with score - use zero-width space to force width alignment
+        # Single field with score - add heavy padding to match YouTube embed width
         score_text = f"{away} {away_score}, {home} {home_score}"
-        # Add invisible padding to make embed wider
-        padding = "\u200b" * 50  # Zero-width spaces
+        # Add lots of invisible padding to force wider embed
+        # Using zero-width spaces and regular spaces
+        padding = "\u200b" + (" " * 100) + "\u200b"
         embed.add_field(name="Final", value=f"{score_text}{padding}", inline=False)
         
         # Add winner team logo if available (ESPN CDN)
