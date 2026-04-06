@@ -347,17 +347,18 @@ class RecapBot:
         title = f"{away} at {home} Highlights"
         if game_number > 1:
             title += f" (Game {game_number})"
-        
-        description = f"**{away} {away_score}, {home} {home_score}** — {winner_name} won on {display_date}."
 
         embed = discord.Embed(
             title=title,
             url=video_url,
-            description=description,
             color=color,
-            timestamp=datetime.now(EASTERN),
         )
-        embed.add_field(name="Final", value=f"{away} {away_score} • {home} {home_score}", inline=False)
+        
+        # Single field with score - use zero-width space to force width alignment
+        score_text = f"{away} {away_score}, {home} {home_score}"
+        # Add invisible padding to make embed wider
+        padding = "\u200b" * 50  # Zero-width spaces
+        embed.add_field(name="Final", value=f"{score_text}{padding}", inline=False)
         
         # Add winner team logo if available (ESPN CDN)
         if winner_id:
