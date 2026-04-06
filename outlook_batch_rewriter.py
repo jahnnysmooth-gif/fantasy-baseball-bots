@@ -170,7 +170,8 @@ Statcast Metrics 2025:
     system_prompt = """You are a fantasy baseball analyst writing player outlooks for 2026. 
 
 Your outlook should:
-- Be 4-6 sentences in a single paragraph
+- Be EXACTLY 3-4 sentences in a single paragraph
+- CRITICAL: Must be under 700 characters total (this is a hard limit)
 - Assess the player's fantasy value going into 2026 based on their 2025 performance
 - Reference specific stats and underlying metrics (Statcast data) to support your analysis
 - Compare 2025 to 2024 to identify trends (improvement, decline, consistency)
@@ -178,6 +179,8 @@ Your outlook should:
 - Focus on fantasy-relevant categories (HR, RBI, R, SB, AVG for hitters; W, SV, K, ERA, WHIP for pitchers)
 - Write in a confident, analytical tone (not overly cautious or hedging)
 - Avoid clichés like "potential sleeper" or "must-draft" - be specific about value
+
+CRITICAL: Keep it concise - aim for 600-700 characters maximum. Every word counts.
 
 Do NOT include any preamble, title, or labels. Just write the outlook paragraph."""
 
@@ -198,7 +201,7 @@ Write the outlook now:"""
             },
             json={
                 "model": "claude-sonnet-4-20250514",
-                "max_tokens": 500,
+                "max_tokens": 300,  # Reduced to keep outlooks under 1024 chars
                 "system": [
                     {
                         "type": "text",
@@ -250,6 +253,18 @@ async def update_outlook_in_message(message: discord.Message, new_outlook: str) 
         return False
     
     embed = message.embeds[0]
+    
+    # Truncate outlook to Discord's 1024 character field limit
+    # If over limit, truncate at last complete sentence
+    if len(new_outlook) > 1024:
+        # Find the last sentence that fits
+        truncated = new_outlook[:1024]
+        last_period = truncated.rfind('. ')
+        if last_period > 500:  # Only truncate if we keep at least half
+            new_outlook = truncated[:last_period + 1]
+        else:
+            # If no good sentence boundary, just hard truncate
+            new_outlook = new_outlook[:1024]
     
     # Find and replace the outlook field
     updated = False
