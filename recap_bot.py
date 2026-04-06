@@ -112,18 +112,19 @@ class RecapBot:
         """Main polling loop."""
         await self.client.wait_until_ready()
         
-        # One-time backfill on startup if state is empty
-        if not self.posted_game_ids:
-            logger.info("Empty state detected - running initial backfill")
+        # Run immediately on startup (don't wait for first interval)
+        logger.info("Running initial poll immediately...")
+        try:
             await self._poll_completed_games()
+        except Exception as exc:
+            logger.exception("Error in initial recap bot poll: %s", exc)
         
         while not self.client.is_closed():
             try:
+                await asyncio.sleep(self.poll_seconds)
                 await self._poll_completed_games()
             except Exception as exc:
                 logger.exception("Error in recap bot poll loop: %s", exc)
-            
-            await asyncio.sleep(self.poll_seconds)
 
     def _load_state(self) -> None:
         if not self.state_path.exists():
@@ -175,17 +176,31 @@ class RecapBot:
             return
 
         today_et = datetime.now(EASTERN).date()
-        dates_to_scan = [today_et - timedelta(days=i) for i in range(4)]
+        dates_to_scan = [today_et]  # Only today for testing
 
         logger.info("Scanning MLB schedule for %s", ", ".join(str(d) for d in dates_to_scan))
 
+        all_finished_games = []
         for scan_date in dates_to_scan:
             games = await self._fetch_schedule(scan_date)
             for game in games:
-                try:
-                    await self._process_game(channel, game)
-                except Exception as exc:
-                    logger.exception("Failed processing game %s: %s", game.get("gamePk") or "unknown", exc)
+                status = (((game.get("status") or {}).get("detailedState") or "").strip().lower())
+                skip_statuses = {"postponed", "suspended", "delayed start", "cancelled"}
+                if status in skip_statuses:
+                    continue
+                if status in {"final", "game over", "completed early", "completed"}:
+                    all_finished_games.append(game)
+        
+        # For testing: only process the last 3 finished games
+        games_to_post = all_finished_games[-3:] if len(all_finished_games) > 3 else all_finished_games
+        logger.info("Found %d finished games, posting last %d for testing", 
+                    len(all_finished_games), len(games_to_post))
+        
+        for game in games_to_post:
+            try:
+                await self._process_game(channel, game)
+            except Exception as exc:
+                logger.exception("Failed processing game %s: %s", game.get("gamePk") or "unknown", exc)
 
     async def _fetch_json(self, url: str) -> dict[str, Any]:
         for attempt in range(3):
@@ -335,6 +350,9 @@ class RecapBot:
     async def _fetch_recap_for_game(self, game_pk: str) -> Optional[RecapCandidate]:
         content_url = f"https://statsapi.mlb.com/api/v1/game/{game_pk}/content"
         payload = await self._fetch_json(content_url)
+        
+        # Debug: Log the structure to see what we're getting
+        logger.debug("Fetched content for game %s", game_pk)
 
         candidates: list[RecapCandidate] = []
 
@@ -349,6 +367,8 @@ class RecapBot:
             return None
 
         candidates.sort(key=lambda c: (-c.score, c.title.lower(), c.url))
+        logger.info("Found %d recap candidates for game %s, best: %s (score: %d)", 
+                    len(candidates), game_pk, candidates[0].url, candidates[0].score)
         return candidates[0]
 
     def _collect_candidates(self, node: Any, out: list[RecapCandidate]) -> None:
@@ -378,6 +398,7 @@ class RecapBot:
         # First priority: Direct playback URLs (MP4, M3U8) for Discord embedding
         playbacks = node.get("playbacks")
         if isinstance(playbacks, list):
+            logger.debug("Found playbacks array with %d items", len(playbacks))
             mp4_url = ""
             m3u8_url = ""
             for playback in playbacks:
@@ -388,16 +409,21 @@ class RecapBot:
                     if not isinstance(value, str):
                         continue
                     url = self._normalize_url(value)
+                    logger.debug("Found playback URL: %s", url)
                     # Prefer MP4 for Discord native playback
                     if url.endswith(".mp4"):
                         mp4_url = url
+                        logger.info("Found MP4 URL: %s", url)
                     elif "m3u8" in url and not m3u8_url:
                         m3u8_url = url
+                        logger.debug("Found M3U8 URL: %s", url)
             
             # Return MP4 first (best for Discord), then M3U8
             if mp4_url:
+                logger.info("Using MP4 URL for Discord embed")
                 return mp4_url
             if m3u8_url:
+                logger.info("Using M3U8 URL (no MP4 found)")
                 return m3u8_url
         
         # Second priority: MLB video page URLs (fallback if no direct video)
@@ -412,12 +438,15 @@ class RecapBot:
             if isinstance(value, str):
                 url = self._normalize_url(value)
                 if self._looks_like_video_page(url):
+                    logger.info("Using MLB video page URL: %s", url)
                     return url
 
         # Third priority: construct from slug
         slug = node.get("slug") or node.get("seoName")
         if isinstance(slug, str) and slug.strip():
-            return f"https://www.mlb.com/video/{slug.strip('/')}"
+            url = f"https://www.mlb.com/video/{slug.strip('/')}"
+            logger.info("Constructed URL from slug: %s", url)
+            return url
 
         return ""
 
