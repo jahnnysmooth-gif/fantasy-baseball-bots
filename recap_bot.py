@@ -351,6 +351,15 @@ class RecapBot:
         content_url = f"https://statsapi.mlb.com/api/v1/game/{game_pk}/content"
         payload = await self._fetch_json(content_url)
         
+        # Save first game's response to file for inspection
+        try:
+            import json
+            debug_path = Path("/opt/render/project/.data") / f"mlb_api_response_{game_pk}.json"
+            debug_path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
+            logger.info("Saved API response to %s", debug_path)
+        except Exception as e:
+            logger.warning("Could not save debug file: %s", e)
+        
         # Debug: Log the structure to see what we're getting
         logger.info("=== Fetching recap for game %s ===", game_pk)
 
