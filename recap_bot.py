@@ -380,7 +380,12 @@ class RecapBot:
             if title and url:
                 score = self._score_candidate(title, url)
                 if score > 0:
-                    out.append(RecapCandidate(title=title, url=url, score=score))
+                    candidate = RecapCandidate(title=title, url=url, score=score)
+                    out.append(candidate)
+                    # Log the successful candidate with its structure
+                    logger.info("✓ CANDIDATE: title='%s', url='%s', score=%d", title, url, score)
+                    # Log what keys this node has to understand structure
+                    logger.info("  Node keys: %s", list(node.keys())[:10])  # First 10 keys
 
             for value in node.values():
                 self._collect_candidates(value, out)
@@ -399,7 +404,7 @@ class RecapBot:
     def _extract_best_url(self, node: dict[str, Any]) -> str:
         # First priority: Direct playback URLs (MP4, M3U8) for Discord embedding
         playbacks = node.get("playbacks")
-        if isinstance(playbacks, list):
+        if isinstance(playbacks, list) and len(playbacks) > 0:
             logger.info("Found playbacks array with %d items", len(playbacks))
             mp4_url = ""
             m3u8_url = ""
@@ -440,17 +445,17 @@ class RecapBot:
             if isinstance(value, str):
                 url = self._normalize_url(value)
                 if self._looks_like_video_page(url):
-                    logger.info(">>> Using MLB video page URL (no direct video found): %s", url)
+                    # Only log this if we're actually returning it
                     return url
 
         # Third priority: construct from slug
         slug = node.get("slug") or node.get("seoName")
         if isinstance(slug, str) and slug.strip():
             url = f"https://www.mlb.com/video/{slug.strip('/')}"
-            logger.info(">>> Constructed URL from slug: %s", url)
+            # Only log if we're returning it
             return url
 
-        logger.warning("No URL found for this node")
+        # Don't spam logs - most nodes won't have URLs
         return ""
 
     def _normalize_url(self, value: str) -> str:
