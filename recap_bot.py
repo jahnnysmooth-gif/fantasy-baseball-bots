@@ -1,32 +1,18 @@
 import asyncio
 import json
 import logging
-from dataclasses import dataclass
+import re
 from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any, Optional
+from urllib.parse import quote_plus
 from zoneinfo import ZoneInfo
 
 import aiohttp
 import discord
-from discord.ext import tasks
 
 
 EASTERN = ZoneInfo("America/New_York")
-
-# Search priority for MLB video packages.
-RECAP_KEYWORDS = [
-    "recap",
-    "game recap",
-    "daily recap",
-    "game highlights recap",
-]
-REJECT_KEYWORDS = [
-    "condensed game",
-    "extended highlights",
-    "top plays",
-    "must-c",
-]
 
 TEAM_COLORS = {
     "Arizona Diamondbacks": 0xA71930,
@@ -48,7 +34,7 @@ TEAM_COLORS = {
     "Minnesota Twins": 0x002B5C,
     "New York Mets": 0x002D72,
     "New York Yankees": 0x0C2340,
-    "Athletics": 0x003831,  # Now just "Athletics" (Sacramento-bound)
+    "Athletics": 0x003831,
     "Philadelphia Phillies": 0xE81828,
     "Pittsburgh Pirates": 0xFDB827,
     "San Diego Padres": 0x2F241D,
@@ -65,15 +51,8 @@ DEFAULT_EMBED_COLOR = 0x1D428A
 logger = logging.getLogger("recap_bot")
 
 
-@dataclass
-class RecapCandidate:
-    title: str
-    url: str
-    score: int
-
-
 class RecapBot:
-    """MLB game recap bot - posts video recaps when games finish."""
+    """MLB game recap bot - posts YouTube highlight videos when games finish."""
     
     def __init__(
         self,
@@ -90,7 +69,6 @@ class RecapBot:
         self.poll_seconds = poll_seconds
         
         self.posted_game_ids: set[str] = set()
-        self.posted_urls: set[str] = set()
         self.checked_no_recap: dict[str, int] = {}  # game_pk -> attempt_count
         
         self._load_state()
@@ -132,12 +110,10 @@ class RecapBot:
         try:
             data = json.loads(self.state_path.read_text(encoding="utf-8"))
             self.posted_game_ids = set(data.get("posted_game_ids", []))
-            self.posted_urls = set(data.get("posted_urls", []))
             self.checked_no_recap = data.get("checked_no_recap", {})
             logger.info(
-                "Loaded state: %s game ids, %s urls, %s pending recaps",
+                "Loaded state: %s game ids, %s pending recaps",
                 len(self.posted_game_ids),
-                len(self.posted_urls),
                 len(self.checked_no_recap),
             )
         except Exception as exc:
@@ -150,7 +126,6 @@ class RecapBot:
         
         data = {
             "posted_game_ids": sorted(self.posted_game_ids),
-            "posted_urls": sorted(self.posted_urls),
             "checked_no_recap": self.checked_no_recap,
             "saved_at": datetime.now(EASTERN).isoformat(),
         }
@@ -213,6 +188,7 @@ class RecapBot:
                     raise
                 logger.warning("Fetch failed (attempt %d/3) for %s: %s", attempt + 1, url, exc)
                 await asyncio.sleep(2 ** attempt)
+        return {}
 
     async def _fetch_schedule(self, date_obj) -> list[dict[str, Any]]:
         url = (
@@ -226,16 +202,6 @@ class RecapBot:
         return dates[0].get("games", [])
 
     async def _process_game(self, channel: discord.abc.Messageable, game: dict[str, Any]) -> None:
-        status = (((game.get("status") or {}).get("detailedState") or "").strip().lower())
-        
-        # Skip postponed, suspended, cancelled games
-        skip_statuses = {"postponed", "suspended", "delayed start", "cancelled"}
-        if status in skip_statuses:
-            return
-        
-        if status not in {"final", "game over", "completed early", "completed"}:
-            return
-
         game_pk = str(game.get("gamePk") or "")
         if not game_pk or game_pk in self.posted_game_ids:
             return
@@ -251,15 +217,17 @@ class RecapBot:
         game_date_raw = game.get("gameDate") or ""
         game_number = game.get("gameNumber", 1)
 
-        recap = await self._fetch_recap_for_game(game_pk)
-        if not recap:
-            # Track attempts to find recap - retry up to 5 times before giving up
+        # Search YouTube for highlights
+        youtube_url = await self._search_youtube_highlights(away, home, game_date_raw)
+        
+        if not youtube_url:
+            # Track attempts to find video - retry up to 5 times before giving up
             attempts = self.checked_no_recap.get(game_pk, 0)
             if attempts < 5:
                 self.checked_no_recap[game_pk] = attempts + 1
                 self._save_state()
                 logger.info(
-                    "No recap found yet for %s at %s (%s) - attempt %d/5",
+                    "No YouTube video found yet for %s at %s (%s) - attempt %d/5",
                     away,
                     home,
                     game_pk,
@@ -267,7 +235,7 @@ class RecapBot:
                 )
             return
 
-        # Recap found - remove from retry tracking if present
+        # Video found - remove from retry tracking if present
         if game_pk in self.checked_no_recap:
             del self.checked_no_recap[game_pk]
 
@@ -283,25 +251,67 @@ class RecapBot:
             winner_id=winner_id,
             game_date_raw=game_date_raw,
             game_number=game_number,
-            recap_url=recap.url,
+            video_url=youtube_url,
         )
 
-        # If it's a direct video URL (MP4), Discord will auto-embed it
-        # If it's an MLB page, include it in content for unfurling
-        if recap.url.endswith(".mp4"):
-            # Direct video - put in embed
-            await channel.send(embed=embed)
-        else:
-            # MLB page or M3U8 - put in content for Discord to unfurl
-            await channel.send(content=recap.url, embed=embed)
+        # Post YouTube URL - Discord will auto-embed the video
+        await channel.send(content=youtube_url, embed=embed)
 
-        logger.info("Posted recap for %s at %s | %s", away, home, recap.url)
+        logger.info("Posted highlights for %s at %s | %s", away, home, youtube_url)
         self.posted_game_ids.add(game_pk)
-        self.posted_urls.add(recap.url)
         self._save_state()
         
         # Throttle to avoid blasting channel when many games finish simultaneously
         await asyncio.sleep(2)
+
+    async def _search_youtube_highlights(
+        self, 
+        away_team: str, 
+        home_team: str, 
+        game_date: str
+    ) -> Optional[str]:
+        """Search YouTube for the game's highlights video."""
+        
+        # Clean team names for search
+        away_clean = away_team.replace("Los Angeles ", "").replace("New York ", "").replace("Chicago ", "").replace("San Francisco ", "")
+        home_clean = home_team.replace("Los Angeles ", "").replace("New York ", "").replace("Chicago ", "").replace("San Francisco ", "")
+        
+        # Format date as "April 5 2026"
+        try:
+            date_obj = datetime.fromisoformat(game_date.replace("Z", "+00:00"))
+            month_day = date_obj.strftime("%B %-d").replace(" 0", " ")
+            year = date_obj.strftime("%Y")
+            date_str = f"{month_day} {year}"
+        except:
+            date_str = ""
+        
+        # Search query: "Dodgers vs Yankees Highlights April 5 2026"
+        query = f"{away_clean} vs {home_clean} Highlights {date_str}"
+        logger.info("Searching YouTube for: %s", query)
+        
+        # YouTube search via scraping (no API key needed)
+        search_url = f"https://www.youtube.com/results?search_query={quote_plus(query)}"
+        
+        try:
+            async with self.http_session.get(search_url) as response:
+                html = await response.text()
+                
+                # Extract video ID from search results
+                # Look for "videoId":"XXXXXXXXXXX" pattern
+                video_ids = re.findall(r'"videoId":"([^"]{11})"', html)
+                
+                if video_ids:
+                    video_id = video_ids[0]
+                    video_url = f"https://www.youtube.com/watch?v={video_id}"
+                    logger.info("Found YouTube video: %s", video_url)
+                    return video_url
+                else:
+                    logger.warning("No YouTube videos found for query: %s", query)
+                    return None
+                    
+        except Exception as e:
+            logger.exception("Error searching YouTube: %s", e)
+            return None
 
     def _build_recap_embed(
         self,
@@ -314,13 +324,13 @@ class RecapBot:
         winner_id: Optional[int],
         game_date_raw: str,
         game_number: int,
-        recap_url: str,
+        video_url: str,
     ) -> discord.Embed:
         display_date = self._format_game_date(game_date_raw)
         color = TEAM_COLORS.get(winner_name, DEFAULT_EMBED_COLOR)
         
         # Handle doubleheader games
-        title = f"{away} at {home} Recap"
+        title = f"{away} at {home} Highlights"
         if game_number > 1:
             title += f" (Game {game_number})"
         
@@ -328,166 +338,20 @@ class RecapBot:
 
         embed = discord.Embed(
             title=title,
-            url=recap_url,
+            url=video_url,
             description=description,
             color=color,
             timestamp=datetime.now(EASTERN),
         )
         embed.add_field(name="Final", value=f"{away} {away_score} • {home} {home_score}", inline=False)
         
-        # If it's a direct video URL, add it to the embed for playback
-        if recap_url.endswith(".mp4") or "m3u8" in recap_url:
-            embed.add_field(name="🎥 Video", value=f"[Watch Recap]({recap_url})", inline=False)
-        
         # Add winner team logo if available (ESPN CDN)
         if winner_id:
             logo_url = f"https://a.espncdn.com/i/teamlogos/mlb/500/{winner_id}.png"
             embed.set_thumbnail(url=logo_url)
         
-        embed.set_footer(text=f"MLB Recap • {display_date}")
+        embed.set_footer(text=f"MLB Highlights • {display_date}")
         return embed
-
-    async def _fetch_recap_for_game(self, game_pk: str) -> Optional[RecapCandidate]:
-        content_url = f"https://statsapi.mlb.com/api/v1/game/{game_pk}/content"
-        payload = await self._fetch_json(content_url)
-        
-        # Save first game's response to file for inspection
-        try:
-            import json
-            debug_path = Path("/opt/render/project/.data") / f"mlb_api_response_{game_pk}.json"
-            debug_path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
-            logger.info("Saved API response to %s", debug_path)
-        except Exception as e:
-            logger.warning("Could not save debug file: %s", e)
-        
-        # Debug: Log the structure to see what we're getting
-        logger.info("=== Fetching recap for game %s ===", game_pk)
-
-        candidates: list[RecapCandidate] = []
-
-        # 1) Direct editorial recap / media blobs.
-        self._collect_candidates(payload, candidates)
-
-        # 2) Some games expose recap links under editorial > recap.
-        editorial_recap = ((((payload.get("editorial") or {}).get("recap") or {}).get("mlb") or {}))
-        self._collect_candidates(editorial_recap, candidates)
-
-        if not candidates:
-            logger.warning("No recap candidates found for game %s", game_pk)
-            return None
-
-        candidates.sort(key=lambda c: (-c.score, c.title.lower(), c.url))
-        logger.info("Found %d recap candidates for game %s", len(candidates), game_pk)
-        logger.info("Best candidate: title='%s', url='%s', score=%d", 
-                    candidates[0].title, candidates[0].url, candidates[0].score)
-        return candidates[0]
-
-    def _collect_candidates(self, node: Any, out: list[RecapCandidate]) -> None:
-        if isinstance(node, dict):
-            title = self._extract_title(node)
-            url = self._extract_best_url(node)
-            if title and url:
-                score = self._score_candidate(title, url)
-                if score > 0:
-                    candidate = RecapCandidate(title=title, url=url, score=score)
-                    out.append(candidate)
-                    # Log the successful candidate with its structure
-                    logger.info("✓ CANDIDATE: title='%s', url='%s', score=%d", title, url, score)
-                    # Log what keys this node has to understand structure
-                    logger.info("  Node keys: %s", list(node.keys())[:10])  # First 10 keys
-
-            for value in node.values():
-                self._collect_candidates(value, out)
-
-        elif isinstance(node, list):
-            for item in node:
-                self._collect_candidates(item, out)
-
-    def _extract_title(self, node: dict[str, Any]) -> str:
-        for key in ("title", "headline", "name", "description", "blurb"):
-            value = node.get(key)
-            if isinstance(value, str) and value.strip():
-                return value.strip()
-        return ""
-
-    def _extract_best_url(self, node: dict[str, Any]) -> str:
-        # First priority: Direct playback URLs (MP4, M3U8) for Discord embedding
-        playbacks = node.get("playbacks")
-        if isinstance(playbacks, list) and len(playbacks) > 0:
-            logger.info("Found playbacks array with %d items", len(playbacks))
-            mp4_url = ""
-            m3u8_url = ""
-            for playback in playbacks:
-                if not isinstance(playback, dict):
-                    continue
-                for key in ("url", "src"):
-                    value = playback.get(key)
-                    if not isinstance(value, str):
-                        continue
-                    url = self._normalize_url(value)
-                    logger.info("Found playback URL: %s", url)
-                    # Prefer MP4 for Discord native playback
-                    if url.endswith(".mp4"):
-                        mp4_url = url
-                        logger.info("✓ Found MP4 URL: %s", url)
-                    elif "m3u8" in url and not m3u8_url:
-                        m3u8_url = url
-                        logger.info("Found M3U8 URL: %s", url)
-            
-            # Return MP4 first (best for Discord), then M3U8
-            if mp4_url:
-                logger.info(">>> Using MP4 URL for Discord embed")
-                return mp4_url
-            if m3u8_url:
-                logger.info(">>> Using M3U8 URL (no MP4 found)")
-                return m3u8_url
-        
-        # Second priority: MLB video page URLs (fallback if no direct video)
-        direct_keys = [
-            "url",
-            "shareUrl",
-            "canonicalUrl",
-            "webVtt",
-        ]
-        for key in direct_keys:
-            value = node.get(key)
-            if isinstance(value, str):
-                url = self._normalize_url(value)
-                if self._looks_like_video_page(url):
-                    # Only log this if we're actually returning it
-                    return url
-
-        # Third priority: construct from slug
-        slug = node.get("slug") or node.get("seoName")
-        if isinstance(slug, str) and slug.strip():
-            url = f"https://www.mlb.com/video/{slug.strip('/')}"
-            # Only log if we're returning it
-            return url
-
-        # Don't spam logs - most nodes won't have URLs
-        return ""
-
-    def _normalize_url(self, value: str) -> str:
-        url = value.strip()
-        if url.startswith("//"):
-            url = f"https:{url}"
-        return url
-
-    def _looks_like_video_page(self, url: str) -> bool:
-        return url.startswith("https://www.mlb.com/video/") or url.startswith("https://mlb.com/video/")
-
-    def _score_candidate(self, title: str, url: str) -> int:
-        text = f"{title} {url}".lower()
-        score = 0
-        for keyword in RECAP_KEYWORDS:
-            if keyword in text:
-                score += 100
-        for keyword in REJECT_KEYWORDS:
-            if keyword in text:
-                score -= 80
-        if "/video/" in url:
-            score += 15
-        return score
 
     def _winner_name(self, away: str, home: str, away_score: int, home_score: int) -> str:
         if away_score > home_score:
