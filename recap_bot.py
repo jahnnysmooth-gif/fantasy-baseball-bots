@@ -78,31 +78,31 @@ class RecapBot:
         """Start the recap bot polling loop."""
         if self._task is None or self._task.done():
             self._task = asyncio.create_task(self._run_loop())
-            logger.info("Recap bot started, polling every %s seconds", self.poll_seconds)
+            logger.info("RECAP_BOT: Started, polling every %s seconds", self.poll_seconds)
 
     def stop(self) -> None:
         """Stop the recap bot polling loop."""
         if self._task and not self._task.done():
             self._task.cancel()
-            logger.info("Recap bot stopped")
+            logger.info("RECAP_BOT: Stopped")
 
     async def _run_loop(self) -> None:
         """Main polling loop."""
         await self.client.wait_until_ready()
         
         # Run immediately on startup (don't wait for first interval)
-        logger.info("Running initial poll immediately...")
+        logger.info("RECAP_BOT: Running initial poll immediately...")
         try:
             await self._poll_completed_games()
         except Exception as exc:
-            logger.exception("Error in initial recap bot poll: %s", exc)
+            logger.exception("RECAP_BOT: Error in initial poll: %s", exc)
         
         while not self.client.is_closed():
             try:
                 await asyncio.sleep(self.poll_seconds)
                 await self._poll_completed_games()
             except Exception as exc:
-                logger.exception("Error in recap bot poll loop: %s", exc)
+                logger.exception("RECAP_BOT: Error in poll loop: %s", exc)
 
     def _load_state(self) -> None:
         if not self.state_path.exists():
@@ -112,12 +112,12 @@ class RecapBot:
             self.posted_game_ids = set(data.get("posted_game_ids", []))
             self.checked_no_recap = data.get("checked_no_recap", {})
             logger.info(
-                "Loaded state: %s game ids, %s pending recaps",
+                "RECAP_BOT: Loaded state - %s game ids, %s pending recaps",
                 len(self.posted_game_ids),
                 len(self.checked_no_recap),
             )
         except Exception as exc:
-            logger.warning("Could not load state file %s: %s", self.state_path, exc)
+            logger.warning("RECAP_BOT: Could not load state file %s: %s", self.state_path, exc)
 
     def _save_state(self) -> None:
         # Cleanup old entries if state gets too large (keep ~10 days worth)
@@ -139,21 +139,21 @@ class RecapBot:
         sorted_ids = sorted(self.posted_game_ids)
         keep_count = 800
         self.posted_game_ids = set(sorted_ids[-keep_count:])
-        logger.info("Cleaned up state: kept %s most recent game IDs", keep_count)
+        logger.info("RECAP_BOT: Cleaned up state - kept %s most recent game IDs", keep_count)
 
     async def _poll_completed_games(self) -> None:
         channel = self.client.get_channel(self.channel_id)
         if channel is None:
-            logger.error("Channel %s not found. Check RECAP_CHANNEL_ID.", self.channel_id)
+            logger.error("RECAP_BOT: Channel %s not found. Check RECAP_CHANNEL_ID.", self.channel_id)
             return
         if not isinstance(channel, discord.abc.Messageable):
-            logger.error("Channel %s is not messageable.", self.channel_id)
+            logger.error("RECAP_BOT: Channel %s is not messageable.", self.channel_id)
             return
 
         today_et = datetime.now(EASTERN).date()
         dates_to_scan = [today_et]  # Only today for testing
 
-        logger.info("Scanning MLB schedule for %s", ", ".join(str(d) for d in dates_to_scan))
+        logger.info("RECAP_BOT: Scanning MLB schedule for %s", ", ".join(str(d) for d in dates_to_scan))
 
         all_finished_games = []
         for scan_date in dates_to_scan:
@@ -168,14 +168,14 @@ class RecapBot:
         
         # For testing: only process the last 3 finished games
         games_to_post = all_finished_games[-3:] if len(all_finished_games) > 3 else all_finished_games
-        logger.info("Found %d finished games, posting last %d for testing", 
+        logger.info("RECAP_BOT: Found %d finished games, posting last %d for testing", 
                     len(all_finished_games), len(games_to_post))
         
         for game in games_to_post:
             try:
                 await self._process_game(channel, game)
             except Exception as exc:
-                logger.exception("Failed processing game %s: %s", game.get("gamePk") or "unknown", exc)
+                logger.exception("RECAP_BOT: Failed processing game %s: %s", game.get("gamePk") or "unknown", exc)
 
     async def _fetch_json(self, url: str) -> dict[str, Any]:
         for attempt in range(3):
@@ -186,7 +186,7 @@ class RecapBot:
             except (aiohttp.ClientError, asyncio.TimeoutError) as exc:
                 if attempt == 2:
                     raise
-                logger.warning("Fetch failed (attempt %d/3) for %s: %s", attempt + 1, url, exc)
+                logger.warning("RECAP_BOT: Fetch failed (attempt %d/3) for %s: %s", attempt + 1, url, exc)
                 await asyncio.sleep(2 ** attempt)
         return {}
 
@@ -217,6 +217,8 @@ class RecapBot:
         game_date_raw = game.get("gameDate") or ""
         game_number = game.get("gameNumber", 1)
 
+        logger.info("RECAP_BOT: Processing game %s - %s at %s", game_pk, away, home)
+
         # Search YouTube for highlights
         youtube_url = await self._search_youtube_highlights(away, home, game_date_raw)
         
@@ -227,7 +229,7 @@ class RecapBot:
                 self.checked_no_recap[game_pk] = attempts + 1
                 self._save_state()
                 logger.info(
-                    "No YouTube video found yet for %s at %s (%s) - attempt %d/5",
+                    "RECAP_BOT: No YouTube video found yet for %s at %s (%s) - attempt %d/5",
                     away,
                     home,
                     game_pk,
@@ -254,11 +256,13 @@ class RecapBot:
             video_url=youtube_url,
         )
 
-        # Post YouTube URL - Discord will auto-embed the video
-        # Try posting JUST the URL first to see if that embeds
+        # Post YouTube URL first (Discord will auto-embed)
         await channel.send(content=youtube_url)
+        
+        # Post custom embed as a follow-up (doesn't break YouTube embed)
+        await channel.send(embed=embed)
 
-        logger.info("RECAP_BOT_YT: Posted highlights for %s at %s | %s", away, home, youtube_url)
+        logger.info("RECAP_BOT: ✓ Posted highlights for %s at %s | %s", away, home, youtube_url)
         self.posted_game_ids.add(game_pk)
         self._save_state()
         
@@ -388,21 +392,21 @@ async def start_recap_bot() -> None:
     """Entry point called by main.py's run_forever wrapper."""
     import os
     
-    logger.info("Recap bot starting up...")
+    logger.info("RECAP_BOT: === STARTING UP ===")
     
     HIGHLIGHTS_BOT_TOKEN = os.getenv("HIGHLIGHTS_BOT_TOKEN", "")
     RECAP_CHANNEL_ID = int(os.getenv("RECAP_CHANNEL_ID", "0"))
     RECAP_BOT_POLL_SECONDS = int(os.getenv("RECAP_BOT_POLL_SECONDS", "300"))
     
-    logger.info("Token present: %s", "Yes" if HIGHLIGHTS_BOT_TOKEN else "NO - MISSING!")
-    logger.info("Channel ID: %s", RECAP_CHANNEL_ID)
-    logger.info("Poll interval: %s seconds", RECAP_BOT_POLL_SECONDS)
+    logger.info("RECAP_BOT: Token present: %s", "Yes" if HIGHLIGHTS_BOT_TOKEN else "NO - MISSING!")
+    logger.info("RECAP_BOT: Channel ID: %s", RECAP_CHANNEL_ID)
+    logger.info("RECAP_BOT: Poll interval: %s seconds", RECAP_BOT_POLL_SECONDS)
     
     if not HIGHLIGHTS_BOT_TOKEN:
-        logger.error("FATAL: Missing HIGHLIGHTS_BOT_TOKEN environment variable")
+        logger.error("RECAP_BOT: FATAL - Missing HIGHLIGHTS_BOT_TOKEN environment variable")
         raise SystemExit("Missing HIGHLIGHTS_BOT_TOKEN environment variable")
     if RECAP_CHANNEL_ID <= 0:
-        logger.warning("RECAP_CHANNEL_ID not set - recap bot will not run")
+        logger.warning("RECAP_BOT: RECAP_CHANNEL_ID not set - bot will not run")
         # Sleep forever to keep the task alive but inactive
         await asyncio.sleep(float('inf'))
         return
@@ -421,7 +425,7 @@ async def start_recap_bot() -> None:
     @client.event
     async def on_ready() -> None:
         nonlocal http_session, recap_bot_instance
-        logger.info("Recap bot logged in as %s (%s)", client.user, client.user.id if client.user else "n/a")
+        logger.info("RECAP_BOT: Logged in as %s (%s)", client.user, client.user.id if client.user else "n/a")
         
         # Create shared HTTP session
         timeout = aiohttp.ClientTimeout(total=30)
@@ -436,13 +440,13 @@ async def start_recap_bot() -> None:
             poll_seconds=RECAP_BOT_POLL_SECONDS,
         )
         recap_bot_instance.start()
-        logger.info("Recap bot started - polling every %s seconds", RECAP_BOT_POLL_SECONDS)
+        logger.info("RECAP_BOT: Started - polling every %s seconds", RECAP_BOT_POLL_SECONDS)
     
     try:
-        logger.info("Attempting to connect to Discord...")
+        logger.info("RECAP_BOT: Connecting to Discord...")
         await client.start(HIGHLIGHTS_BOT_TOKEN)
     except Exception as e:
-        logger.exception("Failed to start Discord client: %s", e)
+        logger.exception("RECAP_BOT: FATAL - Failed to start Discord client: %s", e)
         raise
     finally:
         # Cleanup
