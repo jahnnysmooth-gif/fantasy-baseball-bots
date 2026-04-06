@@ -373,7 +373,7 @@ class RecapBot:
         color = TEAM_COLORS.get(winner_name, DEFAULT_EMBED_COLOR)
         
         # Handle doubleheader games
-        title = f"{away} at {home} Highlights"
+        title = f"{away} at {home}"
         if game_number > 1:
             title += f" (Game {game_number})"
 
@@ -383,14 +383,17 @@ class RecapBot:
             color=color,
         )
         
-        # Single field with score - add heavy padding to match YouTube embed width
-        score_text = f"{away} {away_score}, {home} {home_score}"
-        # Add lots of invisible padding to force wider embed
-        # Using zero-width spaces and regular spaces
-        padding = "\u200b" + (" " * 100) + "\u200b"
-        embed.add_field(name="Final", value=f"{score_text}{padding}", inline=False)
+        # Put winner first in score line
+        if away_score > home_score:
+            # Away team won
+            score_text = f"{away} {away_score}, {home} {home_score}"
+        else:
+            # Home team won
+            score_text = f"{home} {home_score}, {away} {away_score}"
         
-        # Add winner team logo if available (ESPN CDN)
+        embed.add_field(name="Final", value=score_text, inline=False)
+        
+        # Add winner team logo on the right side using set_thumbnail (ESPN CDN)
         if winner_id:
             logo_url = f"https://a.espncdn.com/i/teamlogos/mlb/500/{winner_id}.png"
             embed.set_thumbnail(url=logo_url)
