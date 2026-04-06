@@ -271,8 +271,14 @@ class RecapBot:
             recap_url=recap.url,
         )
 
-        # Keep the raw MLB link in content so Discord can still unfurl the native video/page preview.
-        await channel.send(content=recap.url, embed=embed)
+        # If it's a direct video URL (MP4), Discord will auto-embed it
+        # If it's an MLB page, include it in content for unfurling
+        if recap.url.endswith(".mp4"):
+            # Direct video - put in embed
+            await channel.send(embed=embed)
+        else:
+            # MLB page or M3U8 - put in content for Discord to unfurl
+            await channel.send(content=recap.url, embed=embed)
 
         logger.info("Posted recap for %s at %s | %s", away, home, recap.url)
         self.posted_game_ids.add(game_pk)
@@ -313,6 +319,10 @@ class RecapBot:
             timestamp=datetime.now(EASTERN),
         )
         embed.add_field(name="Final", value=f"{away} {away_score} • {home} {home_score}", inline=False)
+        
+        # If it's a direct video URL, add it to the embed for playback
+        if recap_url.endswith(".mp4") or "m3u8" in recap_url:
+            embed.add_field(name="🎥 Video", value=f"[Watch Recap]({recap_url})", inline=False)
         
         # Add winner team logo if available (ESPN CDN)
         if winner_id:
@@ -365,6 +375,32 @@ class RecapBot:
         return ""
 
     def _extract_best_url(self, node: dict[str, Any]) -> str:
+        # First priority: Direct playback URLs (MP4, M3U8) for Discord embedding
+        playbacks = node.get("playbacks")
+        if isinstance(playbacks, list):
+            mp4_url = ""
+            m3u8_url = ""
+            for playback in playbacks:
+                if not isinstance(playback, dict):
+                    continue
+                for key in ("url", "src"):
+                    value = playback.get(key)
+                    if not isinstance(value, str):
+                        continue
+                    url = self._normalize_url(value)
+                    # Prefer MP4 for Discord native playback
+                    if url.endswith(".mp4"):
+                        mp4_url = url
+                    elif "m3u8" in url and not m3u8_url:
+                        m3u8_url = url
+            
+            # Return MP4 first (best for Discord), then M3U8
+            if mp4_url:
+                return mp4_url
+            if m3u8_url:
+                return m3u8_url
+        
+        # Second priority: MLB video page URLs (fallback if no direct video)
         direct_keys = [
             "url",
             "shareUrl",
@@ -378,24 +414,7 @@ class RecapBot:
                 if self._looks_like_video_page(url):
                     return url
 
-        playbacks = node.get("playbacks")
-        if isinstance(playbacks, list):
-            best_fallback = ""
-            for playback in playbacks:
-                if not isinstance(playback, dict):
-                    continue
-                for key in ("url", "src"):
-                    value = playback.get(key)
-                    if not isinstance(value, str):
-                        continue
-                    url = self._normalize_url(value)
-                    if self._looks_like_video_page(url):
-                        return url
-                    if not best_fallback and ("m3u8" in url or url.endswith(".mp4")):
-                        best_fallback = url
-            if best_fallback:
-                return best_fallback
-
+        # Third priority: construct from slug
         slug = node.get("slug") or node.get("seoName")
         if isinstance(slug, str) and slug.strip():
             return f"https://www.mlb.com/video/{slug.strip('/')}"
