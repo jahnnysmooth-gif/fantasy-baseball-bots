@@ -48,6 +48,40 @@ TEAM_COLORS = {
 }
 DEFAULT_EMBED_COLOR = 0x1D428A
 
+# Team ID to ESPN abbreviation mapping for logos
+TEAM_ID_TO_ABBR = {
+    109: "ari",  # Diamondbacks
+    144: "atl",  # Braves
+    110: "bal",  # Orioles
+    111: "bos",  # Red Sox
+    112: "chc",  # Cubs
+    145: "chw",  # White Sox (chw not cws!)
+    113: "cin",  # Reds
+    114: "cle",  # Guardians
+    115: "col",  # Rockies
+    116: "det",  # Tigers
+    117: "hou",  # Astros
+    118: "kc",   # Royals
+    108: "laa",  # Angels
+    119: "lad",  # Dodgers
+    146: "mia",  # Marlins
+    158: "mil",  # Brewers
+    142: "min",  # Twins
+    121: "nym",  # Mets
+    147: "nyy",  # Yankees
+    133: "oak",  # Athletics
+    143: "phi",  # Phillies
+    134: "pit",  # Pirates
+    135: "sd",   # Padres
+    137: "sf",   # Giants
+    136: "sea",  # Mariners
+    138: "stl",  # Cardinals
+    139: "tb",   # Rays
+    140: "tex",  # Rangers
+    141: "tor",  # Blue Jays
+    120: "wsh",  # Nationals
+}
+
 logger = logging.getLogger("recap_bot")
 
 
@@ -393,9 +427,10 @@ class RecapBot:
         
         embed.add_field(name="Final", value=score_text, inline=False)
         
-        # Add winner team logo (ESPN CDN)
-        if winner_id:
-            embed.set_thumbnail(url=f"https://a.espncdn.com/i/teamlogos/mlb/500/{winner_id}.png")
+        # Add winner team logo (ESPN CDN - uses lowercase abbreviations)
+        if winner_id and winner_id in TEAM_ID_TO_ABBR:
+            team_abbr = TEAM_ID_TO_ABBR[winner_id]
+            embed.set_thumbnail(url=f"https://a.espncdn.com/i/teamlogos/mlb/500/{team_abbr}.png")
         
         embed.set_footer(text=f"MLB Highlights • {display_date}")
         return embed
