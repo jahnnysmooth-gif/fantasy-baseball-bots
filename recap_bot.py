@@ -319,10 +319,72 @@ class RecapBot:
         home_team: str, 
         game_date: str
     ) -> Optional[str]:
-        """Search YouTube for the game's highlights video from MLB's official channel."""
+        """Search for game highlights - try ESPN API first, then YouTube as fallback."""
+        
+        # Format date for ESPN API
+        try:
+            date_obj = datetime.fromisoformat(game_date.replace("Z", "+00:00"))
+            espn_date = date_obj.strftime("%Y%m%d")  # ESPN uses YYYYMMDD format
+        except:
+            espn_date = datetime.now(EASTERN).strftime("%Y%m%d")
+        
+        logger.info("RECAP_BOT_ESPN: === TRYING ESPN API FIRST ===")
+        logger.info("RECAP_BOT_ESPN: Away: %s, Home: %s", away_team, home_team)
+        logger.info("RECAP_BOT_ESPN: Date: %s", espn_date)
+        
+        # ESPN scoreboard API has links to game recaps/highlights
+        espn_url = f"https://site.api.espn.com/apis/site/v2/sports/baseball/mlb/scoreboard?dates={espn_date}"
+        logger.info("RECAP_BOT_ESPN: Fetching: %s", espn_url)
+        
+        try:
+            async with self.http_session.get(espn_url) as response:
+                logger.info("RECAP_BOT_ESPN: Response status: %s", response.status)
+                data = await response.json()
+                
+                # Find the game in ESPN's scoreboard
+                events = data.get("events", [])
+                logger.info("RECAP_BOT_ESPN: Found %d games on ESPN", len(events))
+                
+                for event in events:
+                    competitions = event.get("competitions", [])
+                    if not competitions:
+                        continue
+                    
+                    comp = competitions[0]
+                    teams = comp.get("competitors", [])
+                    
+                    # Check if this is our game
+                    team_names = [t.get("team", {}).get("displayName", "") for t in teams]
+                    if away_team in team_names and home_team in team_names:
+                        logger.info("RECAP_BOT_ESPN: ✓ Found matching game on ESPN")
+                        
+                        # Look for video links
+                        links = event.get("links", [])
+                        for link in links:
+                            if link.get("text", "").lower() in ["highlights", "recap", "gamecast"]:
+                                url = link.get("href", "")
+                                if "youtube" in url or "video" in url:
+                                    logger.info("RECAP_BOT_ESPN: ✓ Found video link: %s", url)
+                                    return url
+                        
+                        logger.info("RECAP_BOT_ESPN: Game found but no video links")
+                        break
+        except Exception as e:
+            logger.warning("RECAP_BOT_ESPN: ESPN API failed: %s", e)
+        
+        # FALLBACK: YouTube scraping
+        logger.info("RECAP_BOT_YT: === FALLING BACK TO YOUTUBE ===")
+        return await self._search_youtube_fallback(away_team, home_team, game_date)
+    
+    async def _search_youtube_fallback(
+        self,
+        away_team: str,
+        home_team: str,
+        game_date: str
+    ) -> Optional[str]:
+        """Fallback YouTube search for highlights."""
         
         # Use shortened team names to match MLB's title format
-        # MLB uses: "Astros vs. A's", "Braves vs. D-backs", "Cardinals vs. Tigers"
         away_short = self._shorten_team_name(away_team)
         home_short = self._shorten_team_name(home_team)
         
@@ -331,20 +393,14 @@ class RecapBot:
             date_obj = datetime.fromisoformat(game_date.replace("Z", "+00:00"))
             month = date_obj.month
             day = date_obj.day
-            year = str(date_obj.year)[-2:]  # Last 2 digits of year
+            year = str(date_obj.year)[-2:]
             date_str = f"({month}/{day}/{year})"
         except:
             date_str = ""
+            month = 0
+            day = 0
         
-        # Search ONLY MLB's official channel
-        # Query format matches MLB's title: "Astros vs. A's Game Highlights (4/5/26)"
         query = f"{away_short} vs {home_short} {date_str}"
-        channel_url = "https://www.youtube.com/@MLB/videos"
-        
-        logger.info("RECAP_BOT_YT: === SEARCHING MLB OFFICIAL CHANNEL ONLY ===")
-        logger.info("RECAP_BOT_YT: Away: %s -> %s", away_team, away_short)
-        logger.info("RECAP_BOT_YT: Home: %s -> %s", home_team, home_short)
-        logger.info("RECAP_BOT_YT: Date: %s", date_str)
         logger.info("RECAP_BOT_YT: Query: %s", query)
         
         # Search MLB's videos page instead of search results
