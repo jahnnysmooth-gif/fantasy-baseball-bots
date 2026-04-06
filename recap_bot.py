@@ -296,7 +296,7 @@ class RecapBot:
         # Post custom embed as a follow-up (doesn't break YouTube embed)
         await channel.send(embed=embed)
 
-        logger.info("RECAP_BOT: ✓ Posted highlights for %s at %s | %s", away, home, youtube_url)
+        logger.info("RECAP_BOT: ✓ Posted %s at %s (%d-%d) | %s", away, home, away_score, home_score, youtube_url)
         self.posted_game_ids.add(game_pk)
         self._save_state()
         
@@ -407,7 +407,7 @@ class RecapBot:
         color = TEAM_COLORS.get(winner_name, DEFAULT_EMBED_COLOR)
         
         # Handle doubleheader games
-        title = f"{away} at {home}"
+        title = f"⚾ {away} at {home}"
         if game_number > 1:
             title += f" (Game {game_number})"
 
