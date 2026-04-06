@@ -319,137 +319,87 @@ class RecapBot:
         home_team: str, 
         game_date: str
     ) -> Optional[str]:
-        """Search for game highlights - try ESPN API first, then YouTube as fallback."""
+        """Get game highlights from MLB Stats API content endpoint."""
         
-        # Format date for ESPN API
-        try:
-            date_obj = datetime.fromisoformat(game_date.replace("Z", "+00:00"))
-            espn_date = date_obj.strftime("%Y%m%d")  # ESPN uses YYYYMMDD format
-        except:
-            espn_date = datetime.now(EASTERN).strftime("%Y%m%d")
+        # We already have the game_pk from _process_game, but we need to pass it here
+        # For now, let's try a different approach - search MLB.com's video feed
         
-        logger.info("RECAP_BOT_ESPN: === TRYING ESPN API FIRST ===")
-        logger.info("RECAP_BOT_ESPN: Away: %s, Home: %s", away_team, home_team)
-        logger.info("RECAP_BOT_ESPN: Date: %s", espn_date)
+        logger.info("RECAP_BOT_MLB: === TRYING MLB VIDEO FEED ===")
         
-        # ESPN scoreboard API has links to game recaps/highlights
-        espn_url = f"https://site.api.espn.com/apis/site/v2/sports/baseball/mlb/scoreboard?dates={espn_date}"
-        logger.info("RECAP_BOT_ESPN: Fetching: %s", espn_url)
-        
-        try:
-            async with self.http_session.get(espn_url) as response:
-                logger.info("RECAP_BOT_ESPN: Response status: %s", response.status)
-                data = await response.json()
-                
-                # Find the game in ESPN's scoreboard
-                events = data.get("events", [])
-                logger.info("RECAP_BOT_ESPN: Found %d games on ESPN", len(events))
-                
-                for event in events:
-                    competitions = event.get("competitions", [])
-                    if not competitions:
-                        continue
-                    
-                    comp = competitions[0]
-                    teams = comp.get("competitors", [])
-                    
-                    # Check if this is our game
-                    team_names = [t.get("team", {}).get("displayName", "") for t in teams]
-                    if away_team in team_names and home_team in team_names:
-                        logger.info("RECAP_BOT_ESPN: ✓ Found matching game on ESPN")
-                        
-                        # Look for video links
-                        links = event.get("links", [])
-                        for link in links:
-                            if link.get("text", "").lower() in ["highlights", "recap", "gamecast"]:
-                                url = link.get("href", "")
-                                if "youtube" in url or "video" in url:
-                                    logger.info("RECAP_BOT_ESPN: ✓ Found video link: %s", url)
-                                    return url
-                        
-                        logger.info("RECAP_BOT_ESPN: Game found but no video links")
-                        break
-        except Exception as e:
-            logger.warning("RECAP_BOT_ESPN: ESPN API failed: %s", e)
-        
-        # FALLBACK: YouTube scraping
-        logger.info("RECAP_BOT_YT: === FALLING BACK TO YOUTUBE ===")
-        return await self._search_youtube_fallback(away_team, home_team, game_date)
-    
-    async def _search_youtube_fallback(
-        self,
-        away_team: str,
-        home_team: str,
-        game_date: str
-    ) -> Optional[str]:
-        """Fallback YouTube search for highlights."""
-        
-        # Use shortened team names to match MLB's title format
+        # MLB.com has a video feed API
+        # Format: https://www.mlb.com/video/search?q=Cardinals+Tigers
         away_short = self._shorten_team_name(away_team)
         home_short = self._shorten_team_name(home_team)
         
-        # Format date as "(4/5/26)" to match MLB's title format
         try:
             date_obj = datetime.fromisoformat(game_date.replace("Z", "+00:00"))
-            month = date_obj.month
-            day = date_obj.day
-            year = str(date_obj.year)[-2:]
-            date_str = f"({month}/{day}/{year})"
+            date_str = date_obj.strftime("%Y-%m-%d")
         except:
-            date_str = ""
-            month = 0
-            day = 0
+            date_str = datetime.now(EASTERN).strftime("%Y-%m-%d")
         
-        query = f"{away_short} vs {home_short} {date_str}"
-        logger.info("RECAP_BOT_YT: Query: %s", query)
+        # Try MLB's video search
+        query = f"{away_short} {home_short} highlights {date_str}"
+        mlb_search_url = f"https://www.mlb.com/video/search?q={quote_plus(query)}"
         
-        # Search MLB's videos page instead of search results
-        videos_url = "https://www.youtube.com/@MLB/videos"
-        logger.info("RECAP_BOT_YT: Fetching MLB videos page: %s", videos_url)
+        logger.info("RECAP_BOT_MLB: Search URL: %s", mlb_search_url)
         
         try:
-            async with self.http_session.get(videos_url) as response:
-                logger.info("RECAP_BOT_YT: Response status: %s", response.status)
+            async with self.http_session.get(mlb_search_url) as response:
+                logger.info("RECAP_BOT_MLB: Response status: %s", response.status)
                 html = await response.text()
-                logger.info("RECAP_BOT_YT: HTML length: %d bytes", len(html))
                 
-                # Look for video data in the page
-                # Videos are in a format like: "videoId":"XXXXXXXXXXX"..."title":{"runs":[{"text":"Cardinals vs. Tigers..."}]}
+                # Look for YouTube video IDs in MLB.com's search results
+                # They embed YouTube videos, so we can extract the IDs
+                youtube_pattern = r'youtube\.com/watch\?v=([a-zA-Z0-9_-]{11})'
+                matches = re.findall(youtube_pattern, html)
                 
-                # Find all videoId and title pairs
-                # Pattern to find video blocks with both ID and title
-                pattern = r'"videoId":"([a-zA-Z0-9_-]{11})"[^}]*?"title":\{"runs":\[\{"text":"([^"]+)"'
-                matches = re.finditer(pattern, html, re.DOTALL)
+                if matches:
+                    video_id = matches[0]  # First result
+                    video_url = f"https://www.youtube.com/watch?v={video_id}"
+                    logger.info("RECAP_BOT_MLB: ✓ Found YouTube video from MLB.com: %s", video_url)
+                    return video_url
                 
-                for match in matches:
-                    video_id = match.group(1)
-                    title = match.group(2)
-                    title_lower = title.lower()
-                    
-                    logger.info("RECAP_BOT_YT: Checking video %s: %s", video_id, title[:80])
-                    
-                    # Check if title contains both team names
-                    # MLB uses "vs." between teams
-                    has_away = away_short.lower() in title_lower
-                    has_home = home_short.lower() in title_lower
-                    has_date_full = date_str in title  # Full date like (4/5/26)
-                    has_date_short = f"{month}/{day}" in title  # Or just month/day
-                    
-                    if has_away and has_home and (has_date_full or has_date_short):
-                        video_url = f"https://www.youtube.com/watch?v={video_id}"
-                        logger.info("RECAP_BOT_YT: ✓ MATCH FOUND - %s", title)
-                        logger.info("RECAP_BOT_YT: ✓ SUCCESS - Using video: %s", video_url)
-                        return video_url
-                    else:
-                        logger.info("RECAP_BOT_YT: ✗ No match - away:%s home:%s date:%s", 
-                                   has_away, has_home, has_date_full or has_date_short)
-                
-                logger.warning("RECAP_BOT_YT: ✗ No matching videos found for %s vs %s on %s", 
-                              away_short, home_short, date_str)
-                return None
-                    
+                logger.warning("RECAP_BOT_MLB: No YouTube videos found in MLB.com search")
         except Exception as e:
-            logger.exception("RECAP_BOT_YT: ✗ ERROR fetching MLB videos: %s", e)
+            logger.warning("RECAP_BOT_MLB: MLB.com search failed: %s", e)
+        
+        # FALLBACK: Direct YouTube search with very specific query
+        return await self._search_youtube_fallback(away_short, home_short, date_str)
+    
+    async def _search_youtube_fallback(
+        self,
+        away_short: str,
+        home_short: str,
+        date_str: str
+    ) -> Optional[str]:
+        """Fallback: general YouTube search for MLB highlights."""
+        
+        logger.info("RECAP_BOT_YT: === YOUTUBE FALLBACK ===")
+        
+        # Simple YouTube search
+        query = f"MLB {away_short} vs {home_short} highlights {date_str}"
+        search_url = f"https://www.youtube.com/results?search_query={quote_plus(query)}"
+        
+        logger.info("RECAP_BOT_YT: Search URL: %s", search_url)
+        
+        try:
+            async with self.http_session.get(search_url) as response:
+                html = await response.text()
+                
+                # Simple pattern - just find first video ID
+                pattern = r'"videoId":"([a-zA-Z0-9_-]{11})"'
+                match = re.search(pattern, html)
+                
+                if match:
+                    video_id = match.group(1)
+                    video_url = f"https://www.youtube.com/watch?v={video_id}"
+                    logger.info("RECAP_BOT_YT: ✓ Found video: %s", video_url)
+                    return video_url
+                
+                logger.warning("RECAP_BOT_YT: No videos found")
+                return None
+        except Exception as e:
+            logger.exception("RECAP_BOT_YT: Error: %s", e)
             return None
 
     def _build_recap_embed(
