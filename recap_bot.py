@@ -83,6 +83,12 @@ TEAM_ID_TO_ABBR = {
 }
 
 logger = logging.getLogger("recap_bot")
+# Configure logger to output to stdout so Render can see it
+handler = logging.StreamHandler()
+handler.setFormatter(logging.Formatter('[%(asctime)s] [RECAP_BOT] %(message)s'))
+logger.addHandler(handler)
+logger.setLevel(logging.INFO)
+logger.propagate = False  # Don't send to root logger
 
 
 class RecapBot:
@@ -122,7 +128,9 @@ class RecapBot:
 
     async def _run_loop(self) -> None:
         """Main polling loop."""
+        logger.info("RECAP_BOT: _run_loop started, waiting for client ready...")
         await self.client.wait_until_ready()
+        logger.info("RECAP_BOT: Client ready!")
         
         # Run immediately on startup (don't wait for first interval)
         logger.info("RECAP_BOT: Running initial poll immediately...")
@@ -131,6 +139,7 @@ class RecapBot:
         except Exception as exc:
             logger.exception("RECAP_BOT: Error in initial poll: %s", exc)
         
+        logger.info("RECAP_BOT: Entering main polling loop...")
         while not self.client.is_closed():
             try:
                 await asyncio.sleep(self.poll_seconds)
@@ -176,6 +185,7 @@ class RecapBot:
         logger.info("RECAP_BOT: Cleaned up state - kept %s most recent game IDs", keep_count)
 
     async def _poll_completed_games(self) -> None:
+        logger.info("RECAP_BOT: === _poll_completed_games CALLED ===")
         channel = self.client.get_channel(self.channel_id)
         if channel is None:
             logger.error("RECAP_BOT: Channel %s not found. Check RECAP_CHANNEL_ID.", self.channel_id)
@@ -309,85 +319,66 @@ class RecapBot:
         home_team: str, 
         game_date: str
     ) -> Optional[str]:
-        """Search YouTube for the game's highlights video."""
+        """Search YouTube for the game's highlights video from MLB's official channel."""
         
         # Clean team names for search
         away_clean = away_team.replace("Los Angeles ", "").replace("New York ", "").replace("Chicago ", "").replace("San Francisco ", "")
         home_clean = home_team.replace("Los Angeles ", "").replace("New York ", "").replace("Chicago ", "").replace("San Francisco ", "")
         
-        # Format date as "April 5 2026"
+        # Format date as "(4/5/26)" to match MLB's title format
         try:
             date_obj = datetime.fromisoformat(game_date.replace("Z", "+00:00"))
-            # Format as "April 5 2026" (remove leading zero from day)
-            month = date_obj.strftime("%B")
-            day = str(date_obj.day)  # No leading zero
-            year = date_obj.strftime("%Y")
-            date_str = f"{month} {day} {year}"
+            month = date_obj.month
+            day = date_obj.day
+            year = str(date_obj.year)[-2:]  # Last 2 digits of year
+            date_str = f"({month}/{day}/{year})"
         except:
             date_str = ""
         
-        # Search query: "Dodgers vs Yankees Highlights April 5 2026"
-        query = f"{away_clean} vs {home_clean} Highlights {date_str}"
-        logger.info("RECAP_BOT_YT: === YOUTUBE SEARCH ===")
-        logger.info("RECAP_BOT_YT: Away team: %s -> %s", away_team, away_clean)
-        logger.info("RECAP_BOT_YT: Home team: %s -> %s", home_team, home_clean)
-        logger.info("RECAP_BOT_YT: Search query: %s", query)
+        # Search ONLY MLB's official channel
+        # Query format matches MLB's title: "Astros vs. A's Game Highlights (4/5/26)"
+        query = f"{away_clean} vs {home_clean} {date_str}"
+        channel_url = "https://www.youtube.com/@MLB/videos"
         
-        # YouTube search via scraping (no API key needed)
-        search_url = f"https://www.youtube.com/results?search_query={quote_plus(query)}"
+        logger.info("RECAP_BOT_YT: === SEARCHING MLB OFFICIAL CHANNEL ONLY ===")
+        logger.info("RECAP_BOT_YT: Away: %s, Home: %s", away_clean, home_clean)
+        logger.info("RECAP_BOT_YT: Date: %s", date_str)
+        logger.info("RECAP_BOT_YT: Query: %s", query)
+        
+        # Search within MLB's channel page
+        search_url = f"https://www.youtube.com/@MLB/search?query={quote_plus(query)}"
         logger.info("RECAP_BOT_YT: Search URL: %s", search_url)
         
         try:
             async with self.http_session.get(search_url) as response:
-                logger.info("RECAP_BOT_YT: YouTube response status: %s", response.status)
+                logger.info("RECAP_BOT_YT: Response status: %s", response.status)
                 html = await response.text()
-                logger.info("RECAP_BOT_YT: YouTube HTML length: %d bytes", len(html))
+                logger.info("RECAP_BOT_YT: HTML length: %d bytes", len(html))
                 
-                # Extract video IDs and their context from search results
-                # Look for "videoId":"XXXXXXXXXXX" pattern
-                # Also check for channel indicators to filter out ads
-                import json as json_module
-                
-                # Find all video renderer objects in the page
-                video_pattern = r'"videoRenderer":\{[^}]*"videoId":"([^"]{11})"[^}]*\}'
+                # Extract video IDs - simpler now since we're only on MLB's channel
+                video_pattern = r'"videoId":"([a-zA-Z0-9_-]{11})"'
                 matches = re.finditer(video_pattern, html)
                 
-                valid_videos = []
+                found_videos = []
                 for match in matches:
                     video_id = match.group(1)
-                    # Get the surrounding context (500 chars around the match)
-                    start = max(0, match.start() - 500)
-                    end = min(len(html), match.end() + 500)
-                    context = html[start:end].lower()
-                    
-                    # Filter out ads and non-MLB content
-                    # Skip if it contains ad indicators
-                    if any(indicator in context for indicator in ['ad_tag', 'ad_format', 'promoted']):
-                        logger.info("RECAP_BOT_YT: Skipping ad video: %s", video_id)
-                        continue
-                    
-                    # Prefer MLB official channels
-                    is_mlb = 'mlb' in context or 'espn' in context or 'house of highlights' in context
-                    
-                    valid_videos.append((video_id, is_mlb))
-                    logger.info("RECAP_BOT_YT: Found valid video: %s (MLB channel: %s)", video_id, is_mlb)
+                    found_videos.append(video_id)
+                    logger.info("RECAP_BOT_YT: Found video: %s", video_id)
                 
-                # Sort by MLB channel preference (MLB channels first)
-                valid_videos.sort(key=lambda x: (not x[1], x[0]))
+                logger.info("RECAP_BOT_YT: Found %d videos total", len(found_videos))
                 
-                logger.info("RECAP_BOT_YT: Found %d valid video IDs", len(valid_videos))
-                
-                if valid_videos:
-                    video_id = valid_videos[0][0]
+                if found_videos:
+                    # Return first video (most recent/relevant)
+                    video_id = found_videos[0]
                     video_url = f"https://www.youtube.com/watch?v={video_id}"
-                    logger.info("RECAP_BOT_YT: ✓ SUCCESS - Found video: %s", video_url)
+                    logger.info("RECAP_BOT_YT: ✓ SUCCESS - Using video: %s", video_url)
                     return video_url
                 else:
-                    logger.warning("RECAP_BOT_YT: ✗ FAILED - No videos found for: %s", query)
+                    logger.warning("RECAP_BOT_YT: ✗ No videos found on MLB channel for: %s", query)
                     return None
                     
         except Exception as e:
-            logger.exception("RECAP_BOT_YT: ✗ ERROR searching YouTube: %s", e)
+            logger.exception("RECAP_BOT_YT: ✗ ERROR searching MLB channel: %s", e)
             return None
 
     def _build_recap_embed(
@@ -426,6 +417,15 @@ class RecapBot:
             score_text = f"{home} {home_score}, {away} {away_score}"
         
         embed.add_field(name="Final", value=score_text, inline=False)
+        
+        # Normalize embed width by padding to minimum character count
+        # Discord embed width is based on content length, so we pad short content
+        MIN_WIDTH_CHARS = 200
+        current_length = len(score_text)
+        if current_length < MIN_WIDTH_CHARS:
+            # Add invisible zero-width spaces to reach minimum
+            padding = "\u200B" * (MIN_WIDTH_CHARS - current_length)
+            embed.description = padding
         
         # Add winner team logo (ESPN CDN - uses lowercase abbreviations)
         if winner_id and winner_id in TEAM_ID_TO_ABBR:
