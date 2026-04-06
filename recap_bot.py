@@ -287,30 +287,37 @@ class RecapBot:
         
         # Search query: "Dodgers vs Yankees Highlights April 5 2026"
         query = f"{away_clean} vs {home_clean} Highlights {date_str}"
-        logger.info("Searching YouTube for: %s", query)
+        logger.info("RECAP_BOT_YT: === YOUTUBE SEARCH ===")
+        logger.info("RECAP_BOT_YT: Away team: %s -> %s", away_team, away_clean)
+        logger.info("RECAP_BOT_YT: Home team: %s -> %s", home_team, home_clean)
+        logger.info("RECAP_BOT_YT: Search query: %s", query)
         
         # YouTube search via scraping (no API key needed)
         search_url = f"https://www.youtube.com/results?search_query={quote_plus(query)}"
+        logger.info("RECAP_BOT_YT: Search URL: %s", search_url)
         
         try:
             async with self.http_session.get(search_url) as response:
+                logger.info("RECAP_BOT_YT: YouTube response status: %s", response.status)
                 html = await response.text()
+                logger.info("RECAP_BOT_YT: YouTube HTML length: %d bytes", len(html))
                 
                 # Extract video ID from search results
                 # Look for "videoId":"XXXXXXXXXXX" pattern
                 video_ids = re.findall(r'"videoId":"([^"]{11})"', html)
+                logger.info("RECAP_BOT_YT: Found %d video IDs in HTML", len(video_ids))
                 
                 if video_ids:
                     video_id = video_ids[0]
                     video_url = f"https://www.youtube.com/watch?v={video_id}"
-                    logger.info("Found YouTube video: %s", video_url)
+                    logger.info("RECAP_BOT_YT: ✓ SUCCESS - Found video: %s", video_url)
                     return video_url
                 else:
-                    logger.warning("No YouTube videos found for query: %s", query)
+                    logger.warning("RECAP_BOT_YT: ✗ FAILED - No videos found for: %s", query)
                     return None
                     
         except Exception as e:
-            logger.exception("Error searching YouTube: %s", e)
+            logger.exception("RECAP_BOT_YT: ✗ ERROR searching YouTube: %s", e)
             return None
 
     def _build_recap_embed(
