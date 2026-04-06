@@ -195,7 +195,8 @@ class RecapBot:
             return
 
         today_et = datetime.now(EASTERN).date()
-        dates_to_scan = [today_et]  # Only today for testing
+        yesterday_et = today_et - timedelta(days=1)
+        dates_to_scan = [yesterday_et]  # Scan yesterday for testing (games finish late)
 
         logger.info("RECAP_BOT: Scanning MLB schedule for %s", ", ".join(str(d) for d in dates_to_scan))
 
