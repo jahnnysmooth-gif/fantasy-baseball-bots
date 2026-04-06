@@ -347,64 +347,53 @@ class RecapBot:
         logger.info("RECAP_BOT_YT: Date: %s", date_str)
         logger.info("RECAP_BOT_YT: Query: %s", query)
         
-        # Search within MLB's channel page
-        search_url = f"https://www.youtube.com/@MLB/search?query={quote_plus(query)}"
-        logger.info("RECAP_BOT_YT: Search URL: %s", search_url)
+        # Search MLB's videos page instead of search results
+        videos_url = "https://www.youtube.com/@MLB/videos"
+        logger.info("RECAP_BOT_YT: Fetching MLB videos page: %s", videos_url)
         
         try:
-            async with self.http_session.get(search_url) as response:
+            async with self.http_session.get(videos_url) as response:
                 logger.info("RECAP_BOT_YT: Response status: %s", response.status)
                 html = await response.text()
                 logger.info("RECAP_BOT_YT: HTML length: %d bytes", len(html))
                 
-                # Extract video IDs and their surrounding context to check titles
-                video_pattern = r'"videoId":"([a-zA-Z0-9_-]{11})"'
-                matches = re.finditer(video_pattern, html)
+                # Look for video data in the page
+                # Videos are in a format like: "videoId":"XXXXXXXXXXX"..."title":{"runs":[{"text":"Cardinals vs. Tigers..."}]}
                 
-                found_videos = []
+                # Find all videoId and title pairs
+                # Pattern to find video blocks with both ID and title
+                pattern = r'"videoId":"([a-zA-Z0-9_-]{11})"[^}]*?"title":\{"runs":\[\{"text":"([^"]+)"'
+                matches = re.finditer(pattern, html, re.DOTALL)
+                
                 for match in matches:
                     video_id = match.group(1)
+                    title = match.group(2)
+                    title_lower = title.lower()
                     
-                    # Get context around this video ID to find its title
-                    start = max(0, match.start() - 500)
-                    end = min(len(html), match.end() + 500)
-                    context = html[start:end]
+                    logger.info("RECAP_BOT_YT: Checking video %s: %s", video_id, title[:80])
                     
-                    # Try to extract the title from the context
-                    title_match = re.search(r'"title":\{"runs":\[\{"text":"([^"]+)"\}\]', context)
-                    if not title_match:
-                        title_match = re.search(r'"text":"([^"]*' + re.escape(away_short) + '[^"]*' + re.escape(home_short) + '[^"]*)"', context, re.IGNORECASE)
+                    # Check if title contains both team names
+                    # MLB uses "vs." between teams
+                    has_away = away_short.lower() in title_lower
+                    has_home = home_short.lower() in title_lower
+                    has_date_full = date_str in title  # Full date like (4/5/26)
+                    has_date_short = f"{month}/{day}" in title  # Or just month/day
                     
-                    if title_match:
-                        title = title_match.group(1).lower()
-                        logger.info("RECAP_BOT_YT: Found video %s with title: %s", video_id, title[:100])
-                        
-                        # Check if title contains both teams and the date
-                        has_away = away_short.lower() in title
-                        has_home = home_short.lower() in title
-                        has_date = date_str in title or f"{month}/{day}" in title
-                        
-                        if has_away and has_home and has_date:
-                            logger.info("RECAP_BOT_YT: ✓ MATCH - Video has both teams and date")
-                            found_videos.append(video_id)
-                            break  # Take first matching video
-                        else:
-                            logger.info("RECAP_BOT_YT: ✗ SKIP - away:%s home:%s date:%s", has_away, has_home, has_date)
+                    if has_away and has_home and (has_date_full or has_date_short):
+                        video_url = f"https://www.youtube.com/watch?v={video_id}"
+                        logger.info("RECAP_BOT_YT: ✓ MATCH FOUND - %s", title)
+                        logger.info("RECAP_BOT_YT: ✓ SUCCESS - Using video: %s", video_url)
+                        return video_url
+                    else:
+                        logger.info("RECAP_BOT_YT: ✗ No match - away:%s home:%s date:%s", 
+                                   has_away, has_home, has_date_full or has_date_short)
                 
-                logger.info("RECAP_BOT_YT: Found %d matching videos", len(found_videos))
-                
-                if found_videos:
-                    # Return first matching video
-                    video_id = found_videos[0]
-                    video_url = f"https://www.youtube.com/watch?v={video_id}"
-                    logger.info("RECAP_BOT_YT: ✓ SUCCESS - Using video: %s", video_url)
-                    return video_url
-                else:
-                    logger.warning("RECAP_BOT_YT: ✗ No matching videos found on MLB channel for: %s", query)
-                    return None
+                logger.warning("RECAP_BOT_YT: ✗ No matching videos found for %s vs %s on %s", 
+                              away_short, home_short, date_str)
+                return None
                     
         except Exception as e:
-            logger.exception("RECAP_BOT_YT: ✗ ERROR searching MLB channel: %s", e)
+            logger.exception("RECAP_BOT_YT: ✗ ERROR fetching MLB videos: %s", e)
             return None
 
     def _build_recap_embed(
