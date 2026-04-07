@@ -178,6 +178,9 @@ BATTING_X_DF_BY_SEASON = {}
 PITCHING_EV_DF_BY_SEASON = {}
 PITCHING_X_DF_BY_SEASON = {}
 
+# Track last time Statcast was accessed for auto-cleanup
+STATCAST_LAST_ACCESSED = {}
+
 seeder_task = None
 adp_cache = None
 
@@ -969,6 +972,12 @@ def _load_pitcher_x_df(season: int):
 
 
 async def ensure_statcast_loaded(season: int):
+    """Load Statcast data for a season if not already cached."""
+    import time
+    
+    # Update last accessed timestamp
+    STATCAST_LAST_ACCESSED[season] = time.time()
+    
     if season not in BATTING_EV_DF_BY_SEASON:
         BATTING_EV_DF_BY_SEASON[season] = await asyncio.to_thread(_load_batter_ev_df, season)
         log_profiles(f"Loaded hitter EV/barrels rows for {season}: {len(BATTING_EV_DF_BY_SEASON[season])}")
@@ -984,6 +993,35 @@ async def ensure_statcast_loaded(season: int):
     if season not in PITCHING_X_DF_BY_SEASON:
         PITCHING_X_DF_BY_SEASON[season] = await asyncio.to_thread(_load_pitcher_x_df, season)
         log_profiles(f"Loaded pitcher expected stats rows for {season}: {len(PITCHING_X_DF_BY_SEASON[season])}")
+
+
+def clear_statcast_cache():
+    """Clear Statcast DataFrames from memory to free up space."""
+    import time
+    
+    current_time = time.time()
+    IDLE_THRESHOLD = 1800  # 30 minutes
+    
+    seasons_to_clear = []
+    for season, last_accessed in list(STATCAST_LAST_ACCESSED.items()):
+        if current_time - last_accessed > IDLE_THRESHOLD:
+            seasons_to_clear.append(season)
+    
+    for season in seasons_to_clear:
+        if season in BATTING_EV_DF_BY_SEASON:
+            del BATTING_EV_DF_BY_SEASON[season]
+        if season in BATTING_X_DF_BY_SEASON:
+            del BATTING_X_DF_BY_SEASON[season]
+        if season in PITCHING_EV_DF_BY_SEASON:
+            del PITCHING_EV_DF_BY_SEASON[season]
+        if season in PITCHING_X_DF_BY_SEASON:
+            del PITCHING_X_DF_BY_SEASON[season]
+        if season in STATCAST_LAST_ACCESSED:
+            del STATCAST_LAST_ACCESSED[season]
+        
+        log_profiles(f"Cleared Statcast cache for {season} after 30min idle")
+    
+    return len(seasons_to_clear)
 
 
 def get_statcast_row(df: pd.DataFrame, player_id: int):
@@ -2420,6 +2458,23 @@ async def background_seeder_loop():
 
 
 # =========================
+# STATCAST CACHE CLEANUP
+# =========================
+async def periodic_statcast_cleanup():
+    """Background task that clears idle Statcast cache every 30 minutes."""
+    await bot.wait_until_ready()
+    
+    while not bot.is_closed():
+        try:
+            await asyncio.sleep(1800)  # 30 minutes
+            cleared = clear_statcast_cache()
+            if cleared > 0:
+                log_profiles(f"Periodic cleanup freed {cleared} season(s) from Statcast cache")
+        except Exception as e:
+            log_profiles(f"Error in periodic cleanup: {e}")
+
+
+# =========================
 # BOT EVENTS
 # =========================
 @bot.event
@@ -2435,6 +2490,9 @@ async def on_ready():
     elif seeder_task is None or seeder_task.done():
         seeder_task = asyncio.create_task(background_seeder_loop())
         log_adp("Seeder task started")
+    
+    # Start periodic Statcast cache cleanup (every 30 minutes)
+    asyncio.create_task(periodic_statcast_cleanup())
 
 
 @bot.event
