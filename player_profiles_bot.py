@@ -22,13 +22,14 @@ from discord.ext import commands
 # =========================
 TOKEN = os.getenv("PLAYER_PROFILES_TOKEN")
 BOT_OWNER_ID = int(os.getenv("BOT_OWNER_ID", "0"))
+ANTHROPIC_API_KEY = os.getenv("PROFILES_REWRITE_KEY", "")
 
 FORUM_CHANNEL_ID = 1480692093893476523
 REQUEST_THREAD_ID = 1482429894003785882
 
-PROFILE_SEASON = 2025
-PREV_SEASON = 2024
-PROFILE_YEAR_LABEL = 2026
+PROFILE_SEASON = 2026
+PREV_SEASON = 2025
+PROFILE_YEAR_LABEL = 2026  # Outlook for rest of current season
 
 ADP_URL = "https://www.fantasypros.com/mlb/adp/overall.php"
 SEED_COUNT = 250
@@ -1896,9 +1897,120 @@ async def build_player_bundle(player_id: int):
 
 
 # =========================
+# AI-GENERATED OUTLOOK
+# =========================
+async def generate_ai_outlook(profile: dict, curr_metrics: dict, prev_metrics: dict | None, is_pitcher: bool) -> str:
+    """Generate a 2026 mid-season outlook using Claude API."""
+    if not ANTHROPIC_API_KEY:
+        log_profiles("No ANTHROPIC_API_KEY set - falling back to template outlook")
+        if is_pitcher:
+            return summarize_pitcher(profile, curr_metrics, prev_metrics)
+        else:
+            return summarize_hitter(profile, curr_metrics, prev_metrics)
+    
+    name = profile["full_name"]
+    
+    # Build the stats context
+    if is_pitcher:
+        stats = profile.get("pitching_stats", {})
+        stat_context = f"""
+**2026 Stats (so far):**
+- IP: {stats.get('inningsPitched', 'N/A')}
+- ERA: {stats.get('era', 'N/A')}
+- WHIP: {stats.get('whip', 'N/A')}
+- K: {stats.get('strikeOuts', 'N/A')}
+- BB: {stats.get('baseOnBalls', 'N/A')}
+- Saves: {stats.get('saves', 'N/A')}
+- Holds: {stats.get('holds', 'N/A')}
+
+**Underlying Metrics:**
+- K-BB%: {curr_metrics.get('k_minus_bb', 'N/A')}
+- Hard-Hit% Allowed: {curr_metrics.get('hard_hit_allowed', 'N/A')}
+- xERA: {curr_metrics.get('xera', 'N/A')}
+"""
+    else:
+        stats = profile.get('hitting_stats', {})
+        stat_context = f"""
+**2026 Stats (so far):**
+- AVG: {stats.get('avg', 'N/A')}
+- HR: {stats.get('homeRuns', 'N/A')}
+- RBI: {stats.get('rbi', 'N/A')}
+- R: {stats.get('runs', 'N/A')}
+- SB: {stats.get('stolenBases', 'N/A')}
+- OPS: {stats.get('ops', 'N/A')}
+
+**Underlying Metrics:**
+- Barrel%: {curr_metrics.get('barrel', 'N/A')}
+- Avg EV: {curr_metrics.get('avg_ev', 'N/A')} mph
+- Hard-Hit%: {curr_metrics.get('hard_hit', 'N/A')}
+- K%: {curr_metrics.get('k_pct', 'N/A')}
+- BB%: {curr_metrics.get('bb_pct', 'N/A')}
+"""
+    
+    prompt = f"""You are writing a fantasy baseball outlook for {name} for the rest of the 2026 season.
+
+{stat_context}
+
+Write a 3-4 sentence outlook (600-700 characters MAXIMUM) analyzing how {name} has performed in 2026 so far and projecting their fantasy value for the rest of the season. Focus on:
+- What the stats and metrics tell us about their performance so far
+- What fantasy managers should expect for the rest of 2026
+- Any skills, trends, or concerns worth noting
+
+Write in a direct, analytical style. Do NOT use hedging language like "appears to be" or "seems to". Be confident and specific."""
+
+    try:
+        async with aiohttp.ClientSession() as session:
+            async with session.post(
+                "https://api.anthropic.com/v1/messages",
+                headers={
+                    "x-api-key": ANTHROPIC_API_KEY,
+                    "anthropic-version": "2023-06-01",
+                    "content-type": "application/json",
+                },
+                json={
+                    "model": "claude-sonnet-4-20250514",
+                    "max_tokens": 300,
+                    "messages": [{"role": "user", "content": prompt}]
+                },
+                timeout=aiohttp.ClientTimeout(total=30)
+            ) as resp:
+                if resp.status != 200:
+                    log_profiles(f"Claude API error: {resp.status}")
+                    raise Exception(f"API returned {resp.status}")
+                
+                data = await resp.json()
+                outlook = data["content"][0]["text"].strip()
+                
+                # Truncate at sentence boundary if too long
+                if len(outlook) > 1020:
+                    sentences = outlook.split('. ')
+                    truncated = []
+                    current_len = 0
+                    for sent in sentences:
+                        if current_len + len(sent) + 2 > 1020:
+                            break
+                        truncated.append(sent)
+                        current_len += len(sent) + 2
+                    outlook = '. '.join(truncated)
+                    if not outlook.endswith('.'):
+                        outlook += '.'
+                
+                log_profiles(f"Generated AI outlook for {name}: {len(outlook)} chars")
+                return outlook
+                
+    except Exception as e:
+        log_profiles(f"Failed to generate AI outlook for {name}: {e}")
+        # Fallback to template
+        if is_pitcher:
+            return summarize_pitcher(profile, curr_metrics, prev_metrics)
+        else:
+            return summarize_hitter(profile, curr_metrics, prev_metrics)
+
+
+# =========================
 # PROFILE EMBED BUILDERS
 # =========================
-def build_hitter_profile_embed(profile: dict, curr_metrics: dict, prev_metrics: dict | None):
+def build_hitter_profile_embed(profile: dict, curr_metrics: dict, prev_metrics: dict | None, ai_outlook: str | None = None):
     h = profile.get("hitting_stats") or {}
 
     team = first_non_empty(profile.get("team"), default="TBD")
@@ -1950,7 +2062,8 @@ def build_hitter_profile_embed(profile: dict, curr_metrics: dict, prev_metrics: 
             inline=False,
         )
 
-    summary = summarize_hitter(profile, curr_metrics, prev_metrics)
+    # Use AI outlook if provided, otherwise use template
+    summary = ai_outlook if ai_outlook else summarize_hitter(profile, curr_metrics, prev_metrics)
     embed.add_field(
         name=f"{PROFILE_YEAR_LABEL} Outlook",
         value=summary,
@@ -1964,7 +2077,7 @@ def build_hitter_profile_embed(profile: dict, curr_metrics: dict, prev_metrics: 
     return embed
 
 
-def build_pitcher_profile_embed(profile: dict, curr_metrics: dict, prev_metrics: dict | None):
+def build_pitcher_profile_embed(profile: dict, curr_metrics: dict, prev_metrics: dict | None, ai_outlook: str | None = None):
     p = profile.get("pitching_stats") or {}
 
     team = first_non_empty(profile.get("team"), default="TBD")
@@ -2017,7 +2130,8 @@ def build_pitcher_profile_embed(profile: dict, curr_metrics: dict, prev_metrics:
             inline=False,
         )
 
-    summary = summarize_pitcher(profile, curr_metrics, prev_metrics)
+    # Use AI outlook if provided, otherwise use template
+    summary = ai_outlook if ai_outlook else summarize_pitcher(profile, curr_metrics, prev_metrics)
     embed.add_field(
         name=f"{PROFILE_YEAR_LABEL} Outlook",
         value=summary,
@@ -2203,7 +2317,7 @@ def build_compare_embed(bundle_a: dict, bundle_b: dict):
     return embed
 
 
-async def build_profile_text_for_player(player_id: int):
+async def build_profile_text_for_player(player_id: int, use_ai_outlook: bool = False):
     bundle = await build_player_bundle(player_id)
     if not bundle:
         return None, None
@@ -2211,11 +2325,21 @@ async def build_profile_text_for_player(player_id: int):
     profile = bundle["profile"]
     curr_metrics = bundle["curr_metrics"]
     prev_metrics = bundle["prev_metrics"]
+    
+    # Generate AI outlook if requested
+    ai_outlook = None
+    if use_ai_outlook:
+        ai_outlook = await generate_ai_outlook(
+            profile, 
+            curr_metrics, 
+            prev_metrics, 
+            bundle["is_pitcher"]
+        )
 
     if bundle["is_pitcher"]:
-        embed = build_pitcher_profile_embed(profile, curr_metrics, prev_metrics)
+        embed = build_pitcher_profile_embed(profile, curr_metrics, prev_metrics, ai_outlook)
     else:
-        embed = build_hitter_profile_embed(profile, curr_metrics, prev_metrics)
+        embed = build_hitter_profile_embed(profile, curr_metrics, prev_metrics, ai_outlook)
 
     return profile, embed
 
@@ -2242,7 +2366,7 @@ async def create_profile_for_name(
                 "message": f"**{existing.name}** already has a profile:\n{existing.jump_url}",
             }
 
-        profile, profile_embed = await build_profile_text_for_player(override_player_id)
+        profile, profile_embed = await build_profile_text_for_player(override_player_id, use_ai_outlook=True)
         if profile and profile_embed:
             tag_name = infer_tag_name(profile)
             tag_obj = get_forum_tag_by_name(forum_channel, tag_name)
@@ -2303,7 +2427,7 @@ async def create_profile_for_name(
             "message": f"**{player_name}** already has a profile:\n{existing.jump_url}",
         }
 
-    profile, profile_embed = await build_profile_text_for_player(player_id)
+    profile, profile_embed = await build_profile_text_for_player(player_id, use_ai_outlook=True)
     if not profile or not profile_embed:
         return {
             "status": "error",
