@@ -2,9 +2,6 @@ import sys
 print("=== MAIN.PY STARTING ===", flush=True)
 
 try:
-    from player_profiles_bot import start_player_profiles_bot
-    print("Loaded player_profiles_bot", flush=True)
-
     from closer_bot import start_closer_bot
     print("Loaded closer_bot", flush=True)
 
@@ -81,9 +78,8 @@ async def main() -> None:
     tasks = []
 
     # STAGGERED STARTUP (prevents Discord 503 crashes)
-    tasks.append(asyncio.create_task(run_forever("player_profiles_bot", start_player_profiles_bot)))
-    await asyncio.sleep(3)
-
+    # Note: player_profiles_bot runs on separate service now
+    
     tasks.append(asyncio.create_task(run_forever("closer_bot", start_closer_bot)))
     await asyncio.sleep(3)
 
