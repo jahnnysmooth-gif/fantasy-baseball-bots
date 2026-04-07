@@ -1947,18 +1947,22 @@ async def generate_ai_outlook(profile: dict, curr_metrics: dict, prev_metrics: d
 - BB%: {curr_metrics.get('bb_pct', 'N/A')}
 """
     
-    prompt = f"""You are writing a fantasy baseball outlook for {name} for the rest of the 2026 season.
+    prompt = f"""You are writing a fantasy baseball REST-OF-SEASON outlook for {name}.
+
+We're in early April 2026. The season just started.
 
 {stat_context}
 
-Write a 3-4 sentence outlook (600-700 characters MAXIMUM) analyzing how {name} has performed in 2026 so far and projecting their fantasy value for the rest of the season. Focus on:
-- What the stats and metrics tell us about their performance so far
-- What fantasy managers should expect for the rest of 2026
-- Any skills, trends, or concerns worth noting
+Write a 3-4 sentence outlook (600-700 characters MAXIMUM) analyzing:
+- How {name} has performed in the early weeks of 2026
+- What the underlying metrics say about sustainability
+- What to expect from {name} for the REST of the 2026 season
 
+DO NOT mention drafts, draft rounds, or ADP. Focus on buy/hold/sell decisions and realistic projections for the rest of this season.
 Write in a direct, analytical style. Do NOT use hedging language like "appears to be" or "seems to". Be confident and specific."""
 
     try:
+        log_profiles(f"API: Calling Claude for {name} outlook...")
         async with aiohttp.ClientSession() as session:
             async with session.post(
                 "https://api.anthropic.com/v1/messages",
@@ -2351,14 +2355,17 @@ async def create_profile_for_name(
     raw_player: str,
     forum_channel: discord.ForumChannel,
 ):
+    log_profiles(f"Creating profile for: {raw_player}")
     override_player_id = get_overridden_player_id(raw_player)
     if override_player_id:
+        log_profiles(f"Using override ID: {override_player_id}")
         existing = await find_existing_profile_thread(
             forum_channel,
             raw_player,
             player_id=override_player_id,
         )
         if existing:
+            log_profiles(f"Found existing profile for {raw_player}")
             return {
                 "status": "exists",
                 "player_name": raw_player,
@@ -2366,6 +2373,7 @@ async def create_profile_for_name(
                 "message": f"**{existing.name}** already has a profile:\n{existing.jump_url}",
             }
 
+        log_profiles(f"Building profile with AI outlook for {raw_player}...")
         profile, profile_embed = await build_profile_text_for_player(override_player_id, use_ai_outlook=True)
         if profile and profile_embed:
             tag_name = infer_tag_name(profile)
@@ -2428,6 +2436,7 @@ async def create_profile_for_name(
         }
 
     profile, profile_embed = await build_profile_text_for_player(player_id, use_ai_outlook=True)
+    log_profiles(f"Building profile with AI outlook for {player_name}...")
     if not profile or not profile_embed:
         return {
             "status": "error",
