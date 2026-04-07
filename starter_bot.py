@@ -99,6 +99,34 @@ team_hitting_cache = {}   # (team_abbr, season) -> hitting stats dict or None
 team_id_cache = {}        # abbr -> mlb team id
 next_start_cache = {}     # pitcher_id -> next start info dict or None
 
+
+def cleanup_old_cache_entries(cache_dict, max_days=7):
+    """Keep only the last N days in date-keyed cache to prevent unbounded memory growth."""
+    from datetime import date, timedelta
+    if not cache_dict:
+        return 0
+    
+    cutoff = date.today() - timedelta(days=max_days)
+    keys_to_delete = [k for k in cache_dict.keys() if isinstance(k, date) and k < cutoff]
+    
+    for key in keys_to_delete:
+        del cache_dict[key]
+    
+    return len(keys_to_delete)
+
+
+def cleanup_starter_caches():
+    """Clean up old entries from all starter bot caches."""
+    deleted_stats = cleanup_old_cache_entries(pitching_stats_cache, max_days=7)
+    deleted_meta = cleanup_old_cache_entries(player_meta_cache, max_days=7)
+    deleted_next = cleanup_old_cache_entries(next_start_cache, max_days=7)
+    
+    # team_hitting_cache uses tuple keys (team_abbr, season), not dates - skip cleanup
+    
+    if deleted_stats > 0 or deleted_meta > 0 or deleted_next > 0:
+        log(f"Cache cleanup: removed {deleted_stats} stats, {deleted_meta} meta, {deleted_next} next_start entries")
+
+
 ESPN_PLAYER_IDS_PATH = os.getenv("ESPN_PLAYER_IDS_PATH", "shared/player_ids/espn_player_ids.json")
 player_headshot_index = None
 
@@ -3828,6 +3856,9 @@ async def sweep_loop_starter():
 
         if RESET_STARTER_STATE:
             continue
+
+        # Clean up old cache entries daily
+        cleanup_starter_caches()
 
         state = load_state()
         posted = set(state.get("posted", []))

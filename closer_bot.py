@@ -98,6 +98,32 @@ pitching_stats_cache = {}
 player_meta_cache = {}
 season_stats_cache = {}  # pid -> regular season pitching stats dict
 
+
+def cleanup_old_cache_entries(cache_dict, max_days=7):
+    """Keep only the last N days in date-keyed cache to prevent unbounded memory growth."""
+    from datetime import date, timedelta
+    if not cache_dict:
+        return 0
+    
+    cutoff = date.today() - timedelta(days=max_days)
+    keys_to_delete = [k for k in cache_dict.keys() if isinstance(k, date) and k < cutoff]
+    
+    for key in keys_to_delete:
+        del cache_dict[key]
+    
+    return len(keys_to_delete)
+
+
+def cleanup_closer_caches():
+    """Clean up old entries from all closer bot caches."""
+    deleted_app = cleanup_old_cache_entries(appearance_cache, max_days=7)
+    deleted_stats = cleanup_old_cache_entries(pitching_stats_cache, max_days=7)
+    deleted_meta = cleanup_old_cache_entries(player_meta_cache, max_days=7)
+    
+    if deleted_app > 0 or deleted_stats > 0 or deleted_meta > 0:
+        log(f"Cache cleanup: removed {deleted_app} appearance, {deleted_stats} stats, {deleted_meta} meta entries")
+
+
 ESPN_PLAYER_IDS_PATH = os.getenv("ESPN_PLAYER_IDS_PATH", "shared/player_ids/espn_player_ids.json")
 player_headshot_index = None
 
@@ -3428,6 +3454,9 @@ async def loop():
                     trend_pitcher_cache = []
                     trend_pitcher_cache_date = None
                     log("Season stats cache cleared for new day")
+                    
+                    # Clean up old cache entries daily
+                    cleanup_closer_caches()
 
                 games = await get_games()
                 log(f"Checking {len(games)} games")

@@ -54,6 +54,30 @@ sweep_task: asyncio.Task | None = None
 _top_300_cache: set | None = None
 
 
+def cleanup_old_cache_entries(cache_dict, max_days=7):
+    """Keep only the last N days in date-keyed cache to prevent unbounded memory growth."""
+    if not cache_dict:
+        return 0
+    
+    cutoff = date.today() - timedelta(days=max_days)
+    keys_to_delete = [k for k in cache_dict.keys() if isinstance(k, date) and k < cutoff]
+    
+    for key in keys_to_delete:
+        del cache_dict[key]
+    
+    return len(keys_to_delete)
+
+
+def cleanup_hitter_caches():
+    """Clean up old entries from all hitter bot caches."""
+    deleted_stats = cleanup_old_cache_entries(hitter_stats_cache, max_days=7)
+    deleted_events = cleanup_old_cache_entries(decisive_event_cache, max_days=7)
+    
+    if deleted_stats > 0 or deleted_events > 0:
+        log(f"Cache cleanup: removed {deleted_stats} stat entries, {deleted_events} event entries")
+
+
+
 def load_top_300() -> set:
     """Return a set of normalized player names from the top 300 file."""
     global _top_300_cache
@@ -4909,6 +4933,9 @@ async def sweep_loop() -> None:
 
         if RESET_HITTER_STATE:
             continue
+
+        # Clean up old cache entries daily
+        cleanup_hitter_caches()
 
         state = load_state()
         posted = set(state.get("posted", []))
