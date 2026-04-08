@@ -3459,7 +3459,8 @@ async def post_card(channel, p: dict, matchup: str, score: str, context: dict, s
         "blownSaves": safe_int(p["stats"].get("blownSaves", 0), 0),
     }
 
-    label = classify(s, context=context)(feed, p.get("id"), ip=str(p["stats"].get("inningsPitched", "0.0")), er=safe_int(p["stats"].get("earnedRuns", 0), 0)) if feed else None
+    label = classify(s, context=context)
+    detail = get_pitcher_outing_detail(feed, p.get("id"), ip=str(p["stats"].get("inningsPitched", "0.0")), er=safe_int(p["stats"].get("earnedRuns", 0), 0)) if feed else None
 
     # Fetch verified regular season stats (sportId=1 only — excludes spring training)
     # Falls back to boxscore seasonStats if the API call fails
