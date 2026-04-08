@@ -14,6 +14,7 @@ from zoneinfo import ZoneInfo
 import aiohttp
 import discord
 import pandas as pd
+import requests
 from bs4 import BeautifulSoup
 from discord.ext import commands
 
@@ -41,8 +42,11 @@ STATE_DIR.mkdir(parents=True, exist_ok=True)
 
 SEED_STATE_FILE = STATE_DIR / "seed_state.json"
 THREAD_COMMAND_STATE_FILE = STATE_DIR / "thread_command_state.json"
+USER_RATE_LIMIT_FILE = STATE_DIR / "user_rate_limits.json"
 
 THREAD_MAP_FILE = STATE_DIR / "player_threads.json"
+
+MAX_PROFILE_REQUESTS_PER_DAY = 5  # For non-admins
 
 if THREAD_MAP_FILE.exists():
     with open(THREAD_MAP_FILE) as f:
@@ -195,6 +199,7 @@ seed_state = {
 }
 
 thread_command_state = {}
+user_rate_limit_state = {}  # user_id -> {date: request_count}
 
 PLAYER_NAME_OVERRIDES = {
     "julio rodriguez": 677594,  # Julio Rodríguez
@@ -442,6 +447,62 @@ def mark_thread_command_used_today(thread_id: int, command_name: str):
         thread_command_state[thread_key] = {}
     thread_command_state[thread_key][command_name] = current_local_date_str()
     save_thread_command_state()
+
+
+# =========================
+# USER RATE LIMIT STATE
+# =========================
+def load_user_rate_limit_state():
+    global user_rate_limit_state
+    if not USER_RATE_LIMIT_FILE.exists():
+        user_rate_limit_state = {}
+        return
+    
+    try:
+        with open(USER_RATE_LIMIT_FILE, "r", encoding="utf-8") as f:
+            user_rate_limit_state = json.load(f)
+    except Exception as e:
+        log_profiles(f"Failed to load user rate limit state: {e}")
+        user_rate_limit_state = {}
+
+
+def save_user_rate_limit_state():
+    try:
+        with open(USER_RATE_LIMIT_FILE, "w", encoding="utf-8") as f:
+            json.dump(user_rate_limit_state, f, indent=2)
+    except Exception as e:
+        log_profiles(f"Failed to save user rate limit state: {e}")
+
+
+def check_user_rate_limit(user_id: int) -> tuple[bool, int]:
+    """
+    Check if user has exceeded daily profile request limit.
+    Returns (can_proceed, requests_today)
+    """
+    user_key = str(user_id)
+    today = current_local_date_str()
+    
+    if user_key not in user_rate_limit_state:
+        user_rate_limit_state[user_key] = {}
+    
+    requests_today = user_rate_limit_state[user_key].get(today, 0)
+    
+    if requests_today >= MAX_PROFILE_REQUESTS_PER_DAY:
+        return False, requests_today
+    
+    return True, requests_today
+
+
+def increment_user_rate_limit(user_id: int):
+    """Increment user's profile request count for today."""
+    user_key = str(user_id)
+    today = current_local_date_str()
+    
+    if user_key not in user_rate_limit_state:
+        user_rate_limit_state[user_key] = {}
+    
+    user_rate_limit_state[user_key][today] = user_rate_limit_state[user_key].get(today, 0) + 1
+    save_user_rate_limit_state()
 
 
 # =========================
@@ -1949,7 +2010,7 @@ async def generate_ai_outlook(profile: dict, curr_metrics: dict, prev_metrics: d
     
     prompt = f"""You are writing a fantasy baseball REST-OF-SEASON outlook for {name}.
 
-We're in early April 2026. The season just started.
+We're in early April 2026. The season just started (only a few games played).
 
 {stat_context}
 
@@ -1958,8 +2019,15 @@ Write a 3-4 sentence outlook (600-700 characters MAXIMUM) analyzing:
 - What the underlying metrics say about sustainability
 - What to expect from {name} for the REST of the 2026 season
 
-DO NOT mention drafts, draft rounds, or ADP. Focus on buy/hold/sell decisions and realistic projections for the rest of this season.
-Write in a direct, analytical style. Do NOT use hedging language like "appears to be" or "seems to". Be confident and specific."""
+IMPORTANT GUIDELINES:
+- It's VERY early in the season - acknowledge small sample size for extreme stats
+- DO NOT recommend dropping players or say they're "droppable"
+- Focus on buy/hold decisions and realistic projections
+- DO NOT mention drafts, draft rounds, or ADP
+- Be analytical but avoid overly harsh language for early-season struggles
+- When stats look bad but metrics are good, emphasize the metrics (and vice versa)
+
+Write in a direct, analytical style. Be confident and specific about projections."""
 
     try:
         log_profiles(f"API: Calling Claude for {name} outlook...")
@@ -2256,69 +2324,6 @@ def build_outlook_embed(bundle: dict):
     return embed
 
 
-def build_compare_embed(bundle_a: dict, bundle_b: dict):
-    profile_a = bundle_a["profile"]
-    profile_b = bundle_b["profile"]
-    is_pitcher = bundle_a["is_pitcher"]
-
-    embed = discord.Embed(
-        title=f"{profile_a['full_name']} vs {profile_b['full_name']}",
-        color=get_team_color(profile_a.get("team")),
-    )
-
-    if is_pitcher:
-        p1 = profile_a.get("pitching_stats") or {}
-        p2 = profile_b.get("pitching_stats") or {}
-        m1 = bundle_a["curr_metrics"]
-        m2 = bundle_b["curr_metrics"]
-
-        left = [
-            f"ERA: {first_non_empty(p1.get('era'), default='N/A')}",
-            f"WHIP: {first_non_empty(p1.get('whip'), default='N/A')}",
-            f"K: {first_non_empty(p1.get('strikeOuts'), default='N/A')}",
-            f"IP: {first_non_empty(p1.get('inningsPitched'), default='N/A')}",
-            f"SV: {first_non_empty(p1.get('saves'), default='N/A')}",
-            f"xERA: {clean_num(m1.get('xera'), 2)}",
-            f"K-BB%: {pct_str(m1.get('k_minus_bb'))}",
-        ]
-        right = [
-            f"ERA: {first_non_empty(p2.get('era'), default='N/A')}",
-            f"WHIP: {first_non_empty(p2.get('whip'), default='N/A')}",
-            f"K: {first_non_empty(p2.get('strikeOuts'), default='N/A')}",
-            f"IP: {first_non_empty(p2.get('inningsPitched'), default='N/A')}",
-            f"SV: {first_non_empty(p2.get('saves'), default='N/A')}",
-            f"xERA: {clean_num(m2.get('xera'), 2)}",
-            f"K-BB%: {pct_str(m2.get('k_minus_bb'))}",
-        ]
-    else:
-        h1 = profile_a.get("hitting_stats") or {}
-        h2 = profile_b.get("hitting_stats") or {}
-        m1 = bundle_a["curr_metrics"]
-        m2 = bundle_b["curr_metrics"]
-
-        left = [
-            f"AVG: {first_non_empty(h1.get('avg'), default='N/A')}",
-            f"HR: {first_non_empty(h1.get('homeRuns'), default='N/A')}",
-            f"RBI: {first_non_empty(h1.get('rbi'), default='N/A')}",
-            f"SB: {first_non_empty(h1.get('stolenBases'), default='N/A')}",
-            f"OPS: {first_non_empty(h1.get('ops'), default='N/A')}",
-            f"xwOBA: {clean_num(m1.get('xwoba'), 3)}",
-            f"Barrel%: {pct_str(m1.get('barrel'))}",
-        ]
-        right = [
-            f"AVG: {first_non_empty(h2.get('avg'), default='N/A')}",
-            f"HR: {first_non_empty(h2.get('homeRuns'), default='N/A')}",
-            f"RBI: {first_non_empty(h2.get('rbi'), default='N/A')}",
-            f"SB: {first_non_empty(h2.get('stolenBases'), default='N/A')}",
-            f"OPS: {first_non_empty(h2.get('ops'), default='N/A')}",
-            f"xwOBA: {clean_num(m2.get('xwoba'), 3)}",
-            f"Barrel%: {pct_str(m2.get('barrel'))}",
-        ]
-
-    embed.add_field(name=profile_a["full_name"], value="\n".join(left), inline=True)
-    embed.add_field(name=profile_b["full_name"], value="\n".join(right), inline=True)
-    embed.set_footer(text=f"{PROFILE_SEASON} comparison")
-    return embed
 
 
 async def build_profile_text_for_player(player_id: int, use_ai_outlook: bool = False):
@@ -2346,6 +2351,203 @@ async def build_profile_text_for_player(player_id: int, use_ai_outlook: bool = F
         embed = build_hitter_profile_embed(profile, curr_metrics, prev_metrics, ai_outlook)
 
     return profile, embed
+
+
+# =========================
+# SPLITS & TRENDS COMMANDS
+# =========================
+async def fetch_player_splits(player_id: int, season: int):
+    """Fetch split stats from MLB API."""
+    url = f"https://statsapi.mlb.com/api/v1/people/{player_id}/stats?stats=statSplits&group=hitting,pitching&sitCodes=h,a,d,n,vL,vR&season={season}"
+    
+    try:
+        loop = asyncio.get_event_loop()
+        response = await loop.run_in_executor(None, lambda: requests.get(url, timeout=10))
+        response.raise_for_status()
+        return response.json()
+    except Exception as e:
+        log_profiles(f"Failed to fetch splits for player {player_id}: {e}")
+        return None
+
+
+def parse_split_stats(splits_data, is_pitcher=False):
+    """Parse splits data into home/away, day/night, vs hand."""
+    if not splits_data or "stats" not in splits_data:
+        return None
+    
+    splits = {}
+    
+    for stat_group in splits_data.get("stats", []):
+        for split in stat_group.get("splits", []):
+            split_code = split.get("split", {}).get("code", "")
+            stats = split.get("stat", {})
+            
+            if split_code == "h":  # Home
+                splits["home"] = stats
+            elif split_code == "a":  # Away
+                splits["away"] = stats
+            elif split_code == "d":  # Day
+                splits["day"] = stats
+            elif split_code == "n":  # Night
+                splits["night"] = stats
+            elif split_code == "vL":  # vs Left
+                splits["vs_left"] = stats
+            elif split_code == "vR":  # vs Right
+                splits["vs_right"] = stats
+    
+    return splits
+
+
+def build_splits_embed(profile: dict, splits: dict, is_pitcher: bool):
+    """Build Discord embed showing player splits."""
+    player_id = profile["id"]
+    name = profile["full_name"]
+    
+    embed = discord.Embed(
+        title=f"{name} — {PROFILE_SEASON} Splits",
+        color=get_team_color(profile.get("team")),
+    )
+    
+    team_logo = get_team_logo(profile.get("team"))
+    if team_logo:
+        embed.set_author(name=name, icon_url=team_logo)
+    
+    if not splits:
+        embed.add_field(
+            name="No Split Data",
+            value="Not enough games played to show meaningful splits.",
+            inline=False
+        )
+    else:
+        if is_pitcher:
+            # Pitcher splits
+            home = splits.get("home", {})
+            away = splits.get("away", {})
+            vs_l = splits.get("vs_left", {})
+            vs_r = splits.get("vs_right", {})
+            day = splits.get("day", {})
+            night = splits.get("night", {})
+            
+            if home or away:
+                home_away = f"**Home:** {home.get('era', 'N/A')} ERA, {home.get('whip', 'N/A')} WHIP\n"
+                home_away += f"**Away:** {away.get('era', 'N/A')} ERA, {away.get('whip', 'N/A')} WHIP"
+                embed.add_field(name="Home/Away", value=home_away, inline=False)
+            
+            if vs_l or vs_r:
+                vs_hand = f"**vs LHB:** {vs_l.get('avg', 'N/A')} AVG, {vs_l.get('ops', 'N/A')} OPS\n"
+                vs_hand += f"**vs RHB:** {vs_r.get('avg', 'N/A')} AVG, {vs_r.get('ops', 'N/A')} OPS"
+                embed.add_field(name="vs Batter Handedness", value=vs_hand, inline=False)
+            
+            if day or night:
+                day_night = f"**Day:** {day.get('era', 'N/A')} ERA, {day.get('strikeOuts', 'N/A')} K\n"
+                day_night += f"**Night:** {night.get('era', 'N/A')} ERA, {night.get('strikeOuts', 'N/A')} K"
+                embed.add_field(name="Day/Night", value=day_night, inline=False)
+        else:
+            # Hitter splits
+            home = splits.get("home", {})
+            away = splits.get("away", {})
+            vs_l = splits.get("vs_left", {})
+            vs_r = splits.get("vs_right", {})
+            day = splits.get("day", {})
+            night = splits.get("night", {})
+            
+            if home or away:
+                home_away = f"**Home:** {home.get('avg', 'N/A')} AVG, {home.get('homeRuns', 'N/A')} HR, {home.get('ops', 'N/A')} OPS\n"
+                home_away += f"**Away:** {away.get('avg', 'N/A')} AVG, {away.get('homeRuns', 'N/A')} HR, {away.get('ops', 'N/A')} OPS"
+                embed.add_field(name="Home/Away", value=home_away, inline=False)
+            
+            if vs_l or vs_r:
+                vs_hand = f"**vs LHP:** {vs_l.get('avg', 'N/A')} AVG, {vs_l.get('ops', 'N/A')} OPS\n"
+                vs_hand += f"**vs RHP:** {vs_r.get('avg', 'N/A')} AVG, {vs_r.get('ops', 'N/A')} OPS"
+                embed.add_field(name="vs Pitcher Handedness", value=vs_hand, inline=False)
+            
+            if day or night:
+                day_night = f"**Day:** {day.get('avg', 'N/A')} AVG, {day.get('homeRuns', 'N/A')} HR\n"
+                day_night += f"**Night:** {night.get('avg', 'N/A')} AVG, {night.get('homeRuns', 'N/A')} HR"
+                embed.add_field(name="Day/Night", value=day_night, inline=False)
+    
+    headshot_url = f"https://img.mlbstatic.com/mlb-photos/image/upload/w_213,q_auto:best/v1/people/{player_id}/headshot/67/current"
+    embed.set_thumbnail(url=headshot_url)
+    embed.set_footer(text=f"MLB_ID:{player_id}")
+    
+    return embed
+
+
+def calculate_trend(recent_avg, season_avg):
+    """Determine if stat is trending hot, cold, or steady."""
+    if season_avg == 0 or recent_avg is None or season_avg is None:
+        return "➡️", "Steady"
+    
+    pct_diff = ((recent_avg - season_avg) / season_avg) * 100
+    
+    if pct_diff >= 15:
+        return "🔥", "Hot"
+    elif pct_diff <= -15:
+        return "❄️", "Cold"
+    else:
+        return "➡️", "Steady"
+
+
+def build_trends_embed(profile: dict, is_pitcher: bool):
+    """Build Discord embed showing recent trends vs season average."""
+    player_id = profile["id"]
+    name = profile["full_name"]
+    
+    embed = discord.Embed(
+        title=f"{name} — Recent Trends",
+        description="Last 7 days vs Season Average",
+        color=get_team_color(profile.get("team")),
+    )
+    
+    team_logo = get_team_logo(profile.get("team"))
+    if team_logo:
+        embed.set_author(name=name, icon_url=team_logo)
+    
+    # Note: This is a simplified version showing season stats with trend indicators
+    # Full implementation would need game-by-game data from MLB API
+    
+    if is_pitcher:
+        p = profile.get("pitching_stats", {})
+        era = safe_float(p.get("era"))
+        whip = safe_float(p.get("whip"))
+        k = safe_int_like(p.get("strikeOuts"))
+        
+        # Placeholder for actual 7-day trending (would need game logs)
+        embed.add_field(
+            name="📊 Season Stats",
+            value=f"ERA: {era or 'N/A'}\nWHIP: {whip or 'N/A'}\nK: {k or 'N/A'}",
+            inline=False
+        )
+        
+        embed.add_field(
+            name="ℹ️ Note",
+            value="Full trending analysis requires game-by-game data. Check back soon for rolling 7/14/30 day trends!",
+            inline=False
+        )
+    else:
+        h = profile.get("hitting_stats", {})
+        avg = safe_float(h.get("avg"))
+        hr = safe_int_like(h.get("homeRuns"))
+        rbi = safe_int_like(h.get("rbi"))
+        ops = safe_float(h.get("ops"))
+        
+        embed.add_field(
+            name="📊 Season Stats",
+            value=f"AVG: {avg or 'N/A'}\nHR: {hr or 'N/A'}\nRBI: {rbi or 'N/A'}\nOPS: {ops or 'N/A'}",
+            inline=False
+        )
+        
+        embed.add_field(
+            name="ℹ️ Note",
+            value="Full trending analysis requires game-by-game data. Check back soon for rolling 7/14/30 day trends!",
+            inline=False
+        )
+    
+    headshot_url = f"https://img.mlbstatic.com/mlb-photos/image/upload/w_213,q_auto:best/v1/people/{player_id}/headshot/67/current"
+    embed.set_thumbnail(url=headshot_url)
+    embed.set_footer(text=f"MLB_ID:{player_id}")
+    
+    return embed
 
 
 # =========================
@@ -2617,6 +2819,7 @@ async def on_ready():
 
     load_seed_state()
     load_thread_command_state()
+    load_user_rate_limit_state()
 
     if seed_state.get("completed"):
         log_adp("Seeder already complete. Background seeder will not start.")
@@ -2683,39 +2886,42 @@ async def on_message(message: discord.Message):
             mark_thread_command_used_today(thread.id, "outlook")
             return
 
-        if lowered.startswith("compare"):
-            if was_thread_command_used_today(thread.id, "compare"):
-                await message.reply("Compare was already used in this thread today.", mention_author=False)
+
+        if lowered == "splits":
+            if was_thread_command_used_today(thread.id, "splits"):
+                await message.reply("Splits were already posted in this thread today.", mention_author=False)
                 return
 
-            parts = command_text.split(" ", 1)
-            if len(parts) < 2 or not parts[1].strip():
-                await message.reply("Use `!compare Player Name`.", mention_author=False)
+            bundle = await resolve_bundle_from_thread(thread)
+            if not bundle:
+                await message.reply("I couldn't load this player's data right now.", mention_author=False)
                 return
 
-            target_name = parts[1].strip()
-
-            base_bundle = await resolve_bundle_from_thread(thread)
-            if not base_bundle:
-                await message.reply("I couldn’t load the player from this thread.", mention_author=False)
-                return
-
-            target_bundle = await resolve_bundle_from_name(target_name)
-            if not target_bundle:
-                await message.reply(f'I couldn’t find a player match for "{target_name}".', mention_author=False)
-                return
-
-            if base_bundle["profile"]["id"] == target_bundle["profile"]["id"]:
-                await message.reply("Pick a different player to compare against.", mention_author=False)
-                return
-
-            if base_bundle["is_pitcher"] != target_bundle["is_pitcher"]:
-                await message.reply("Compare works best when both players are the same type (hitter vs hitter or pitcher vs pitcher).", mention_author=False)
-                return
-
-            embed = build_compare_embed(base_bundle, target_bundle)
+            player_id = bundle["profile"]["id"]
+            is_pitcher = bundle["is_pitcher"]
+            
+            splits_data = await fetch_player_splits(player_id, PROFILE_SEASON)
+            splits = parse_split_stats(splits_data, is_pitcher)
+            
+            embed = build_splits_embed(bundle["profile"], splits, is_pitcher)
             await thread.send(embed=embed)
-            mark_thread_command_used_today(thread.id, "compare")
+            mark_thread_command_used_today(thread.id, "splits")
+            return
+
+        if lowered == "trends":
+            if was_thread_command_used_today(thread.id, "trends"):
+                await message.reply("Trends were already posted in this thread today.", mention_author=False)
+                return
+
+            bundle = await resolve_bundle_from_thread(thread)
+            if not bundle:
+                await message.reply("I couldn't load this player's data right now.", mention_author=False)
+                return
+
+            is_pitcher = bundle["is_pitcher"]
+            embed = build_trends_embed(bundle["profile"], is_pitcher)
+            await thread.send(embed=embed)
+            mark_thread_command_used_today(thread.id, "trends")
             return
 
     # =========================
@@ -2804,6 +3010,16 @@ async def on_message(message: discord.Message):
                 return
 
     raw_player = command_text
+    
+    # Rate limit check for non-admins
+    if not is_seed_admin(message.author):
+        can_proceed, requests_today = check_user_rate_limit(message.author.id)
+        if not can_proceed:
+            await message.reply(
+                f"You've reached the daily limit of {MAX_PROFILE_REQUESTS_PER_DAY} profile requests. Try again tomorrow!",
+                mention_author=False,
+            )
+            return
 
     try:
         await message.reply(
@@ -2812,6 +3028,11 @@ async def on_message(message: discord.Message):
         )
 
         result = await create_profile_for_name(raw_player, forum_channel)
+        
+        # Only increment rate limit if profile was actually created (not if it already existed)
+        if not is_seed_admin(message.author) and result.get("status") == "created":
+            increment_user_rate_limit(message.author.id)
+        
         await message.reply(result["message"], mention_author=False)
 
     except Exception as e:
