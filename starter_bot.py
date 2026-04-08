@@ -3,7 +3,7 @@ import json
 import os
 import random
 import time
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, date, timedelta, timezone
 from zoneinfo import ZoneInfo
 
 import anthropic
@@ -15,27 +15,20 @@ import requests
 TOKEN = os.getenv("ANALYTIC_BOT_TOKEN")
 CHANNEL_ID = int(os.getenv("STARTER_WATCH_CHANNEL_ID", "0"))
 ANTHROPIC_API_KEY = os.getenv("STARTER_BOT_SUMMARY", "")
-CLAUDE_MODEL = "claude-haiku-4-5-20251001"
+CLAUDE_MODEL = "claude-sonnet-4-6"
 
 STATE_FILE = "state/starter/state.json"
 os.makedirs("state/starter", exist_ok=True)
 
 ET = ZoneInfo("America/New_York")
 
-# Debug: log API key status at startup
-def _log_startup():
-    key = os.getenv("STARTER_BOT_SUMMARY", "")
-    if key:
-        print(f"[STARTER] STARTER_BOT_SUMMARY loaded (length={len(key)})", flush=True)
-    else:
-        print("[STARTER] WARNING: STARTER_BOT_SUMMARY env var is empty or missing", flush=True)
-_log_startup()
-
 SCHEDULE_URL = "https://statsapi.mlb.com/api/v1/schedule?sportId=1"
 LIVE_URL = "https://statsapi.mlb.com/api/v1.1/game/{}/feed/live"
 TEAM_STATS_URL = "https://statsapi.mlb.com/api/v1/teams/{}/stats?stats=season&group=hitting&season={}"
 TEAM_ID_URL = "https://statsapi.mlb.com/api/v1/teams?sportId=1&season={}"
 PROBABLE_URL = "https://statsapi.mlb.com/api/v1/schedule?sportId=1&date={}&hydrate=probablePitchers"
+PITCH_ARSENAL_URL = "https://statsapi.mlb.com/api/v1/people/{}/stats?stats=pitchArsenal&season={}&group=pitching"
+PLAYER_STATS_URL = "https://statsapi.mlb.com/api/v1/people/{}/stats?stats=career&group=pitching"
 
 API_RETRY_ATTEMPTS = 3
 API_RETRY_BACKOFF_SECONDS = 2
@@ -47,7 +40,6 @@ AWAKE_POLL_MIN_MINUTES = 6
 AWAKE_POLL_MAX_MINUTES = 12
 RESET_STARTER_STATE = os.getenv("RESET_STARTER_STATE", "").lower() in {"1", "true", "yes"}
 
-MIN_STARTER_SCORE = float(os.getenv("STARTER_MIN_SCORE", "5.0"))
 MAX_STARTER_CARDS_PER_GAME = int(os.getenv("STARTER_MAX_CARDS_PER_GAME", "2"))
 
 VELOCITY_MIN_PITCHES = 10
@@ -98,34 +90,8 @@ player_meta_cache = {}
 team_hitting_cache = {}   # (team_abbr, season) -> hitting stats dict or None
 team_id_cache = {}        # abbr -> mlb team id
 next_start_cache = {}     # pitcher_id -> next start info dict or None
-
-
-def cleanup_old_cache_entries(cache_dict, max_days=7):
-    """Keep only the last N days in date-keyed cache to prevent unbounded memory growth."""
-    from datetime import date, timedelta
-    if not cache_dict:
-        return 0
-    
-    cutoff = date.today() - timedelta(days=max_days)
-    keys_to_delete = [k for k in cache_dict.keys() if isinstance(k, date) and k < cutoff]
-    
-    for key in keys_to_delete:
-        del cache_dict[key]
-    
-    return len(keys_to_delete)
-
-
-def cleanup_starter_caches():
-    """Clean up old entries from all starter bot caches."""
-    deleted_stats = cleanup_old_cache_entries(pitching_stats_cache, max_days=7)
-    deleted_meta = cleanup_old_cache_entries(player_meta_cache, max_days=7)
-    deleted_next = cleanup_old_cache_entries(next_start_cache, max_days=7)
-    
-    # team_hitting_cache uses tuple keys (team_abbr, season), not dates - skip cleanup
-    
-    if deleted_stats > 0 or deleted_meta > 0 or deleted_next > 0:
-        log(f"Cache cleanup: removed {deleted_stats} stats, {deleted_meta} meta, {deleted_next} next_start entries")
-
+pitch_mix_cache = {}      # (pitcher_id, season) -> {pitch_code: pct} or None
+career_stats_cache = {}   # pitcher_id -> career IP float or None
 
 ESPN_PLAYER_IDS_PATH = os.getenv("ESPN_PLAYER_IDS_PATH", "shared/player_ids/espn_player_ids.json")
 player_headshot_index = None
@@ -375,10 +341,7 @@ def load_state():
 
 def save_state(state):
     with open(STATE_FILE, "w", encoding="utf-8") as f:
-        json.dump({
-            "posted": state.get("posted", []),
-            "last_sweep_date": state.get("last_sweep_date", ""),
-        }, f, indent=2)
+        json.dump({"posted": state.get("posted", [])}, f, indent=2)
 
 
 # ---------------- SAFE CONVERSIONS ----------------
@@ -619,6 +582,11 @@ def build_starter_game_flow(feed: dict, pitcher_id: int, side: str):
         "bullpen_blew_inherited": False,  # those exit runners scored after pitcher left
         "longest_scoreless_streak": 0,    # longest consecutive scoreless inning run mid-outing
         "high_leverage_clean": False,     # pitched in tight game (margin <=1) and kept it scoreless
+        "error_contributed": False,       # error occurred in a damage inning
+        "damage_inning": None,            # inning number where most damage occurred
+        "damage_inning_runs": 0,          # how many runs scored in that inning
+        "key_play_descriptions": [],      # select play description strings for Claude context
+        "exit_win_probability": None,     # team's win probability when pitcher exited (0-1)
     }
     if not feed or pitcher_id is None:
         return default
@@ -641,21 +609,6 @@ def build_starter_game_flow(feed: dict, pitcher_id: int, side: str):
     def score_tuple(play):
         result = play.get("result", {}) if isinstance(play, dict) else {}
         return safe_int(result.get("awayScore", 0), 0), safe_int(result.get("homeScore", 0), 0)
-
-    def runners_on_base(play):
-        """Count baserunners at the START of a play (from matchup.postOnFirst etc or offense runners)."""
-        offense = play.get("offense", {}) if isinstance(play, dict) else {}
-        count = 0
-        for base in ("first", "second", "third"):
-            if offense.get(f"postOn{base.capitalize()}") or offense.get(f"on{base.capitalize()}"):
-                count += 1
-        # fallback: use matchup runners
-        matchup = play.get("matchup", {}) if isinstance(play, dict) else {}
-        if not count:
-            for base in ("postOnFirst", "postOnSecond", "postOnThird"):
-                if matchup.get(base):
-                    count += 1
-        return count
 
     def runners_after_play(play):
         """Count baserunners in play result (runners still on after play ends)."""
@@ -682,8 +635,13 @@ def build_starter_game_flow(feed: dict, pitcher_id: int, side: str):
     leverage_damage_runs = 0
     garbage_time_runs    = 0
     stranded_total       = 0
-    high_leverage_tight_innings = 0
-    high_leverage_clean_innings = 0
+    error_innings        = set()   # innings where an error event occurred
+    key_play_descriptions = []     # notable play descriptions for Claude
+
+    ERROR_EVENTS = {
+        "Field Error", "Throwing Error", "Passed Ball", "Wild Pitch",
+        "Fielding Error", "Error",
+    }
 
     last_idx_in_pitcher_plays = pitcher_plays[-1][0]
 
@@ -711,9 +669,23 @@ def build_starter_game_flow(feed: dict, pitcher_id: int, side: str):
             if margin_before >= 4:
                 garbage_time_runs += opp_runs_on_play
 
-            # Track high-leverage (margin <=1) innings
             if abs(margin_before) <= 1:
-                high_leverage_tight_innings += 1
+                pass  # high_leverage tracking reserved for future use
+
+        # Error detection: track innings where errors occurred
+        result = play.get("result", {}) if isinstance(play, dict) else {}
+        event = str(result.get("event") or "").strip()
+        if event in ERROR_EVENTS and inning:
+            error_innings.add(inning)
+
+        # Collect key play descriptions (HRs, big multi-run plays, errors)
+        description = str(result.get("description") or "").strip()
+        if description:
+            is_hr = event == "Home Run"
+            is_error = event in ERROR_EVENTS
+            is_big_play = opp_runs_on_play >= 2
+            if (is_hr or is_error or is_big_play) and len(key_play_descriptions) < 4:
+                key_play_descriptions.append(description)
 
         prev_away, prev_home = away_after, home_after
 
@@ -780,11 +752,32 @@ def build_starter_game_flow(feed: dict, pitcher_id: int, side: str):
     settled_after_rough = scored_in_first and len(inning_runs) >= 3 and all(r == 0 for r in inning_runs[1:3])
     late_damage = len(inning_runs) >= 2 and inning_runs[-1] > 0 and sum(inning_runs[:-1]) == 0
 
-    # High-leverage clean: pitched when game was within 1 run AND allowed zero runs in those tight frames
-    total_tight_frames = sum(1 for r in runs_by_inning.values() if r == 0) if runs_by_inning else 0
     high_leverage_clean = (leverage_damage_runs == 0 and
                            len(innings_sequence) >= 5 and
                            abs(exit_team - exit_opp) <= 2)
+
+    # Identify the worst damage inning
+    damage_inning = None
+    damage_inning_runs = 0
+    if runs_by_inning:
+        damage_inning = max(runs_by_inning, key=runs_by_inning.get)
+        damage_inning_runs = runs_by_inning[damage_inning]
+
+    error_contributed = bool(error_innings & set(runs_by_inning.keys()))
+
+    # Win probability at pitcher's exit (home team perspective, convert to pitcher's team)
+    exit_win_probability = None
+    last_play = plays[last_idx_in_pitcher_plays] if last_idx_in_pitcher_plays < len(plays) else None
+    if last_play and isinstance(last_play, dict):
+        about = last_play.get("about", {})
+        home_wp = safe_float(about.get("homeTeamWinProbability", None), None)
+        if home_wp is not None:
+            exit_win_probability = home_wp / 100.0 if home_wp > 1 else home_wp
+            # Convert to pitcher's team perspective
+            if side == "away":
+                exit_win_probability = round(1.0 - exit_win_probability, 3)
+            else:
+                exit_win_probability = round(exit_win_probability, 3)
 
     payload = dict(default)
     payload.update({
@@ -809,6 +802,11 @@ def build_starter_game_flow(feed: dict, pitcher_id: int, side: str):
         "bullpen_blew_inherited":    bullpen_blew_inherited,
         "longest_scoreless_streak":  longest_streak,
         "high_leverage_clean":       high_leverage_clean,
+        "error_contributed":         error_contributed,
+        "damage_inning":             damage_inning,
+        "damage_inning_runs":        damage_inning_runs,
+        "key_play_descriptions":     key_play_descriptions,
+        "exit_win_probability":      exit_win_probability,
     })
     return payload
 
@@ -941,6 +939,10 @@ def get_starters(feed: dict):
                 "first_pitch_total": metrics.get("first_pitch_total", 0),
                 "contact_profile": contact,
                 "game_flow": game_flow,
+                "is_opener": False,         # resolved in loop after recent_appearances fetched
+                "platoon_context": build_platoon_context(feed, person_id, side),
+                "pitch_mix_shift": [],      # resolved in loop after season pitch mix fetched
+                "is_career_debut": False,   # resolved in loop after career stats fetched
             }
             candidates.append(candidate)
 
@@ -1168,10 +1170,9 @@ def get_recent_appearances(pitcher_id: int, game_date_et, limit=5, max_days=45):
         return appearances
 
     # Never look back before the regular season start to avoid spring training noise
-    from datetime import date as date_type
     season_year = game_date_et.year
     # MLB regular season typically starts late March — use March 20 as a safe floor
-    season_floor = date_type(season_year, 3, 20)
+    season_floor = date(season_year, 3, 20)
 
     check_date = game_date_et - timedelta(days=1)
 
@@ -1188,7 +1189,33 @@ def get_recent_appearances(pitcher_id: int, game_date_et, limit=5, max_days=45):
     return appearances
 
 
-# ---------------- OPPONENT QUALITY ----------------
+def is_opener(p: dict, recent_appearances: list) -> bool:
+    """
+    Returns True if this pitcher is a reliever being used as an opener rather
+    than a true starter. Criteria:
+    - Pitched 2.2 IP or fewer tonight (less than 3 full innings), AND
+    - Has at least 3 recent appearances on record, AND
+    - ALL of those recent appearances were also under 3.0 IP
+    A real starter knocked out early will have normal-length recent starts.
+    """
+    stats = p.get("stats", {})
+    tonight_outs = baseball_ip_to_outs(str(stats.get("inningsPitched", "0.0")))
+
+    # Must have gone 2.2 IP or fewer tonight (8 outs = 2.2 IP)
+    if tonight_outs > 8:
+        return False
+
+    # Need enough recent data to make the call
+    if not recent_appearances or len(recent_appearances) < 3:
+        return False
+
+    # All recent appearances must also be under 3.0 IP
+    for app in recent_appearances:
+        app_outs = baseball_ip_to_outs(str(app.get("ip", "0.0")))
+        if app_outs >= 9:  # 3.0 IP or more = not a reliever pattern
+            return False
+
+    return True
 
 def get_mlb_team_id(abbr: str, season: int) -> int | None:
     """Resolve a team abbreviation to its MLB Stats API numeric team ID."""
@@ -1255,6 +1282,165 @@ def get_team_hitting_stats(team_abbr: str, season: int) -> dict | None:
         "homeRuns": safe_int(stats.get("homeRuns", 0), 0),
     }
     team_hitting_cache[key] = result
+    return result
+
+
+def get_season_pitch_mix(pitcher_id: int, season: int) -> dict | None:
+    """
+    Fetch season pitch arsenal percentages from MLB Stats API.
+    Returns {pitch_code: pct_float} e.g. {"FF": 0.52, "SL": 0.31, "CH": 0.17}
+    Returns None if unavailable or too few pitches.
+    """
+    key = (pitcher_id, season)
+    if key in pitch_mix_cache:
+        return pitch_mix_cache[key]
+
+    data = fetch_with_retry(PITCH_ARSENAL_URL.format(pitcher_id, season))
+    if not data:
+        pitch_mix_cache[key] = None
+        return None
+
+    splits = []
+    for stat_group in data.get("stats", []):
+        splits.extend(stat_group.get("splits", []))
+
+    if not splits:
+        pitch_mix_cache[key] = None
+        return None
+
+    PITCH_CODE_MAP = {
+        "Four-Seam Fastball": "FF", "Two-Seam Fastball": "FT", "Sinker": "SI",
+        "Cutter": "FC", "Slider": "SL", "Sweeper": "ST", "Curveball": "CU",
+        "Knuckle Curve": "KC", "Changeup": "CH", "Split-Finger": "FS",
+    }
+
+    mix = {}
+    for split in splits:
+        stat = split.get("stat", {})
+        pitch_name = stat.get("type", {}).get("description", "")
+        usage_pct = safe_float(stat.get("percentage", 0), 0.0)
+        code = PITCH_CODE_MAP.get(pitch_name)
+        if code and usage_pct > 0:
+            mix[code] = round(usage_pct, 3)
+
+    result = mix if mix else None
+    pitch_mix_cache[key] = result
+    return result
+
+
+def get_career_ip(pitcher_id: int) -> float | None:
+    """
+    Fetch career innings pitched to detect first career starts.
+    Returns career IP as a float, or None if unavailable.
+    """
+    if pitcher_id in career_stats_cache:
+        return career_stats_cache[pitcher_id]
+
+    data = fetch_with_retry(PLAYER_STATS_URL.format(pitcher_id))
+    if not data:
+        career_stats_cache[pitcher_id] = None
+        return None
+
+    for stat_group in data.get("stats", []):
+        for split in stat_group.get("splits", []):
+            ip = safe_float(split.get("stat", {}).get("inningsPitched", 0), 0.0)
+            if ip > 0:
+                career_stats_cache[pitcher_id] = ip
+                return ip
+
+    career_stats_cache[pitcher_id] = None
+    return None
+
+
+def compute_pitch_mix_shift(tonight_counts: dict, season_mix: dict) -> list[dict]:
+    """
+    Compare tonight's pitch type percentages vs season averages.
+    Returns list of {code, tonight_pct, season_pct, delta, direction}
+    for pitches that shifted 15%+ from their season norm.
+    Only fires when tonight has enough pitches (>= 30) and season mix is available.
+    """
+    if not tonight_counts or not season_mix:
+        return []
+
+    total = sum(tonight_counts.values())
+    if total < 30:
+        return []
+
+    tonight_pcts = {code: count / total for code, count in tonight_counts.items()}
+    shifts = []
+    all_codes = set(tonight_pcts) | set(season_mix)
+
+    for code in all_codes:
+        tonight = tonight_pcts.get(code, 0.0)
+        season  = season_mix.get(code, 0.0)
+        delta   = tonight - season
+        if abs(delta) >= 0.15 and (tonight >= 0.10 or season >= 0.10):
+            shifts.append({
+                "code":        code,
+                "tonight_pct": round(tonight * 100),
+                "season_pct":  round(season * 100),
+                "delta":       round(delta * 100),
+                "direction":   "up" if delta > 0 else "down",
+            })
+
+    # Sort by magnitude
+    shifts.sort(key=lambda x: abs(x["delta"]), reverse=True)
+    return shifts[:2]  # max 2 shifts to keep facts block clean
+
+
+def build_platoon_context(feed: dict, pitcher_id: int, pitcher_side: str) -> dict:
+    """
+    Count LHB vs RHB faced, hits and runs allowed to each.
+    Returns dict with platoon summary if a notable split exists.
+    """
+    result = {"lhb_faced": 0, "rhb_faced": 0, "lhb_hits": 0, "rhb_hits": 0,
+              "notable_split": False, "split_description": ""}
+
+    plays = feed.get("liveData", {}).get("plays", {}).get("allPlays", [])
+    for play in plays:
+        if not isinstance(play, dict):
+            continue
+        matchup = play.get("matchup", {}) if isinstance(play, dict) else {}
+        if matchup.get("pitcher", {}).get("id") != pitcher_id:
+            continue
+
+        bat_side = matchup.get("batSide", {}).get("code", "")
+        result_data = play.get("result", {})
+        event = str(result_data.get("event") or "").strip()
+
+        if bat_side == "L":
+            result["lhb_faced"] += 1
+            if event in ("Single", "Double", "Triple", "Home Run"):
+                result["lhb_hits"] += 1
+        elif bat_side == "R":
+            result["rhb_faced"] += 1
+            if event in ("Single", "Double", "Triple", "Home Run"):
+                result["rhb_hits"] += 1
+
+    lhb = result["lhb_faced"]
+    rhb = result["rhb_faced"]
+    total = lhb + rhb
+    if total < 10:
+        return result  # not enough data
+
+    # Check for notable platoon advantage (one side < .150 BA, other > .300)
+    lhb_avg = result["lhb_hits"] / lhb if lhb >= 4 else None
+    rhb_avg = result["rhb_hits"] / rhb if rhb >= 4 else None
+
+    if lhb_avg is not None and rhb_avg is not None:
+        if lhb_avg <= 0.150 and rhb_avg >= 0.280:
+            result["notable_split"] = True
+            result["split_description"] = f"Dominated LHB (.{int(lhb_avg*1000):03d}), struggled vs RHB (.{int(rhb_avg*1000):03d})"
+        elif rhb_avg <= 0.150 and lhb_avg >= 0.280:
+            result["notable_split"] = True
+            result["split_description"] = f"Dominated RHB (.{int(rhb_avg*1000):03d}), struggled vs LHB (.{int(lhb_avg*1000):03d})"
+        elif lhb_avg <= 0.125 and lhb >= 5:
+            result["notable_split"] = True
+            result["split_description"] = f"Held LHB to .{int(lhb_avg*1000):03d} batting average"
+        elif rhb_avg <= 0.125 and rhb >= 5:
+            result["notable_split"] = True
+            result["split_description"] = f"Held RHB to .{int(rhb_avg*1000):03d} batting average"
+
     return result
 
 
@@ -1577,13 +1763,15 @@ def build_starter_team_context(p: dict, stats: dict, label: str, game_context: d
             "The final result worked out, but the outing itself was rougher than the scoreboard alone implies.",
         ]
     elif (not won) and label in POSITIVE_STARTER_LABELS:
+        outs = baseball_ip_to_outs(str(stats.get("inningsPitched", "0.0")))
         choices = [
             f"He kept the {team_name} within reach, but the support around the outing never quite matched it.",
             f"The line was good enough to keep the {team_name} hanging around, even if the result went the other way.",
             f"He gave the {team_name} a chance, even if the rest of the game never quite tilted back toward them.",
             f"He did enough to keep the {opp_name} from running away with it early.",
-            "It was the kind of start that usually keeps a team alive deep into the game.",
         ]
+        if outs >= 21:
+            choices.append("It was the kind of start that usually keeps a team alive deep into the game.")
     else:
         choices = [
             f"Once the damage landed, the {team_name} spent the rest of the night trying to claw back.",
@@ -1933,10 +2121,17 @@ def build_starter_season_context_sentence(p: dict, label: str, seed: int) -> str
         ])
 
     if flags.get("clean_sheet") and label in {"GEM", "DOMINANT", "QUALITY", "SHARP"}:
-        choices.extend([
-            "Keeping the board clean while going deep into the game is not something that happens every time out, and he earned this one.",
-            "The shutout innings are hard to come by, and he made it look easier than it is.",
-        ])
+        ip_game = safe_float(stats.get("inningsPitched", "0.0"), 0.0)
+        if ip_game >= 7.0:
+            choices.extend([
+                "Keeping the board clean while working deep into the game is not something that happens every time out, and he earned this one.",
+                "The shutout innings are hard to come by, and he made it look easier than it is.",
+            ])
+        else:
+            choices.extend([
+                "Keeping the board clean for six innings is a solid achievement, and he earned every bit of it.",
+                "The shutout innings are hard to come by, and he made it look easier than it is.",
+            ])
 
     if flags.get("er_worst") and label in BAD_STARTER_LABELS:
         choices.extend([
@@ -2779,24 +2974,24 @@ def build_starter_debut_sentence(p: dict, label: str, seed: int, recent_appearan
     season_stats = p.get("season_stats", {})
     gs = safe_int(season_stats.get("gamesStarted", 0), 0) or safe_int(season_stats.get("gamesPitched", 0), 0)
     name = p.get("name", "He")
+    year = datetime.now(ET).year
 
     # Season debut
     if gs == 1:
         if label in GOOD_STARTER_LABELS:
             choices = [
-                f"That was {name}'s first start of the season, and he made it count.",
-                f"First outing of the year for {name}, and it was a strong way to open things up.",
-                f"Hard to ask for a better season debut than that from {name}.",
-                f"{name} opened his season on the right note, and that line is a statement.",
-                f"First start of the year and already putting up a line like that — {name} came in ready.",
-                f"{name} wasted no time making an impression in his first outing of the season.",
+                f"He opened his {year} season on the right note, and that line is a statement.",
+                f"That was {name}'s first start of the {year} season, and he picked up right where he left off.",
+                f"Hard to ask for a better way to open the {year} campaign than that.",
+                f"{name} wasted no time making an impression in his first outing of {year}.",
+                f"First start of the year, and he looked like he never missed a beat.",
             ]
         else:
             choices = [
-                f"That was {name}'s first start of the season — a rough debut, but there is time to find the form.",
-                f"Starting the year with a tough outing is not what {name} wanted, but there is plenty of runway to reset.",
-                f"First start of the year for {name}, and it did not go as planned — the rust was visible.",
-                f"{name} opened his season with a shaky one, but one start does not define the year ahead.",
+                f"That was {name}'s first start of the {year} season — not the opening he wanted, but there is time to find the form.",
+                f"Opening the {year} campaign with a tough outing is not ideal, but one start does not define anything.",
+                f"First outing of {year} for {name}, and the rust was visible — something to build off going forward.",
+                f"{name} opened {year} with a shaky one, but there is plenty of runway to reset.",
             ]
         return choices[(seed // 97) % len(choices)]
 
@@ -2844,6 +3039,23 @@ def build_starter_subject_line(p: dict, label: str, game_context: dict, seed: in
         safe_float(stats.get("inningsPitched", "0.0"), 0.0) >= 5.0
     )
 
+    # Opener override — bypass normal subject line tree entirely
+    if p.get("is_opener"):
+        if er == 0:
+            opener_choices = [
+                f"⚡ {name} handles the opener role cleanly for the {team_name}",
+                f"⚡ {name} keeps it scoreless in the opener spot",
+                f"⚡ {name} sets a clean table in the opener role",
+            ]
+        else:
+            opener_choices = [
+                f"⚡ {name} works the opener role for the {team_name}",
+                f"⚡ {name} takes the ball first out of the {team_name} bullpen",
+                f"⚡ {name} opens the game for the {team_name}",
+            ]
+        subject = opener_choices[seed % len(opener_choices)].strip().rstrip(".!?:;,-")
+        return subject.replace("...", "").strip()
+
     if outs < 3:
         choices = [
             f"⚠️ {name} is knocked out in the opening inning",
@@ -2867,8 +3079,9 @@ def build_starter_subject_line(p: dict, label: str, game_context: dict, seed: in
         if k >= 8:
             choices.extend([
                 f"🔥 {name} piles up strikeouts in a dominant start",
-                f"🔥 {name} works deep while racking up {number_word(k)} strikeouts",
             ])
+            if outs >= 21:
+                choices.append(f"🔥 {name} works deep while racking up {number_word(k)} strikeouts")
     elif label == "STRIKEOUT":
         choices = [
             f"🎯 {name} punches out {number_word(k)} in a power outing",
@@ -2907,7 +3120,10 @@ def build_starter_subject_line(p: dict, label: str, game_context: dict, seed: in
         elif only_damage_in_one_inning and er <= 3:
             choices.append(f"📈 {name} keeps things afloat outside of one rough patch")
         if no_decision:
-            choices.append(f"📈 {name} goes deep and gets nothing to show for it")
+            if outs >= 21:
+                choices.append(f"📈 {name} goes deep and gets nothing to show for it")
+            else:
+                choices.append(f"📈 {name} pitches well and gets nothing to show for it")
     elif label == "HIT_HARD":
         choices = [
             f"💥 {name} gets hit hard despite some swing-and-miss",
@@ -3261,25 +3477,15 @@ def build_starter_next_start_sentence(p: dict, label: str, seed: int, next_start
     return choices[(seed // 101) % len(choices)]
 
 def get_games():
-    now = datetime.now(ET)
-    today = now.date()
+    today = datetime.now(ET).date()
     games = []
-    seen_ids: set = set()
 
-    # Between midnight and 4 AM ET, also check yesterday's slate for late finishers
-    fetch_dates = [today - timedelta(days=1), today] if now.hour < 4 else [today]
-
-    for fetch_date in fetch_dates:
-        data = fetch_with_retry(f"{SCHEDULE_URL}&date={fetch_date.isoformat()}")
-        if data is None:
-            log(f"Schedule fetch failed for {fetch_date}")
-            continue
-        for date_block in data.get("dates", []):
-            for game in date_block.get("games", []):
-                gid = game.get("gamePk")
-                if gid and gid not in seen_ids:
-                    seen_ids.add(gid)
-                    games.append(game)
+    data = fetch_with_retry(f"{SCHEDULE_URL}&date={today.isoformat()}")
+    if data is None:
+        log(f"Schedule fetch failed for {today}")
+        return games
+    for date_block in data.get("dates", []):
+        games.extend(date_block.get("games", []))
 
     return games
 
@@ -3325,6 +3531,7 @@ async def build_claude_summary(
     opp_hitting: dict | None = None,
     next_start: dict | None = None,
     season: int = 0,
+    seed: int = 0,
 ) -> str | None:
     """
     Use the Claude API to write the Summary field.
@@ -3446,6 +3653,21 @@ async def build_claude_summary(
     is_return = gs >= 2 and (not recent_appearances or len(recent_appearances) == 0)
 
     # ---------- Build context block ----------
+    # Include season stats explicitly so Claude never infers career status from training data
+    season_stats = p.get("season_stats", {})
+    season_w  = safe_int(season_stats.get("wins", 0), 0)
+    season_l  = safe_int(season_stats.get("losses", 0), 0)
+    season_era_raw = season_stats.get("era", None)
+    season_gs_total = safe_int(season_stats.get("gamesStarted", 0), 0)
+    season_ip_raw = season_stats.get("inningsPitched", None)
+
+    season_line_parts = []
+    if season_gs_total:  season_line_parts.append(f"{season_gs_total} GS")
+    if season_w or season_l: season_line_parts.append(f"{season_w}-{season_l}")
+    if season_era_raw:   season_line_parts.append(f"ERA {float(season_era_raw):.2f}")
+    if season_ip_raw:    season_line_parts.append(f"{season_ip_raw} IP")
+    season_line = ", ".join(season_line_parts) if season_line_parts else "season stats not available"
+
     facts = [
         f"Pitcher: {name} ({team})",
         f"Opponent: {opp_name}",
@@ -3453,6 +3675,7 @@ async def build_claude_summary(
         f"Decision: {'Win' if wins else 'Loss' if losses else 'No decision'}",
         f"Classification: {label}",
         f"Final score: {game_context.get('score_display','')}",
+        f"Season stats (before this game): {season_line}",
     ]
 
     # Pitch quality
@@ -3465,21 +3688,84 @@ async def build_claude_summary(
     # Game flow
     scs = safe_int(flow.get("scoreless_to_start", 0), 0)
     if scs >= 3:  facts.append(f"Opened with {scs} consecutive scoreless innings")
-    if flow.get("only_damage_in_one_inning") and er > 0:
-        facts.append("All runs came in a single inning")
     if flow.get("settled_after_rough"):
         facts.append("Rough first inning, then settled down")
     longest = safe_int(flow.get("longest_scoreless_streak", 0), 0)
     if longest >= 4 and longest != scs:
         facts.append(f"Best stretch: {longest} consecutive scoreless innings mid-outing")
+
+    # Damage inning detail — always surface when there was a bad inning
+    damage_inning     = flow.get("damage_inning")
+    damage_inning_runs = safe_int(flow.get("damage_inning_runs", 0), 0)
+    error_contrib     = bool(flow.get("error_contributed"))
+    if damage_inning and damage_inning_runs >= 2:
+        inning_ord = {1:"1st",2:"2nd",3:"3rd"}.get(damage_inning, f"{damage_inning}th")
+        error_note = ", which included an error" if error_contrib else ""
+        facts.append(f"Gave up {damage_inning_runs} runs in the {inning_ord}{error_note}")
+        if flow.get("only_damage_in_one_inning"):
+            facts.append("That was the only inning where runs scored")
+    elif flow.get("only_damage_in_one_inning") and er > 0:
+        facts.append("All runs came in a single inning")
+        if error_contrib:
+            facts.append("An error contributed to the damage in that inning")
+    elif error_contrib:
+        facts.append("An error contributed to runs scoring during his outing")
+
     if flow.get("bullpen_blew_inherited"):
         facts.append("Bullpen let his inherited runners score after he exited")
     if garbage_runs > 0 and garbage_runs >= er:
-        facts.append(f"Most/all earned runs came in garbage time (team led 4+)")
+        facts.append("Most/all earned runs came in garbage time (team led by 4+)")
     elif lev_damage >= 2:
         facts.append(f"{lev_damage} runs allowed while game was within 2")
     if stranded >= 4:
         facts.append(f"Stranded {stranded} runners")
+
+    # Key play descriptions from the feed (HRs, multi-run plays, errors)
+    key_plays = flow.get("key_play_descriptions", [])
+    if key_plays:
+        facts.append(f"Notable plays: {' | '.join(key_plays[:3])}")
+
+    # Pitch count efficiency
+    if pitch_cnt and flow.get("innings_sequence"):
+        innings_pitched_count = len(flow.get("innings_sequence", []))
+        if innings_pitched_count >= 4:
+            p_per_inning = pitch_cnt / innings_pitched_count
+            if p_per_inning <= 12.0:
+                facts.append(f"Pitch efficiency: {p_per_inning:.1f} pitches per inning (very efficient)")
+            elif p_per_inning >= 18.0:
+                facts.append(f"Pitch efficiency: {p_per_inning:.1f} pitches per inning (labored)")
+
+    # Pitch mix shift
+    shifts = p.get("pitch_mix_shift", [])
+    PITCH_NAMES_FULL = {
+        "FF": "four-seam fastball", "FT": "two-seam fastball", "SI": "sinker",
+        "FC": "cutter", "SL": "slider", "ST": "sweeper", "CU": "curveball",
+        "KC": "knuckle curve", "CH": "changeup", "FS": "splitter",
+    }
+    for shift in shifts[:2]:
+        pname = PITCH_NAMES_FULL.get(shift["code"], shift["code"])
+        direction = "more" if shift["direction"] == "up" else "less"
+        facts.append(
+            f"Pitch mix shift: used {shift['tonight_pct']}% {pname} tonight vs "
+            f"{shift['season_pct']}% season average ({shift['delta']:+d}% — leaned {direction} than usual)"
+        )
+
+    # Platoon split
+    platoon = p.get("platoon_context", {})
+    if platoon.get("notable_split"):
+        facts.append(f"Platoon split: {platoon['split_description']}")
+
+    # Win probability context at exit
+    exit_wp = flow.get("exit_win_probability")
+    if exit_wp is not None:
+        if exit_wp >= 0.80:
+            facts.append(f"Left with team's win probability at {int(exit_wp*100)}% — handed over a comfortable lead")
+        elif exit_wp <= 0.30:
+            facts.append(f"Left with team's win probability at {int(exit_wp*100)}% — team was in a tough spot at exit")
+
+    # Career debut
+    if p.get("is_career_debut"):
+        facts.append("CAREER DEBUT — first major league appearance")
 
     # Contact
     if hrs >= 2:   facts.append(f"Gave up {hrs} home runs")
@@ -3497,7 +3783,7 @@ async def build_claude_summary(
 
     # Context flags
     if is_rivalry: facts.append(f"Rivalry game ({team} vs. {opp_name})")
-    if is_debut:   facts.append("First start of the season")
+    if is_debut:   facts.append(f"First start of the {season} season")
     if is_return:  facts.append("Return from likely IL stint (no recent appearances found)")
     if game_context.get("day_night") == "day": facts.append("Day game")
 
@@ -3505,7 +3791,18 @@ async def build_claude_summary(
     if next_start_note: facts.append(f"Next start: {next_start_note}")
 
     context_block = "\n".join(facts)
-    cap = 4 if label in {"GEM", "DOMINANT"} else 3
+
+    # Cap logic: base is 3 (or 4 for GEM/DOMINANT), raise by 1 if there's a
+    # damage inning or error worth explaining, max 5 to stay within Discord limits
+    pitcher_is_opener = bool(p.get("is_opener"))
+    if pitcher_is_opener:
+        facts.insert(1, "Role: opener (reliever used to start the game, not a traditional starter)")
+        context_block = "\n".join(facts)
+        cap = 2
+    else:
+        base_cap = 4 if label in {"GEM", "DOMINANT"} else 3
+        has_trouble_inning = damage_inning_runs >= 3 or error_contrib
+        cap = min(base_cap + (1 if has_trouble_inning else 0), 5)
 
     # Static system instructions — eligible for prompt caching (paid once, reused)
     system_instructions = """You write the Summary field for a fantasy baseball Discord bot card recapping a starting pitcher's outing. You write in the voice of a conversational beat writer — quick, sharp, knowledgeable.
@@ -3520,10 +3817,102 @@ Rules:
 - Vary sentence length — mix short punchy sentences with longer ones
 - If a next start is in the facts, close with a one-sentence look-ahead
 - Third person, past tense, plain prose — no bullet points, no markdown
-- Output only the summary paragraph, nothing else"""
+- Output only the summary paragraph, nothing else, with no ellipsis (...)
+
+Innings pitched language rules (strictly follow these):
+- 7+ innings = "went deep", "worked deep into the game", "gave the team length", "a deep outing"
+- 6 innings = "a quality start", "six solid innings", "gave the team six innings" — never "went deep"
+- 5 innings or fewer = "a shortened start", "could not get deep", "did not give the team length" — never "went deep"
+- Never describe any outing under 7 innings as "going deep" or "working deep into the game"
+
+Damage inning rules:
+- If the facts mention a specific inning with 3+ runs: discuss that inning specifically — what happened, why it snowballed
+- If key plays are provided: weave the most relevant one naturally into the summary
+- If an error contributed: mention it factually without over-dramatizing
+- Do not use the word "collapse" to describe an inning unless 5 or more runs scored in it
+- Do not use "implode", "meltdown", or similar catastrophic language for 2-3 run innings
+
+Season debut rules:
+- If the facts say "First start of the [year] season": frame it as opening their season, not as a debut or first major league appearance
+- Example: "He opened his 2026 season with..." not "He made his debut..."
+- Do not imply it is a career debut or rookie appearance
+- If the facts say "CAREER DEBUT": this IS his first major league start — treat it as a significant milestone, write with appropriate weight
+
+Pitch mix shift rules:
+- If the facts include a pitch mix shift: this is a significant tactical story — explain what the shift was and why it may have mattered
+- Example: if slider usage jumped 20% above season average, that is the story — did it work, did it backfire?
+
+CRITICAL — Do not use any career or experience labels (rookie, veteran, ace, young pitcher, sophomore) that are not explicitly stated in the facts. You do not know the pitcher's career status. A pitcher with season stats already on the board is not a rookie by definition — do not infer otherwise from your training data."""
+
+    # --- Narrative angle: rotate based on seed so each card leads differently ---
+    last_name = name.split()[-1] if name else name
+    first_name = name.split()[0] if name else name
+
+    # Label-specific tone instruction
+    tone_by_label = {
+        "GEM":       "Tone: this was a masterclass. Write with quiet admiration — not hype, just the steady recognition that something special happened tonight.",
+        "DOMINANT":  "Tone: this pitcher was in command. Write with authority — the lineup never had a real answer and the summary should feel that way.",
+        "QUALITY":   "Tone: this was a job well done. Write with workmanlike respect — he gave his team what it needed and that matters.",
+        "SHARP":     "Tone: this outing was clean and efficient. Write with appreciation for the craft — few wasted pitches, few wasted words.",
+        "STRIKEOUT": "Tone: the swing-and-miss was the story. Lead there — the stuff was electric even if the command came and went.",
+        "SOLID":     "Tone: this was a steady, useful start. Write matter-of-factly — he did his job without fireworks and that is fine.",
+        "UNEVEN":    "Tone: this was a grind. Write with honest ambivalence — good stretches and bad ones, and the line somewhere in between.",
+        "SHORT":     "Tone: this outing did not go as long as needed. Write with straightforward honesty — it was a short night and the bullpen had to pick up the slack.",
+        "ROUGH":     "Tone: this was a tough night. Write with honest accountability — do not pile on but do not sugarcoat either.",
+        "NO_COMMAND":"Tone: the walks were the story. Write with frustration on behalf of the defense — the stuff may have been there but the zone was not.",
+        "HIT_HARD":  "Tone: contact was the issue. Write with clear eyes — the hard contact was real and the line reflects it.",
+    }
+    tone_instruction = tone_by_label.get(label, "Tone: conversational, honest, knowledgeable.")
+
+    # Narrative angle pool — keyed by label group, picked by seed
+    good_angles = [
+        f"Lead with what made the stuff work tonight — was it command, a specific pitch, or something in the sequencing?",
+        f"Lead with how the game felt from the hitter's side — what made this pitcher so difficult to square up?",
+        f"Lead with the moment that defined the outing — the inning or at-bat where it became clear this was his night.",
+        f"Lead with the pitch that carried him — identify the one offering that the lineup could not solve.",
+        f"Lead with what this outing means for his place in the rotation right now.",
+        f"Lead with how efficiently he worked — pitches per inning, getting ahead early, never letting counts get away.",
+        f"Lead with the texture of how he got outs — was it swing-and-miss, soft contact, pounding the zone?",
+        f"Lead with the competitive context — who was in the lineup, how stiff the test was, and how he handled it.",
+    ]
+    bad_angles = [
+        f"Lead with what went wrong and when — identify the turning point in the outing.",
+        f"Lead with what the lineup figured out — what did hitters do to get on base and score?",
+        f"Lead with the damage inning if there was one — what happened in that frame and why could he not stop it?",
+        f"Lead with command — was he ahead in counts or falling behind? That usually explains everything.",
+        f"Lead with what the final line does not fully capture — was it better or worse than the numbers suggest?",
+        f"Lead with what needs to change for his next start — what was the core issue tonight?",
+        f"Lead with the contrast between his good stretches and his bad ones — what derailed the outing?",
+    ]
+    mixed_angles = [
+        f"Lead with the inning that mattered most — good or bad, one frame usually defines a start like this.",
+        f"Lead with what he did well and what ultimately cost him.",
+        f"Lead with how the game unfolded — did he look sharp early, or did he have to find it as the night went on?",
+        f"Lead with how he matched up against this specific lineup tonight.",
+        f"Lead with whether the stuff was there and whether the command matched it.",
+    ]
+
+    if label in {"GEM", "DOMINANT", "QUALITY", "SHARP"}:
+        angle_pool = good_angles
+    elif label in {"ROUGH", "NO_COMMAND", "HIT_HARD"}:
+        angle_pool = bad_angles
+    else:
+        angle_pool = mixed_angles
+
+    angle = angle_pool[(seed // 7) % len(angle_pool)]
+
+    # Sentence opener ban — use actual pitcher name to prevent lazy openers
+    opener_ban = (
+        f"Do not start any sentence with: He, It, This, That, The pitcher, {first_name}, {last_name}. "
+        f"Find a different subject or construction for each sentence."
+    )
 
     user_message = f"""Facts about the outing:
 {context_block}
+
+{tone_instruction}
+Narrative angle: {angle}
+{opener_ban}
 
 Write exactly {cap} sentences."""
 
@@ -3533,7 +3922,7 @@ Write exactly {cap} sentences."""
         response = await asyncio.to_thread(
             client_ai.messages.create,
             model=CLAUDE_MODEL,
-            max_tokens=250,
+            max_tokens=400,
             system=[
                 {
                     "type": "text",
@@ -3567,6 +3956,19 @@ async def post_card(
     label = classify_starter(stats)
     seed = build_starter_summary_seed(p["name"], stats, game_context)
 
+    # Career debut overrides subject line entirely
+    if p.get("is_career_debut"):
+        name = p.get("name", "This pitcher")
+        team_name = team_name_from_abbr(p.get("team", ""))
+        debut_subjects = [
+            f"🌟 {name} makes his major league debut for the {team_name}",
+            f"🌟 {name} takes the mound for the first time in the big leagues",
+            f"🌟 {name} debuts for the {team_name}",
+        ]
+        subject = debut_subjects[seed % len(debut_subjects)]
+    else:
+        subject = build_starter_subject_line(p, label, game_context, seed)
+
     # Try Claude API first, fall back to templates on any failure
     summary = await build_claude_summary(
         p, label, game_context,
@@ -3574,6 +3976,7 @@ async def post_card(
         opp_hitting=opp_hitting,
         next_start=next_start,
         season=season,
+        seed=seed,
     )
     if not summary:
         summary = build_starter_summary(
@@ -3584,110 +3987,33 @@ async def post_card(
             season=season,
         )
 
+    # Build QS streak field if pitcher is on a streak of 3+
+    streak_field_value = None
+    if recent_appearances and label in GOOD_STARTER_LABELS:
+        def _is_qs(a): return safe_float(a.get("ip","0"),0) >= 6.0 and safe_int(a.get("er",0),0) <= 3
+        tonight_ip  = safe_float(stats.get("inningsPitched","0.0"), 0.0)
+        tonight_er  = safe_int(stats.get("earnedRuns", 0), 0)
+        tonight_qs  = tonight_ip >= 6.0 and tonight_er <= 3
+        streak = 0
+        for app in ([{"ip": str(tonight_ip), "er": tonight_er}] + list(recent_appearances)):
+            if _is_qs(app): streak += 1
+            else: break
+        if streak >= 3:
+            streak_field_value = f"🔥 {streak} straight quality starts"
+
     embed = discord.Embed(
         color=TEAM_COLORS.get(normalize_team_abbr(p["team"]), 0x2ECC71),
         timestamp=datetime.now(timezone.utc),
     )
     apply_player_card_chrome(embed, p["name"], p["team"])
-    embed.add_field(name="", value=f"**{build_starter_subject_line(p, label, game_context, seed)}**", inline=False)
+    embed.add_field(name="", value=f"**{subject}**", inline=False)
     embed.add_field(name="Summary", value=summary, inline=False)
     embed.add_field(name="Game Line", value=format_starter_game_line(stats), inline=False)
     embed.add_field(name="Season", value=format_starter_season_line(p.get("season_stats", {})), inline=False)
+    if streak_field_value:
+        embed.add_field(name="Streak", value=streak_field_value, inline=False)
     embed.add_field(name=f"{score_field_emoji(game_context)} Score", value=score_value, inline=False)
     await channel.send(embed=embed)
-
-
-async def run_morning_sweep(channel, state: dict, posted: set) -> None:
-    """Backfill scan of yesterday's final games. Called by sweep_loop at 7:30 AM ET daily.
-    Posts any starter cards missed overnight."""
-    yesterday = datetime.now(ET).date() - timedelta(days=1)
-    log(f"Morning sweep: checking {yesterday} for missed starter cards")
-
-    try:
-        data = fetch_with_retry(f"{SCHEDULE_URL}&date={yesterday.isoformat()}")
-        if not data:
-            log("Morning sweep: schedule fetch failed")
-            return
-        games = []
-        for date_block in data.get("dates", []):
-            games.extend(date_block.get("games", []))
-    except Exception as exc:
-        log(f"Morning sweep: schedule fetch error: {exc}")
-        return
-
-    posts_this_sweep = 0
-    for g in games:
-        if g.get("status", {}).get("detailedState") != "Final":
-            continue
-        game_id = g.get("gamePk")
-        if not game_id:
-            continue
-
-        feed = await asyncio.to_thread(get_feed, game_id)
-        if feed is None:
-            continue
-        starters = get_starters(feed)
-        if not starters:
-            continue
-
-        game_teams = feed.get("gameData", {}).get("teams", {})
-        away_abbr = (
-            game_teams.get("away", {}).get("abbreviation")
-            or g.get("teams", {}).get("away", {}).get("team", {}).get("abbreviation")
-            or "AWAY"
-        )
-        home_abbr = (
-            game_teams.get("home", {}).get("abbreviation")
-            or g.get("teams", {}).get("home", {}).get("team", {}).get("abbreviation")
-            or "HOME"
-        )
-        away_score = safe_int(g.get("teams", {}).get("away", {}).get("score", 0), 0)
-        home_score = safe_int(g.get("teams", {}).get("home", {}).get("score", 0), 0)
-        score_value = build_starter_score_display(away_abbr, away_score, home_abbr, home_score)
-        game_datetime = feed.get("gameData", {}).get("datetime", {})
-        day_night = str(game_datetime.get("dayNight") or "").lower()
-        game_context = {
-            "away_abbr": away_abbr,
-            "home_abbr": home_abbr,
-            "away_score": away_score,
-            "home_score": home_score,
-            "score_display": score_value,
-            "day_night": day_night,
-        }
-        game_date_et = parse_game_date_et(g)
-        season = game_date_et.year if game_date_et else datetime.now(ET).year
-
-        away_hitting = await asyncio.to_thread(get_team_hitting_stats, normalize_team_abbr(away_abbr), season)
-        home_hitting = await asyncio.to_thread(get_team_hitting_stats, normalize_team_abbr(home_abbr), season)
-
-        ordered = sorted(starters, key=lambda p: (-starter_score(p["stats"]), 0 if p.get("side") == "away" else 1))
-        posted_this_game = 0
-        for p in ordered:
-            pid = p.get("id")
-            if pid is None:
-                continue
-            key = f"{game_id}_{pid}"
-            if key in posted:
-                continue
-            if posted_this_game >= MAX_STARTER_CARDS_PER_GAME:
-                break
-            opp_hitting = home_hitting if p.get("side") == "away" else away_hitting
-            recent_appearances = await asyncio.to_thread(get_recent_appearances, pid, game_date_et, limit=5, max_days=45)
-            next_start = await asyncio.to_thread(get_next_start, pid, p.get("team", ""), game_date_et)
-            log(f"Morning sweep posting: {p['name']} | {p['team']}")
-            await post_card(channel, p, game_context, score_value,
-                            recent_appearances=recent_appearances,
-                            opp_hitting=opp_hitting,
-                            next_start=next_start,
-                            season=season)
-            posted.add(key)
-            posted_this_game += 1
-            posts_this_sweep += 1
-            state["posted"] = list(posted)
-            save_state(state)
-            await asyncio.sleep(POST_STAGGER_SECONDS)
-
-    log(f"Morning sweep complete: {posts_this_sweep} posts")
 
 
 async def loop():
@@ -3716,7 +4042,32 @@ async def loop():
             games = await asyncio.to_thread(get_games)
             log(f"Checking {len(games)} games")
 
+            # Prune pitching_stats_cache to last 30 days to prevent unbounded growth
+            today_et = datetime.now(ET).date()
+            cutoff = today_et - timedelta(days=30)
+            stale_dates = [d for d in list(pitching_stats_cache.keys()) if d < cutoff]
+            for d in stale_dates:
+                del pitching_stats_cache[d]
+            if stale_dates:
+                log(f"Pruned {len(stale_dates)} stale dates from pitching_stats_cache")
+
+            # Clear next_start_cache each cycle so stale probable data doesn't persist
+            next_start_cache.clear()
+
+            # Count how many cards already posted today to enforce daily cap
+            MAX_POSTS_PER_DAY = 30
+            today_game_ids = {str(g.get("gamePk")) for g in games if g.get("gamePk")}
+            posted_today = sum(
+                1 for key in posted
+                if key.split("_")[0] in today_game_ids
+            )
+            log(f"{posted_today}/{MAX_POSTS_PER_DAY} cards posted today so far")
+
             for g in games:
+                if posted_today >= MAX_POSTS_PER_DAY:
+                    log(f"Daily cap of {MAX_POSTS_PER_DAY} reached — stopping for today")
+                    break
+
                 if g.get("status", {}).get("detailedState") != "Final":
                     continue
 
@@ -3797,6 +4148,27 @@ async def loop():
                     recent_appearances = await asyncio.to_thread(
                         get_recent_appearances, pid, game_date_et, limit=5, max_days=45
                     )
+                    # Resolve opener status now that we have recent appearances
+                    p["is_opener"] = is_opener(p, recent_appearances)
+                    if p["is_opener"]:
+                        log(f"  -> Identified as opener based on recent appearance pattern")
+
+                    # Resolve season pitch mix shift
+                    season_mix = await asyncio.to_thread(
+                        get_season_pitch_mix, pid, season
+                    )
+                    p["pitch_mix_shift"] = compute_pitch_mix_shift(
+                        p.get("pitch_type_counts", {}), season_mix or {}
+                    )
+
+                    # Detect career debut (GS=1 this season AND negligible career IP)
+                    gs_this_season = safe_int(p.get("season_stats", {}).get("gamesStarted", 0), 0)
+                    if gs_this_season == 1 and not recent_appearances:
+                        career_ip = await asyncio.to_thread(get_career_ip, pid)
+                        tonight_ip = safe_float(p["stats"].get("inningsPitched", "0.0"), 0.0)
+                        p["is_career_debut"] = (career_ip is None or career_ip <= tonight_ip + 1.0)
+                    else:
+                        p["is_career_debut"] = False
                     next_start = await asyncio.to_thread(
                         get_next_start, pid, p.get("team", ""), game_date_et
                     )
@@ -3810,6 +4182,7 @@ async def loop():
                     )
                     posted.add(key)
                     posted_this_game += 1
+                    posted_today += 1
                     # Stagger between cards to avoid channel spam
                     await asyncio.sleep(POST_STAGGER_SECONDS)
 
@@ -3837,45 +4210,15 @@ async def loop():
 intents = discord.Intents.default()
 client = discord.Client(intents=intents)
 background_task = None
-sweep_task = None
-
-
-async def sweep_loop_starter():
-    """Runs the morning sweep every day at 7:30 AM ET regardless of the main sleep window."""
-    await client.wait_until_ready()
-    channel = await client.fetch_channel(CHANNEL_ID)
-
-    while True:
-        now = datetime.now(ET)
-        target = now.replace(hour=8, minute=0, second=0, microsecond=0)
-        if now >= target:
-            target += timedelta(days=1)
-        sleep_secs = (target - now).total_seconds()
-        log(f"Sweep loop: next sweep at 7:30 AM ET (sleeping {sleep_secs/3600:.1f}h)")
-        await asyncio.sleep(sleep_secs)
-
-        if RESET_STARTER_STATE:
-            continue
-
-        # Clean up old cache entries daily
-        cleanup_starter_caches()
-
-        state = load_state()
-        posted = set(state.get("posted", []))
-        await run_morning_sweep(channel, state, posted)
 
 
 @client.event
 async def on_ready():
-    global background_task, sweep_task
+    global background_task
     log(f"Logged in as {client.user}")
-    await client.change_presence(status=discord.Status.invisible)
     if background_task is None or background_task.done():
         background_task = asyncio.create_task(loop())
         log("Starter background task created")
-    if sweep_task is None or sweep_task.done():
-        sweep_task = asyncio.create_task(sweep_loop_starter())
-        log("Starter sweep task created")
 
 
 async def start_starter_bot():
