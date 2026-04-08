@@ -98,32 +98,6 @@ pitching_stats_cache = {}
 player_meta_cache = {}
 season_stats_cache = {}  # pid -> regular season pitching stats dict
 
-
-def cleanup_old_cache_entries(cache_dict, max_days=7):
-    """Keep only the last N days in date-keyed cache to prevent unbounded memory growth."""
-    from datetime import date, timedelta
-    if not cache_dict:
-        return 0
-    
-    cutoff = date.today() - timedelta(days=max_days)
-    keys_to_delete = [k for k in cache_dict.keys() if isinstance(k, date) and k < cutoff]
-    
-    for key in keys_to_delete:
-        del cache_dict[key]
-    
-    return len(keys_to_delete)
-
-
-def cleanup_closer_caches():
-    """Clean up old entries from all closer bot caches."""
-    deleted_app = cleanup_old_cache_entries(appearance_cache, max_days=7)
-    deleted_stats = cleanup_old_cache_entries(pitching_stats_cache, max_days=7)
-    deleted_meta = cleanup_old_cache_entries(player_meta_cache, max_days=7)
-    
-    if deleted_app > 0 or deleted_stats > 0 or deleted_meta > 0:
-        log(f"Cache cleanup: removed {deleted_app} appearance, {deleted_stats} stats, {deleted_meta} meta entries")
-
-
 ESPN_PLAYER_IDS_PATH = os.getenv("ESPN_PLAYER_IDS_PATH", "shared/player_ids/espn_player_ids.json")
 player_headshot_index = None
 
@@ -624,7 +598,7 @@ def format_season_line(season: dict) -> str:
 
 # ---------------- CLASSIFICATION ----------------
 
-def classify(s: dict) -> str:
+def classify(s: dict, context: dict | None = None) -> str:
     outs = baseball_ip_to_outs(s["ip"])
     baserunners = baserunner_count(s)
 
@@ -632,6 +606,10 @@ def classify(s: dict) -> str:
         return "SAVE"
 
     if s.get("blownSaves"):
+        return "BLOWN"
+
+    # Extra inning loss: ghost runner scored, 0 ER in box score but pitcher lost the game
+    if context and context.get("extra_inning_loss"):
         return "BLOWN"
 
     if s.get("holds"):
@@ -808,6 +786,8 @@ def get_pitcher_entry_context(feed: dict, pitcher_id: int, pitcher_side: str):
             "inherited_runners": 0,
             "relieved_pitcher": "",
             "finished_game": False,
+            "ghost_runner": False,
+            "extra_inning_loss": False,
         }
 
     pitcher_indices = []
@@ -828,6 +808,8 @@ def get_pitcher_entry_context(feed: dict, pitcher_id: int, pitcher_side: str):
             "inherited_runners": 0,
             "relieved_pitcher": "",
             "finished_game": False,
+            "ghost_runner": False,
+            "extra_inning_loss": False,
         }
 
     first_idx = pitcher_indices[0]
@@ -923,6 +905,37 @@ def get_pitcher_entry_context(feed: dict, pitcher_id: int, pitcher_side: str):
         state_kind = "tie"
         state_text = "in a tie game"
 
+    # --- Extra inning ghost runner detection ---
+    # In extras (inning >= 10), MLB places an automatic runner on 2nd to start each half.
+    # If this pitcher entered a tie game with that ghost runner and his team lost,
+    # the run that scored is unearned (0 ER) but he was still the losing pitcher.
+    ghost_runner = False
+    extra_inning_loss = False
+
+    if inning is not None and inning >= 10:
+        # Check if there's a runner on 2nd at entry with 0 outs — signature of the ghost runner
+        if entry_outs == 0 and inherited_count >= 1:
+            ghost_runner = True
+
+        # Determine if his team lost — compare final score to entry score
+        last_play = plays[-1]
+        last_result = last_play.get("result", {})
+        final_away = safe_int(last_result.get("awayScore", 0), 0)
+        final_home = safe_int(last_result.get("homeScore", 0), 0)
+
+        if pitcher_side == "home":
+            team_final = final_home
+            opp_final = final_away
+        else:
+            team_final = final_away
+            opp_final = final_home
+
+        team_lost = team_final < opp_final
+
+        # Extra inning loss: entered tie game in extras with ghost runner and team lost
+        if ghost_runner and state_kind == "tie" and team_lost:
+            extra_inning_loss = True
+
     return {
         "entry_phrase": entry_phrase,
         "entry_outs_text": entry_outs_text,
@@ -934,6 +947,8 @@ def get_pitcher_entry_context(feed: dict, pitcher_id: int, pitcher_side: str):
         "inherited_runners": inherited_count,
         "relieved_pitcher": relieved_pitcher,
         "finished_game": (last_idx == len(plays) - 1),
+        "ghost_runner": ghost_runner,
+        "extra_inning_loss": extra_inning_loss,
     }
 
 
@@ -1740,15 +1755,15 @@ def build_trend_stat_sentence(name: str, code: str, span_stats: dict):
     if code in {"ks12last5", "ks8last3"}:
         return random.choice([
             f"He has paired the swing-and-miss with {bb_text} over {ip_text} in that span.",
-            f"Over that stretch, he has worked {ip_text} while keeping it to {bb_text}.",
+            f"Over that stretch, he has worked {ip_text} with {bb_text}.",
             f"That run has also come with {bb_text} over {ip_text}.",
         ])
 
     if code in {"dominant_streak", "dominant_run"}:
         return random.choice([
-            f"During that {window}-appearance stretch, he has {k_text} against {bb_text}.",
+            f"During that {window}-appearance stretch, he has {k_text} and {bb_text}.",
             f"He has covered {ip_text} during that run, with {k_text} and {bb_text}.",
-            f"The stretch has come with {k_text} over {ip_text}, and only {bb_text}.",
+            f"The stretch has come with {k_text} over {ip_text} and {bb_text}.",
         ])
 
     if code in {"runs2of3", "runs3of5", "blown_save_watch", "first_rough_after_hot"}:
@@ -1759,13 +1774,13 @@ def build_trend_stat_sentence(name: str, code: str, span_stats: dict):
 
     if code in {"command_spike", "multi_inning_pattern"}:
         return random.choice([
-            f"Over that stretch, he has logged {ip_text} with {k_text} against {bb_text}.",
-            f"That span has come with {k_text} and only {bb_text} over {ip_text}.",
+            f"Over that stretch, he has logged {ip_text} with {k_text} and {bb_text}.",
+            f"That span has come with {k_text} and {bb_text} over {ip_text}.",
         ])
 
     return random.choice([
-        f"Over that stretch, he has logged {ip_text} with {k_text} against {bb_text}.",
-        f"That span has come with {k_text} and only {bb_text} over {ip_text}.",
+        f"Over that stretch, he has logged {ip_text} with {k_text} and {bb_text}.",
+        f"That span has come with {k_text} and {bb_text} over {ip_text}.",
     ])
 
 
@@ -2436,11 +2451,15 @@ def build_trend_candidates(current_app: dict, recent_appearances, tracked_info, 
         add("workload_spike", "Heavy Workload Alert", "😤", 67, "workload", {"apps_last6": apps_last6})
 
     # --- inherited runner specialist: track via context inherited_stranded_recent ---
+    # NOTE: inherited_stranded_recent requires historical aggregation not yet implemented.
+    # context will always return 0 here — this trend cannot fire until that data is built.
     inherited_stranded = context.get("inherited_stranded_recent", 0)
     if inherited_stranded >= 3:
         add("inherited_runner_specialist", "Inherited Runner Stopper", "🛑", 74, "specialist", {"inherited_stranded": inherited_stranded})
 
     # --- usage / leverage: 2+ late-inning clean appearances in last 7 days ---
+    # NOTE: late_inning_clean_recent requires historical aggregation not yet implemented.
+    # context will always return 0 here — this trend cannot fire until that data is built.
     late_clean_recent = context.get("late_inning_clean_recent", 0)
     if late_clean_recent >= 2:
         entry = safe_int(context.get("entry_inning"), 0)
@@ -2700,18 +2719,154 @@ def appearance_signature(recent_appearances):
     return "|".join(parts)
 
 
+async def build_trend_summary_via_claude(
+    name: str,
+    team: str,
+    trend: dict,
+    recent_appearances: list,
+    season_stats: dict,
+    span_stats: dict,
+) -> str | None:
+    """
+    Call Claude Haiku to generate a trend blurb summary.
+    Returns a summary string or None on failure (caller falls back to templates).
+    """
+    try:
+        if not ANTHROPIC_API_KEY:
+            return None
+
+        loop = asyncio.get_event_loop()
+        code = trend.get("code", "")
+        subject = trend.get("subject", "")
+        family = trend.get("family", "")
+        detail = trend.get("detail", {})
+
+        # Build recent form string (last 5 appearances)
+        recent_form_parts = []
+        for i, a in enumerate(recent_appearances[:5]):
+            label_str = "most recent" if i == 0 else f"{i+1} outings ago"
+            er = a.get("er", 0)
+            k = safe_int(a.get("k", 0), 0)
+            bb = safe_int(a.get("bb", 0), 0)
+            ip = a.get("ip", "0.0")
+            recent_form_parts.append(f"{label_str}: {ip} IP, {er} ER, {k} K, {bb} BB")
+        recent_form = ", ".join(recent_form_parts) if recent_form_parts else "no recent data"
+
+        # Season stats
+        season = season_stats or {}
+        sv = safe_int(season.get("saves", 0), 0)
+        holds = safe_int(season.get("holds", 0), 0)
+        season_era = season.get("era") or season.get("earnedRunAverage") or "—"
+        season_k = safe_int(season.get("strikeOuts", 0), 0)
+        whip = season.get("whip") or "—"
+        season_str = f"{sv} SV, {holds} HLD, {season_era} ERA, {whip} WHIP, {season_k} K"
+
+        # Span stats
+        span_ip = span_stats.get("ip", "0.0")
+        span_k = span_stats.get("k", 0)
+        span_bb = span_stats.get("bb", 0)
+        span_er = span_stats.get("er", 0)
+        span_window = span_stats.get("window", 3)
+        span_str = f"{span_ip} IP, {span_er} ER, {span_k} K, {span_bb} BB over last {span_window} appearances"
+
+        # Extra detail for specific trends
+        extra_detail = ""
+        if code == "workload_spike":
+            extra_detail = f"He has appeared in {detail.get('apps_last6', 4)} of the last 6 days."
+        elif code == "inherited_runner_specialist":
+            extra_detail = f"He has stranded {detail.get('inherited_stranded', 3)} inherited runners recently."
+
+        prompt = f"""PITCHER: {name} | {team}
+TREND: {subject} (family: {family})
+SPAN STATS: {span_str}
+SEASON STATS: {season_str}
+RECENT FORM (most recent first): {recent_form}
+{('EXTRA CONTEXT: ' + extra_detail) if extra_detail else ''}
+
+Write a 2-3 sentence fantasy baseball trend blurb about this reliever. Be direct and analytical."""
+
+        def _call_claude():
+            resp = requests.post(
+                "https://api.anthropic.com/v1/messages",
+                headers={
+                    "Content-Type": "application/json",
+                    "x-api-key": ANTHROPIC_API_KEY,
+                    "anthropic-version": "2023-06-01",
+                    "anthropic-beta": "prompt-caching-2024-07-31",
+                },
+                json={
+                    "model": "claude-haiku-4-5-20251001",
+                    "max_tokens": 200,
+                    "system": [
+                        {
+                            "type": "text",
+                            "text": (
+                                "You are writing a short trend blurb for a Discord fantasy baseball bot.\n\n"
+                                "Instructions:\n"
+                                "- Write 2-3 sentences of flowing prose. No bullet points, no markdown, no headers.\n"
+                                "- Be direct and analytical — this is fantasy baseball analysis, not a hype piece.\n"
+                                "- CRITICAL: Never use the word 'just' to minimize or downplay any statistic, especially walks. State numbers neutrally.\n"
+                                "- CRITICAL: Never invent stats. Only reference numbers explicitly provided in the prompt.\n"
+                                "- Do not start with 'In' or 'Tonight' or the pitcher's full name as the very first word.\n"
+                                "- Never end with an ellipsis or incomplete thought.\n"
+                                "- Vary your sentence openings across different blurbs.\n"
+                                "- Target length: ~60-80 words.\n"
+                                "- Respond with the blurb text only — no labels, no preamble."
+                            ),
+                            "cache_control": {"type": "ephemeral"},
+                        }
+                    ],
+                    "messages": [{"role": "user", "content": prompt}],
+                },
+                timeout=20,
+            )
+            resp.raise_for_status()
+            data = resp.json()
+            return "".join(
+                block.get("text", "") for block in data.get("content", [])
+                if block.get("type") == "text"
+            ).strip()
+
+        raw = await loop.run_in_executor(None, _call_claude)
+        return raw if raw else None
+
+    except Exception as e:
+        log(f"Trend Claude API failed for {name}: {e}")
+        return None
+
+
 async def post_trend_card(channel, meta: dict, trend: dict, recent_appearances):
     team = meta.get("team", "UNK")
     name = meta.get("name", "Unknown Pitcher")
+    pitcher_id = meta.get("id") or meta.get("pitcher_id")
+
+    # Always fetch fresh regular-season stats — player_meta_cache may have empty season_stats
+    # if the boxscore read happened before get_player_season_stats was called (gameType=R only)
+    season_stats = meta.get("season_stats") or {}
+    if pitcher_id and not season_stats:
+        fetched = await get_player_season_stats(pitcher_id)
+        if fetched:
+            season_stats = fetched
+
     subject = f"{trend.get('emoji', '🧠')} {trend.get('subject', 'Bullpen Trend')}"
+    code = trend.get("code", "")
+    span_stats = summarize_trend_span(recent_appearances, code)
+
+    # Try Claude Haiku first, fall back to templates
+    summary = await build_trend_summary_via_claude(name, team, trend, recent_appearances, season_stats, span_stats)
+    if summary:
+        log(f"Claude trend summary generated for {name}")
+    else:
+        summary = build_trend_analysis(name, team, trend, recent_appearances, season_stats)
+
     embed = discord.Embed(
         color=TEAM_COLORS.get(normalize_team_abbr(team), 0x2ECC71),
         timestamp=datetime.now(timezone.utc),
     )
     apply_player_card_chrome(embed, name, team)
     embed.add_field(name="", value=f"**{subject}**", inline=False)
-    embed.add_field(name="Season", value=format_season_line(meta.get("season_stats", {})), inline=False)
-    embed.add_field(name="Summary", value=build_trend_analysis(name, team, trend, recent_appearances, meta.get("season_stats", {})), inline=False)
+    embed.add_field(name="Season", value=format_season_line(season_stats), inline=False)
+    embed.add_field(name="Summary", value=summary, inline=False)
     await channel.send(embed=embed)
 
 
@@ -2871,9 +3026,6 @@ async def gather_trend_candidates_from_recent_games(tracked: dict, processed_pit
         pid = p.get("id")
         if pid is None:
             continue
-        # Skip starting pitchers — trend blurbs are bullpen-only
-        if p.get("is_starter"):
-            continue
         norm = normalize_name(p.get("name", ""))
         if norm in tracked_names:
             continue
@@ -2907,7 +3059,7 @@ async def gather_trend_candidates_from_recent_games(tracked: dict, processed_pit
 
         candidates.append({
             "pitcher_id": pid,
-            "meta": player_meta_cache.get(pid, {"name": p.get("name"), "team": p.get("team"), "season_stats": p.get("season_stats", {})}),
+            "meta": player_meta_cache.get(pid, {"id": pid, "name": p.get("name"), "team": p.get("team"), "season_stats": p.get("season_stats", {})}),
             "trend": best,
             "recent_appearances": recent,
         })
@@ -3073,7 +3225,6 @@ def get_pitchers(feed: dict):
             season_stats = {}
 
             velo = get_fastball_velocity_summary(feed, p.get("person", {}).get("id"))
-            pos_abbr = p.get("position", {}).get("abbreviation", "")
             player_obj = {
                 "id": p.get("person", {}).get("id"),
                 "name": _fix_name(p.get("person", {}).get("fullName", "Unknown Pitcher")),
@@ -3081,7 +3232,6 @@ def get_pitchers(feed: dict):
                 "side": side,
                 "stats": stats,
                 "season_stats": season_stats,
-                "is_starter": pos_abbr == "SP",
                 "avg_fastball_velocity": velo.get("avg_fastball_velocity") if velo else None,
                 "fastball_count": velo.get("fastball_count", 0) if velo else 0,
                 "pitch_count": velo.get("total_pitches", safe_int(stats.get("numberOfPitches", 0), 0)) if velo else safe_int(stats.get("numberOfPitches", 0), 0),
@@ -3089,6 +3239,7 @@ def get_pitchers(feed: dict):
             result.append(player_obj)
             if player_obj["id"] is not None:
                 player_meta_cache[player_obj["id"]] = {
+                    "id": player_obj["id"],
                     "name": player_obj["name"],
                     "team": normalize_team_abbr(team),
                     "season_stats": season_stats,
@@ -3203,6 +3354,8 @@ STAT LINE: {stat_line}
 SEASON STATS: {season_stats_str}
 PREVIOUS OUTING: {prev_outing_er} ER (use this exact number if referencing his last appearance)
 {'INHERITED RUNNERS: ' + str(inherited) + (' (relieved ' + relieved_pitcher + ')' if relieved_pitcher else '') if inherited > 0 else ''}
+{'EXTRA INNINGS NOTE: Automatic runner was placed on 2nd base (ghost runner) per MLB extra inning rules. Any run scored by this runner is unearned in the box score but was still allowed by this pitcher.' if context.get('ghost_runner') else ''}
+{'GAME OUTCOME: His team LOST this game. The ghost runner scored on his watch. Despite 0 ER in the box score, this was a game-losing appearance — write the summary accordingly, do not call it clean or positive.' if context.get('extra_inning_loss') else ''}
 {score_context}
 
 PLAY-BY-PLAY DETAIL:
@@ -3306,8 +3459,7 @@ async def post_card(channel, p: dict, matchup: str, score: str, context: dict, s
         "blownSaves": safe_int(p["stats"].get("blownSaves", 0), 0),
     }
 
-    label = classify(s)
-    detail = get_pitcher_outing_detail(feed, p.get("id"), ip=str(p["stats"].get("inningsPitched", "0.0")), er=safe_int(p["stats"].get("earnedRuns", 0), 0)) if feed else None
+    label = classify(s, context=context)(feed, p.get("id"), ip=str(p["stats"].get("inningsPitched", "0.0")), er=safe_int(p["stats"].get("earnedRuns", 0), 0)) if feed else None
 
     # Fetch verified regular season stats (sportId=1 only — excludes spring training)
     # Falls back to boxscore seasonStats if the API call fails
@@ -3454,9 +3606,6 @@ async def loop():
                     trend_pitcher_cache = []
                     trend_pitcher_cache_date = None
                     log("Season stats cache cleared for new day")
-                    
-                    # Clean up old cache entries daily
-                    cleanup_closer_caches()
 
                 games = await get_games()
                 log(f"Checking {len(games)} games")
@@ -3531,10 +3680,6 @@ async def loop():
                         if key in posted:
                             continue
 
-                        # Skip starting pitchers — this channel is bullpen-only
-                        if p.get("is_starter"):
-                            continue
-
                         tracked_info = find_tracked_pitcher_info(p["name"], p["team"], tracked)
                         is_save = safe_int(p["stats"].get("saves", 0), 0) > 0
                         is_tracked = tracked_info is not None
@@ -3552,7 +3697,7 @@ async def loop():
                             "holds": safe_int(p["stats"].get("holds", 0), 0),
                             "blownSaves": safe_int(p["stats"].get("blownSaves", 0), 0),
                         }
-                        label_preview = classify(s_preview)
+                        label_preview = classify(s_preview, context=context)
                         # Apply SHAKY_HOLD reclassification for sorting purposes
                         if (
                             label_preview == "HOLD"
@@ -3649,7 +3794,7 @@ async def loop():
                             home_score=c["home_score"],
                         )
 
-                        if within_trend_hours(now_et) and (not c["is_tracked"]) and should_post_velocity_alert(state, pitcher_id, game_id, velocity_alert, now_et):
+                        if (not c["is_tracked"]) and should_post_velocity_alert(state, pitcher_id, game_id, velocity_alert, now_et):
                             log(f"Velocity alert {p['name']} | {p['team']} | {velocity_alert.get('subject')}")
                             await post_velocity_card(
                                 channel,
