@@ -1444,6 +1444,61 @@ def build_platoon_context(feed: dict, pitcher_id: int, pitcher_side: str) -> dic
     return result
 
 
+def classify_ballpark(venue_name: str) -> str:
+    """
+    Return 'hitter' or 'pitcher' for notable parks, '' for neutral/unknown.
+    Keyed to the venue name string returned by MLB Stats API.
+    """
+    name = venue_name.lower()
+    hitter_parks = {
+        "coors field",               # Colorado — extreme hitter's park
+        "great american ball park",  # Cincinnati
+        "citizens bank park",        # Philadelphia
+        "yankee stadium",            # New York Yankees
+        "globe life field",          # Texas — indoor dome, plays big
+        "american family field",     # Milwaukee
+        "fenway park",               # Boston — Green Monster
+        "truist park",               # Atlanta
+        "chase field",               # Arizona — thin air, retractable roof
+        "great american ballpark",   # alternate spelling
+    }
+    pitcher_parks = {
+        "oracle park",               # San Francisco
+        "petco park",                # San Diego
+        "dodger stadium",            # Los Angeles Dodgers
+        "t-mobile park",             # Seattle
+        "oakland coliseum",          # Oakland (large foul territory)
+        "kauffman stadium",          # Kansas City
+        "comerica park",             # Detroit
+        "progressive field",         # Cleveland
+        "busch stadium",             # St. Louis
+        "loanDepot park",            # Miami (fast surface, humid)
+        "loandepot park",
+    }
+    if any(p in name for p in hitter_parks):
+        return "hitter"
+    if any(p in name for p in pitcher_parks):
+        return "pitcher"
+    return ""
+
+
+def compute_fip(stats: dict) -> float | None:
+    """
+    FIP = (13*HR + 3*BB - 2*K) / IP + 3.15
+    Returns None if IP < 1.0 to avoid noise on very short outings.
+    """
+    ip  = safe_float(stats.get("inningsPitched", "0.0"), 0.0)
+    hr  = safe_int(stats.get("homeRuns", 0), 0)
+    bb  = safe_int(stats.get("baseOnBalls", 0), 0)
+    k   = safe_int(stats.get("strikeOuts", 0), 0)
+
+    if ip < 1.0:
+        return None
+
+    fip = (13 * hr + 3 * bb - 2 * k) / ip + 3.15
+    return round(fip, 2)
+
+
 def classify_offense(ops: float) -> str:
     """Bucket a team OPS into a qualitative tier."""
     if ops >= 0.800:
@@ -3550,6 +3605,7 @@ async def build_claude_summary(
     opp_name = team_name_from_abbr(opp_abbr)
 
     ip     = str(stats.get("inningsPitched", "0.0"))
+    ip_float = safe_float(stats.get("inningsPitched", "0.0"), 0.0)
     h      = safe_int(stats.get("hits", 0), 0)
     er     = safe_int(stats.get("earnedRuns", 0), 0)
     bb     = safe_int(stats.get("baseOnBalls", 0), 0)
@@ -3725,7 +3781,28 @@ async def build_claude_summary(
     if key_plays:
         facts.append(f"Notable plays: {' | '.join(key_plays[:3])}")
 
-    # Pitch count efficiency
+    # FIP — only surface when it meaningfully diverges from ERA
+    fip = compute_fip(stats)
+    if fip is not None:
+        era_val = safe_float(stats.get("era", None), None)
+        if era_val is None and er > 0 and ip_float > 0:
+            era_val = round((er / ip_float) * 9, 2)
+        elif era_val is None and er == 0:
+            era_val = 0.0
+        if era_val is not None:
+            gap = era_val - fip
+            if gap >= 0.75:
+                facts.append(f"FIP: {fip:.2f} vs ERA {era_val:.2f} — underlying numbers were better than the result suggests")
+            elif gap <= -0.75:
+                facts.append(f"FIP: {fip:.2f} vs ERA {era_val:.2f} — pitched better than the numbers show on paper")
+
+    # Ballpark context
+    venue_name = game_context.get("venue_name", "")
+    park_type = classify_ballpark(venue_name)
+    if park_type == "hitter" and venue_name:
+        facts.append(f"Ballpark: {venue_name} is a hitter-friendly environment — context matters for this line")
+    elif park_type == "pitcher" and venue_name:
+        facts.append(f"Ballpark: {venue_name} is a pitcher-friendly environment — context matters for this line")
     if pitch_cnt and flow.get("innings_sequence"):
         innings_pitched_count = len(flow.get("innings_sequence", []))
         if innings_pitched_count >= 4:
@@ -3842,7 +3919,13 @@ Pitch mix shift rules:
 - If the facts include a pitch mix shift: this is a significant tactical story — explain what the shift was and why it may have mattered
 - Example: if slider usage jumped 20% above season average, that is the story — did it work, did it backfire?
 
-CRITICAL — Do not use any career or experience labels (rookie, veteran, ace, young pitcher, sophomore) that are not explicitly stated in the facts. You do not know the pitcher's career status. A pitcher with season stats already on the board is not a rookie by definition — do not infer otherwise from your training data."""
+FIP and ballpark rules:
+- If FIP is notably better than ERA (gap noted in facts): mention that the underlying numbers were cleaner than the result — this matters for fantasy valuation
+- If FIP is notably worse than ERA: mention that the numbers suggest the outing was shakier than the ERA implies
+- If a hitter-friendly ballpark is noted: contextualize the run total — a clean line at Coors is different than a clean line at Petco
+- If a pitcher-friendly ballpark is noted: contextualize accordingly — tough to score there, so runs allowed carry more weight
+
+CRITICAL — Do not use any career or experience labels (rookie, veteran, ace, young pitcher, sophomore) that are not explicitly stated in the facts."""
 
     # --- Narrative angle: rotate based on seed so each card leads differently ---
     last_name = name.split()[-1] if name else name
@@ -4097,7 +4180,10 @@ async def loop():
 
                 # day/night from feed
                 game_datetime = feed.get("gameData", {}).get("datetime", {})
-                day_night = str(game_datetime.get("dayNight") or "").lower()  # "day" or "night"
+                day_night = str(game_datetime.get("dayNight") or "").lower()
+
+                # Venue name for ballpark context
+                venue_name = str(feed.get("gameData", {}).get("venue", {}).get("name") or "").strip()
 
                 game_context = {
                     "away_abbr": away_abbr,
@@ -4106,6 +4192,7 @@ async def loop():
                     "home_score": home_score,
                     "score_display": score_value,
                     "day_night": day_night,
+                    "venue_name": venue_name,
                 }
                 game_date_et = parse_game_date_et(g)
                 season = game_date_et.year if game_date_et else datetime.now(ET).year
