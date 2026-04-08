@@ -232,6 +232,19 @@ def normalize_text(text: str) -> str:
     return text
 
 
+def strip_injury_tags(name: str) -> str:
+    """
+    Strip injury/status tags from Fantasy Pros player names.
+    Examples:
+        'Juan Soto (NYM - LF,RF) MiLB' -> 'Juan Soto'
+        'Gerrit Cole (NYY - SP) IL15' -> 'Gerrit Cole'
+        'Mookie Betts (LAD - SS) IL10' -> 'Mookie Betts'
+    """
+    # Remove everything from the first parenthesis onwards
+    name = re.sub(r'\s*\([^)]*\).*$', '', name)
+    return name.strip()
+
+
 def get_overridden_player_id(player_name: str) -> int | None:
     return PLAYER_NAME_OVERRIDES.get(normalize_text(player_name))
 
@@ -2709,7 +2722,11 @@ async def seed_next_player_from_state(forum_channel: discord.ForumChannel):
 
     while seed_state["current_index"] < len(players):
         row = players[seed_state["current_index"]]
-        name = row["name"]
+        raw_name = row["name"]
+        
+        # Strip injury/status tags from Fantasy Pros names
+        # 'Juan Soto (NYM - LF,RF) MiLB' -> 'Juan Soto'
+        name = strip_injury_tags(raw_name)
 
         existing = await find_existing_profile_thread(forum_channel, name)
         if existing:
