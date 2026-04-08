@@ -202,6 +202,10 @@ seed_state = {
 thread_command_state = {}
 user_rate_limit_state = {}  # user_id -> {date: request_count}
 
+# Profile creation queue to prevent concurrent memory spikes
+profile_creation_lock = asyncio.Lock()
+profile_creation_queue = []  # List of (user_id, player_name, message) tuples
+
 PLAYER_NAME_OVERRIDES = {
     "julio rodriguez": 677594,  # Julio Rodríguez
 }
@@ -3039,26 +3043,36 @@ async def on_message(message: discord.Message):
             )
             return
 
-    try:
-        await message.reply(
-            f"Working on **{raw_player}**...",
-            mention_author=False,
-        )
-
-        result = await create_profile_for_name(raw_player, forum_channel)
+    # Use the queue to prevent concurrent profile creations (memory spikes)
+    async with profile_creation_lock:
+        queue_position = len(profile_creation_queue) + 1
         
-        # Only increment rate limit if profile was actually created (not if it already existed)
-        if not is_seed_admin(message.author) and result.get("status") == "created":
-            increment_user_rate_limit(message.author.id)
+        if queue_position > 1:
+            await message.reply(
+                f"Working on **{raw_player}**... (Position {queue_position} in queue)",
+                mention_author=False,
+            )
+        else:
+            await message.reply(
+                f"Working on **{raw_player}**...",
+                mention_author=False,
+            )
         
-        await message.reply(result["message"], mention_author=False)
+        try:
+            result = await create_profile_for_name(raw_player, forum_channel)
+            
+            # Only increment rate limit if profile was actually created (not if it already existed)
+            if not is_seed_admin(message.author) and result.get("status") == "created":
+                increment_user_rate_limit(message.author.id)
+            
+            await message.reply(result["message"], mention_author=False)
 
-    except Exception as e:
-        log_profiles(f"Create thread error: {e}")
-        await message.reply(
-            "Something went wrong while creating that profile.",
-            mention_author=False,
-        )
+        except Exception as e:
+            log_profiles(f"Create thread error: {e}")
+            await message.reply(
+                "Something went wrong while creating that profile.",
+                mention_author=False,
+            )
 
 
 if not TOKEN:
