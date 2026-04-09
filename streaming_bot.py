@@ -794,14 +794,14 @@ Write a 4-6 sentence fantasy streaming analysis in beat-writer prose style. Be s
         return f"{pitcher_data['pitcher_name']} profiles as a {tier.lower()} against {pitcher_data['opponent']}. The matchup shows {breakdown.get('matchup', 0):.0f} points of support, and the park context is {park_data.get('type', 'neutral')}. Risk factor: {risk}."
 
 
-async def post_streaming_board():
+async def post_streaming_board(date_str=None):
     """Main posting function"""
     try:
         # Refresh Statcast cache
         await refresh_statcast_cache()
         
-        # Get probable starters
-        starters = await get_probable_starters()
+        # Get probable starters (use provided date or default to today)
+        starters = await get_probable_starters(date_str)
         
         if not starters:
             print("No probable starters found")
@@ -877,11 +877,14 @@ async def post_streaming_board():
         
         # Header
         et_tz = pytz.timezone('America/New_York')
-        today = datetime.now(et_tz).strftime('%A, %B %d, %Y')
+        if date_str:
+            display_date = datetime.strptime(date_str, '%Y-%m-%d').strftime('%A, %B %d, %Y')
+        else:
+            display_date = datetime.now(et_tz).strftime('%A, %B %d, %Y')
         
         header = discord.Embed(
-            title="📊 Streaming Scout: Today's Board",
-            description=f"{today}\n{len(viable_streamers)} pitchers under {OWNERSHIP_THRESHOLD}% rostered",
+            title=f"📊 Streaming Scout: {display_date}",
+            description=f"{len(viable_streamers)} pitchers under {OWNERSHIP_THRESHOLD}% rostered",
             color=0x1E88E5
         )
         await channel.send(embed=header)
@@ -1021,6 +1024,15 @@ async def manual_stream(ctx):
     """Manual trigger"""
     await ctx.send("Generating today's streaming board...")
     await post_streaming_board()
+
+
+@bot.command(name='tomorrow')
+async def tomorrow_stream(ctx):
+    """Get tomorrow's streaming board"""
+    et_tz = pytz.timezone('America/New_York')
+    tomorrow = (datetime.now(et_tz) + timedelta(days=1)).strftime('%Y-%m-%d')
+    await ctx.send(f"Generating streaming board for {tomorrow}...")
+    await post_streaming_board(date_str=tomorrow)
 
 
 @bot.event
