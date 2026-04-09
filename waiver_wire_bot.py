@@ -805,7 +805,7 @@ def build_adds_embed(players, analysis, stats, news, is_pitcher):
             inline=False
         )
 
-    embed.set_footer(text=f"Updated daily at 7:00 AM ET • {datetime.now(ZoneInfo('America/New_York')).strftime('%B %d, %Y')}")
+    embed.set_footer(text=f"Updated daily at 5:00 AM ET • {datetime.now(ZoneInfo('America/New_York')).strftime('%B %d, %Y')}")
     return embed
 
 
@@ -902,7 +902,7 @@ def build_breakout_embed(breakout_pitchers, breakout_hitters, analysis):
             inline=False
         )
 
-    embed.set_footer(text=f"Updated daily at 7:00 AM ET • {datetime.now(ZoneInfo('America/New_York')).strftime('%B %d, %Y')}")
+    embed.set_footer(text=f"Updated daily at 5:00 AM ET • {datetime.now(ZoneInfo('America/New_York')).strftime('%B %d, %Y')}")
     return embed
 
 
@@ -1033,12 +1033,12 @@ async def on_ready():
     scheduler.add_job(
         post_daily_report,
         'cron',
-        hour=7,
+        hour=5,
         minute=0,
         timezone='America/New_York',
         id='daily_waiver_report'
     )
-    print("[Waiver Wire Bot] Scheduled daily post for 7:00 AM ET")
+    print("[Waiver Wire Bot] Scheduled daily post for 5:00 AM ET")
     scheduler.start()
 
 
