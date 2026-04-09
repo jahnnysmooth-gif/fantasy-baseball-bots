@@ -149,6 +149,7 @@ async def get_espn_ownership(player_name, mlb_id):
                     break
         
         if not espn_id:
+            print(f"[STREAMING] ⚠️  No ESPN ID for {player_name} (MLB ID: {mlb_id})")
             return None
         
         url = 'https://lm-api-reads.fantasy.espn.com/apis/v3/games/flb/seasons/2026/players'
@@ -159,12 +160,20 @@ async def get_espn_ownership(player_name, mlb_id):
                 data = await resp.json()
                 for player in data:
                     if player.get('id') == int(espn_id):
-                        return round(player.get('ownership', {}).get('percentOwned', 0), 1)
+                        ownership = round(player.get('ownership', {}).get('percentOwned', 0), 1)
+                        print(f"[STREAMING] ✅ {player_name}: {ownership}% owned")
+                        return ownership
+                
+                print(f"[STREAMING] ⚠️  ESPN ID {espn_id} not in API response for {player_name}")
+                return None
+            else:
+                print(f"[STREAMING] ❌ ESPN API status {resp.status}")
+                return None
         
         return None
         
     except Exception as e:
-        print(f"Error fetching ESPN ownership for {player_name}: {e}")
+        print(f"[STREAMING] ❌ Ownership error for {player_name}: {e}")
         return None
 
 
@@ -813,12 +822,20 @@ async def post_streaming_board(date_str=None):
             # Get ownership
             ownership = await get_espn_ownership(starter['pitcher_name'], starter['pitcher_id'])
             
-            if ownership is None or ownership > OWNERSHIP_THRESHOLD:
+            if ownership is None:
+                print(f"[STREAMING] ⏭️  Skipping {starter['pitcher_name']} - ownership unknown")
                 continue
+            
+            if ownership > OWNERSHIP_THRESHOLD:
+                print(f"[STREAMING] ⏭️  Skipping {starter['pitcher_name']} - {ownership}% over threshold ({OWNERSHIP_THRESHOLD}%)")
+                continue
+            
+            print(f"[STREAMING] ✅ Processing {starter['pitcher_name']} - {ownership}% owned")
             
             # Get all data
             pitcher_stats = await get_pitcher_stats(starter['pitcher_id'], starter['pitcher_name'])
             if not pitcher_stats:
+                print(f"[STREAMING] ⚠️  Skipping {starter['pitcher_name']} - stats unavailable")
                 continue
             
             statcast_metrics = await get_statcast_metrics(starter['pitcher_name'])
