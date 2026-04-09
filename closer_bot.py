@@ -2980,6 +2980,14 @@ def build_velocity_analysis(name: str, velocity_alert: dict):
 async def post_velocity_card(channel, meta: dict, velocity_alert: dict):
     team = meta.get("team", "UNK")
     name = meta.get("name", "Unknown Pitcher")
+    pitcher_id = meta.get("id") or meta.get("pitcher_id")
+
+    season_stats = meta.get("season_stats") or {}
+    if not season_stats and pitcher_id:
+        fetched = await get_player_season_stats(pitcher_id)
+        if fetched:
+            season_stats = fetched
+
     subject = f"{velocity_alert.get('emoji', '⚠️')} {velocity_alert.get('subject', 'Velocity Alert')}"
     embed = discord.Embed(
         color=TEAM_COLORS.get(normalize_team_abbr(team), 0x2ECC71),
@@ -2987,7 +2995,7 @@ async def post_velocity_card(channel, meta: dict, velocity_alert: dict):
     )
     apply_player_card_chrome(embed, name, team)
     embed.add_field(name="", value=f"**{subject}**", inline=False)
-    embed.add_field(name="Season", value=format_season_line(meta.get("season_stats", {})), inline=False)
+    embed.add_field(name="Season", value=format_season_line(season_stats), inline=False)
     embed.add_field(name="Summary", value=build_velocity_analysis(name, velocity_alert), inline=False)
     await channel.send(embed=embed)
 
@@ -3331,7 +3339,12 @@ async def build_summary_via_claude(
         if score_tail:
             score_context = f"Final result: {score_tail}"
         elif pitcher_score > 0 or opp_score > 0:
-            score_context = f"Final score: {pitcher_score}-{opp_score} (pitcher's team-opponent)"
+            if pitcher_score > opp_score:
+                score_context = f"Final score: {pitcher_score}-{opp_score} (pitcher's team won)"
+            elif opp_score > pitcher_score:
+                score_context = f"Final score: {opp_score}-{pitcher_score} (pitcher's team lost)"
+            else:
+                score_context = f"Final score: tied {pitcher_score}-{opp_score} at time of outing"
 
         # Season stats
         season = season_stats or {}
@@ -3400,6 +3413,7 @@ SUMMARY: [your summary prose]"""
                                 "- If he was pulled mid-inning, mention which inning and the situation clearly.\n"
                                 "- Weave in recent form naturally if relevant.\n"
                                 "- Include velocity note as one sentence if provided.\n"
+                                "- SCORE FORMAT: Always write scores winner-first (e.g. '4-2' means the winning team scored 4). Never write a score with the losing team's runs first. Use the FINAL SCORE field exactly as provided — it already states who won and lost.\n"
                                 "- Do not start with 'In' or 'Tonight'.\n\n"
                                 "Respond in this exact format:\n"
                                 "HEADLINE: [your one-sentence headline]\n"
@@ -3797,12 +3811,17 @@ async def loop():
 
                         if (not c["is_tracked"]) and should_post_velocity_alert(state, pitcher_id, game_id, velocity_alert, now_et):
                             log(f"Velocity alert {p['name']} | {p['team']} | {velocity_alert.get('subject')}")
+                            velo_season_stats = p.get("season_stats") or {}
+                            if not velo_season_stats and pitcher_id:
+                                fetched = await get_player_season_stats(pitcher_id)
+                                if fetched:
+                                    velo_season_stats = fetched
                             await post_velocity_card(
                                 channel,
                                 {
                                     "name": p["name"],
                                     "team": p["team"],
-                                    "season_stats": p.get("season_stats", {}),
+                                    "season_stats": velo_season_stats,
                                 },
                                 velocity_alert,
                             )
