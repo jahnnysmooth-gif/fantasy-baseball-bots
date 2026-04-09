@@ -3730,9 +3730,21 @@ async def build_claude_summary(
         f"Game line: {ip} IP  {h} H  {er} ER  {bb} BB  {k} K",
         f"Decision: {'Win' if wins else 'Loss' if losses else 'No decision'}",
         f"Classification: {label}",
-        f"Final score: {game_context.get('score_display','')}",
         f"Season stats (before this game): {season_line}",
     ]
+
+    # Natural language score — winner first, no abbreviations, so Claude writes it correctly
+    away_score_val = safe_int(game_context.get("away_score", 0), 0)
+    home_score_val = safe_int(game_context.get("home_score", 0), 0)
+    away_name = team_name_from_abbr(game_context.get("away_abbr", ""))
+    home_name = team_name_from_abbr(game_context.get("home_abbr", ""))
+    if away_score_val > home_score_val:
+        score_sentence = f"Final score: {away_name} {away_score_val}, {home_name} {home_score_val}"
+    elif home_score_val > away_score_val:
+        score_sentence = f"Final score: {home_name} {home_score_val}, {away_name} {away_score_val}"
+    else:
+        score_sentence = f"Final score: {away_name} {away_score_val}, {home_name} {home_score_val} (tie)"
+    facts.append(score_sentence)
 
     # Pitch quality
     if velo:      facts.append(f"Avg fastball velocity: {velo} mph")
@@ -3780,21 +3792,6 @@ async def build_claude_summary(
     key_plays = flow.get("key_play_descriptions", [])
     if key_plays:
         facts.append(f"Notable plays: {' | '.join(key_plays[:3])}")
-
-    # FIP — only surface when it meaningfully diverges from ERA
-    fip = compute_fip(stats)
-    if fip is not None:
-        era_val = safe_float(stats.get("era", None), None)
-        if era_val is None and er > 0 and ip_float > 0:
-            era_val = round((er / ip_float) * 9, 2)
-        elif era_val is None and er == 0:
-            era_val = 0.0
-        if era_val is not None:
-            gap = era_val - fip
-            if gap >= 1.75:
-                facts.append(f"FIP: {fip:.2f} vs ERA {era_val:.2f} — underlying numbers were better than the result suggests")
-            elif gap <= -1.75:
-                facts.append(f"FIP: {fip:.2f} vs ERA {era_val:.2f} — pitched better than the numbers show on paper")
 
     # Ballpark context
     venue_name = game_context.get("venue_name", "")
@@ -3884,25 +3881,30 @@ async def build_claude_summary(
     # Static system instructions — eligible for prompt caching (paid once, reused)
     system_instructions = """You write the Summary field for a fantasy baseball Discord bot card recapping a starting pitcher's outing. You write in the voice of a conversational beat writer — quick, sharp, knowledgeable. Think Bob Nightengale or Ken Rosenthal filing a quick post-game note, not an AI assistant summarizing data.
 
+The most important rule: write about the game, not the stats. Stats are supporting color. The story is what actually happened on the field — which inning turned things, what pitch got hit hard, when the pitcher found his rhythm or lost it. A reader should feel like they got a quick debrief from someone who watched the game, not a summary of a box score.
+
 Core rules:
-- Lead with what made this outing interesting or defining, not just the stat line
+- Lead with something that happened in the game — a specific inning, a sequence, a turning point — not a stat
+- Stats can appear but always as evidence of something that happened, never as the subject of a sentence
 - Do not repeat raw stats already in the Game Line field (IP, H, ER, BB, K) — reference them indirectly
 - Do not start two consecutive sentences with the same word
 - No em dashes (—) — use commas, periods, or rewrite the sentence instead
 - Third person, past tense, plain prose — no bullet points, no markdown
 - Output only the summary paragraph, nothing else, with no ellipsis (...)
+- When mentioning the score, write it naturally: "the Twins beat Detroit 8-6" or "Minnesota won 8-6" — winner first, never abbreviations like MIN or DET in a sentence
 
 Filler and AI-sounding language — never use any of these:
 - Transition phrases: "Digging deeper", "When you look at", "What stands out", "What makes this interesting", "At the end of the day", "All in all", "Make no mistake", "When it was all said and done", "Worth noting", "It is worth mentioning"
-- Hollow openers: "In a night that", "In what was", "On a night when", "In a performance that"
-- Explanation chains: do not attach "which means", "which suggests", "which explains", "which indicates" to every stat — state the fact and move on. One explained connection per summary is enough.
+- Hollow openers: "In a night that", "In what was", "On a night when", "In a performance that", "Getting ahead of hitters was the defining problem"
+- Explanation chains: do not attach "which means", "which suggests", "which explains", "which indicates" to every stat — state the fact and move on. One explained connection per summary is enough
 - No "he showed" or "he demonstrated" — say what happened
 - No "perhaps", "arguably", "it could be said"
+- No "underlying numbers", "underlying performance", "underlying metrics" — too clinical
 
 Closing sentence rules:
 - Do not always wrap up with a tidy forward-looking conclusion
 - Sometimes the last sentence should just be a sharp fact about what happened tonight — not a prediction or a "going forward" statement
-- Vary the closing: sometimes a look-ahead, sometimes a blunt observation, sometimes a question the outing leaves open
+- Vary the closing: sometimes a look-ahead, sometimes a blunt observation about the outing
 
 Sentence variety:
 - Actively mix sentence lengths — at least one sentence under 10 words, at least one over 20 words
@@ -3922,19 +3924,18 @@ Damage inning rules:
 - Do not use "implode", "meltdown", or similar catastrophic language for 2-3 run innings
 
 Season debut rules:
-- If the facts say "First start of the [year] season": frame it as opening their season, not as a debut or first major league appearance
+- If the facts say "First start of the [year] season": frame it as opening their season, not as a debut
 - Do not imply it is a career debut or rookie appearance
 - If the facts say "CAREER DEBUT": this IS his first major league start — treat it as a significant milestone
 
 Pitch mix shift rules:
-- If the facts include a pitch mix shift: this is a significant tactical story — explain what the shift was and whether it worked
-- Do not pad with "which could explain" — just say what happened and let the reader draw the inference
+- If the facts include a pitch mix shift: weave it in as something that happened tactically — "he leaned on his slider far more than usual" not "pitch mix data shows a shift"
+- Describe it as an observer would, not as an analyst reading a chart
 
-FIP and ballpark rules:
-- FIP only appears in the facts when the gap with ERA is large enough to genuinely matter — if it is there, mention it once, plainly, without over-explaining
-- If a ballpark is noted as hitter-friendly or pitcher-friendly: use that context to frame the run total — one mention is enough, do not belabor it
+Ballpark rules:
+- If a hitter-friendly or pitcher-friendly ballpark is noted: use it as natural context for the run total, one mention only
 
-CRITICAL — Do not use any career or experience labels (rookie, veteran, ace, young pitcher, sophomore) that are not explicitly stated in the facts. You do not know the pitcher's career status."""
+CRITICAL — Do not use any career or experience labels (rookie, veteran, ace, young pitcher, sophomore) that are not explicitly stated in the facts."""
 
     # --- Narrative angle: rotate based on seed so each card leads differently ---
     last_name = name.split()[-1] if name else name
