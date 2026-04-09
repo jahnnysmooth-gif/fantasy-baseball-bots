@@ -3791,9 +3791,9 @@ async def build_claude_summary(
             era_val = 0.0
         if era_val is not None:
             gap = era_val - fip
-            if gap >= 0.75:
+            if gap >= 1.75:
                 facts.append(f"FIP: {fip:.2f} vs ERA {era_val:.2f} — underlying numbers were better than the result suggests")
-            elif gap <= -0.75:
+            elif gap <= -1.75:
                 facts.append(f"FIP: {fip:.2f} vs ERA {era_val:.2f} — pitched better than the numbers show on paper")
 
     # Ballpark context
@@ -3882,19 +3882,31 @@ async def build_claude_summary(
         cap = min(base_cap + (1 if has_trouble_inning else 0), 5)
 
     # Static system instructions — eligible for prompt caching (paid once, reused)
-    system_instructions = """You write the Summary field for a fantasy baseball Discord bot card recapping a starting pitcher's outing. You write in the voice of a conversational beat writer — quick, sharp, knowledgeable.
+    system_instructions = """You write the Summary field for a fantasy baseball Discord bot card recapping a starting pitcher's outing. You write in the voice of a conversational beat writer — quick, sharp, knowledgeable. Think Bob Nightengale or Ken Rosenthal filing a quick post-game note, not an AI assistant summarizing data.
 
-Rules:
+Core rules:
 - Lead with what made this outing interesting or defining, not just the stat line
 - Do not repeat raw stats already in the Game Line field (IP, H, ER, BB, K) — reference them indirectly
 - Do not start two consecutive sentences with the same word
 - No em dashes (—) — use commas, periods, or rewrite the sentence instead
-- No filler: "all in all", "at the end of the day", "make no mistake", "when it was all said and done"
-- No "he showed" or "he demonstrated" — say what happened
-- Vary sentence length — mix short punchy sentences with longer ones
-- If a next start is in the facts, close with a one-sentence look-ahead
 - Third person, past tense, plain prose — no bullet points, no markdown
 - Output only the summary paragraph, nothing else, with no ellipsis (...)
+
+Filler and AI-sounding language — never use any of these:
+- Transition phrases: "Digging deeper", "When you look at", "What stands out", "What makes this interesting", "At the end of the day", "All in all", "Make no mistake", "When it was all said and done", "Worth noting", "It is worth mentioning"
+- Hollow openers: "In a night that", "In what was", "On a night when", "In a performance that"
+- Explanation chains: do not attach "which means", "which suggests", "which explains", "which indicates" to every stat — state the fact and move on. One explained connection per summary is enough.
+- No "he showed" or "he demonstrated" — say what happened
+- No "perhaps", "arguably", "it could be said"
+
+Closing sentence rules:
+- Do not always wrap up with a tidy forward-looking conclusion
+- Sometimes the last sentence should just be a sharp fact about what happened tonight — not a prediction or a "going forward" statement
+- Vary the closing: sometimes a look-ahead, sometimes a blunt observation, sometimes a question the outing leaves open
+
+Sentence variety:
+- Actively mix sentence lengths — at least one sentence under 10 words, at least one over 20 words
+- Do not start every sentence with a noun phrase — use participial phrases, prepositional phrases, or dependent clauses to open some sentences
 
 Innings pitched language rules (strictly follow these):
 - 7+ innings = "went deep", "worked deep into the game", "gave the team length", "a deep outing"
@@ -3911,21 +3923,18 @@ Damage inning rules:
 
 Season debut rules:
 - If the facts say "First start of the [year] season": frame it as opening their season, not as a debut or first major league appearance
-- Example: "He opened his 2026 season with..." not "He made his debut..."
 - Do not imply it is a career debut or rookie appearance
-- If the facts say "CAREER DEBUT": this IS his first major league start — treat it as a significant milestone, write with appropriate weight
+- If the facts say "CAREER DEBUT": this IS his first major league start — treat it as a significant milestone
 
 Pitch mix shift rules:
-- If the facts include a pitch mix shift: this is a significant tactical story — explain what the shift was and why it may have mattered
-- Example: if slider usage jumped 20% above season average, that is the story — did it work, did it backfire?
+- If the facts include a pitch mix shift: this is a significant tactical story — explain what the shift was and whether it worked
+- Do not pad with "which could explain" — just say what happened and let the reader draw the inference
 
 FIP and ballpark rules:
-- If FIP is notably better than ERA (gap noted in facts): mention that the underlying numbers were cleaner than the result — this matters for fantasy valuation
-- If FIP is notably worse than ERA: mention that the numbers suggest the outing was shakier than the ERA implies
-- If a hitter-friendly ballpark is noted: contextualize the run total — a clean line at Coors is different than a clean line at Petco
-- If a pitcher-friendly ballpark is noted: contextualize accordingly — tough to score there, so runs allowed carry more weight
+- FIP only appears in the facts when the gap with ERA is large enough to genuinely matter — if it is there, mention it once, plainly, without over-explaining
+- If a ballpark is noted as hitter-friendly or pitcher-friendly: use that context to frame the run total — one mention is enough, do not belabor it
 
-CRITICAL — Do not use any career or experience labels (rookie, veteran, ace, young pitcher, sophomore) that are not explicitly stated in the facts."""
+CRITICAL — Do not use any career or experience labels (rookie, veteran, ace, young pitcher, sophomore) that are not explicitly stated in the facts. You do not know the pitcher's career status."""
 
     # --- Narrative angle: rotate based on seed so each card leads differently ---
     last_name = name.split()[-1] if name else name
