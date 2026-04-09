@@ -1044,12 +1044,8 @@ async def start_streaming_bot():
     http_session = aiohttp.ClientSession()
     
     load_espn_player_ids()
-    await bot.change_presence(status=discord.Status.invisible)
     
-    print(f'{bot.user} is now running!')
+    print(f'Starting streaming bot...')
     print(f'Streaming channel: {STREAMING_CHANNEL_ID}')
-    
-    if not daily_streaming_board.is_running():
-        daily_streaming_board.start()
     
     await bot.start(DISCORD_TOKEN)
