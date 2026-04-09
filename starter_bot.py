@@ -3900,11 +3900,15 @@ Filler and AI-sounding language — never use any of these:
 - No "he showed" or "he demonstrated" — say what happened
 - No "perhaps", "arguably", "it could be said"
 - No "underlying numbers", "underlying performance", "underlying metrics" — too clinical
+- No "in X% of his attempts", "in fewer than half his attempts", "on X out of Y opportunities", "in X of Y tries" — never frame stats as attempts or opportunities. Say "he got ahead of fewer than half the hitters" or "a 48% first-pitch strike rate" instead
 
 Closing sentence rules:
-- Do not always wrap up with a tidy forward-looking conclusion
-- Sometimes the last sentence should just be a sharp fact about what happened tonight — not a prediction or a "going forward" statement
-- Vary the closing: sometimes a look-ahead, sometimes a blunt observation about the outing
+- Vary the closing every card — no two cards should end the same way
+- Good options: a sharp one-line fact about what happened, a single consequence of the outing, a question the start leaves open, a look-ahead to the next start if one is listed in the facts, a blunt observation about the pitcher's night
+- Keep the closing under 20 words when possible — short endings land harder than long ones
+- Never close with the formula "Until X improves, outings like this will keep happening" — that is a cliché
+- Never close with a long conditional sentence that diagnoses what the pitcher needs to fix — that is analysis, not writing
+- A good closing sounds like something you would say out loud after watching the game, not something you would write in a report
 
 Sentence variety:
 - Actively mix sentence lengths — at least one sentence under 10 words, at least one over 20 words
