@@ -23,6 +23,9 @@ try:
     from waiver_wire_bot import start_waiver_wire_bot
     print("Loaded waiver_wire_bot", flush=True)
 
+    from streaming_bot import start_streaming_bot
+    print("Loaded streaming_bot", flush=True)
+
 except Exception as e:
     print("IMPORT CRASH:", repr(e), flush=True)
     import traceback
@@ -99,6 +102,9 @@ async def main() -> None:
     await asyncio.sleep(3)
 
     tasks.append(asyncio.create_task(run_forever("waiver_wire_bot", start_waiver_wire_bot)))
+    await asyncio.sleep(3)
+
+    tasks.append(asyncio.create_task(run_forever("streaming_bot", start_streaming_bot)))
 
     await asyncio.gather(*tasks, return_exceptions=True)
 
