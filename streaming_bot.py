@@ -121,7 +121,7 @@ async def fetch_all_espn_ownership():
         headers = {
             'User-Agent': 'Mozilla/5.0',
             'Accept': 'application/json',
-            'x-fantasy-filter': '{"players":{"limit":2000,"sortPercOwned":{"sortPriority":1,"sortAsc":false},"filterActive":{"value":true}}}'
+            'x-fantasy-filter': '{"players":{"limit":300,"sortPercOwned":{"sortPriority":1,"sortAsc":false},"filterActive":{"value":true}}}'
         }
         params = {'view': 'kona_player_info'}
         
