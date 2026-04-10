@@ -14,11 +14,6 @@ import json
 import math
 from anthropic import AsyncAnthropic
 import statsapi
-from pybaseball import statcast_pitcher, pitching_stats
-import pandas as pd
-from collections import defaultdict
-import warnings
-warnings.filterwarnings('ignore')
 
 # Bot setup
 intents = discord.Intents.default()
@@ -40,6 +35,24 @@ http_session = None
 
 # ESPN player ID mapping
 espn_player_map = {}
+
+
+async def post_discord_embed(embed_dict):
+    """Post embed to Discord via HTTP API"""
+    url = f'https://discord.com/api/v10/channels/{STREAMING_CHANNEL_ID}/messages'
+    headers = {
+        'Authorization': f'Bot {DISCORD_TOKEN}',
+        'Content-Type': 'application/json'
+    }
+    
+    payload = {'embeds': [embed_dict]}
+    
+    async with http_session.post(url, headers=headers, json=payload) as resp:
+        if resp.status != 200:
+            print(f"Error posting to Discord: {resp.status}")
+            text = await resp.text()
+            print(f"Response: {text}")
+        return resp.status == 200
 
 # Statcast cache (daily refresh)
 statcast_cache = {}
@@ -92,44 +105,9 @@ def load_espn_player_ids():
 
 
 async def refresh_statcast_cache():
-    """Refresh Statcast data cache daily"""
-    global statcast_cache, statcast_cache_date
-    
-    try:
-        today = datetime.now(pytz.timezone('America/New_York')).date()
-        
-        if statcast_cache_date == today and statcast_cache:
-            return  # Already cached today
-        
-        print("Refreshing Statcast cache...")
-        
-        # Get season pitching stats with Statcast metrics
-        season_stats = pitching_stats(2026, qual=1)
-        
-        if season_stats is not None and not season_stats.empty:
-            # Cache by player name
-            for _, row in season_stats.iterrows():
-                pitcher_name = row.get('Name', '').strip()
-                if pitcher_name:
-                    statcast_cache[pitcher_name] = {
-                        'xera': row.get('xERA', 0),
-                        'fip': row.get('FIP', 0),
-                        'xfip': row.get('xFIP', 0),
-                        'k_pct': row.get('K%', 0),
-                        'bb_pct': row.get('BB%', 0),
-                        'swstr_pct': row.get('SwStr%', 0),
-                        'csw_pct': row.get('CSW%', 0),
-                        'hard_hit_pct': row.get('HardHit%', 0),
-                        'barrel_pct': row.get('Barrel%', 0),
-                        'avg_ev': row.get('avgEV', 0),
-                        'whiff_pct': row.get('Whiff%', 0)
-                    }
-            
-            statcast_cache_date = today
-            print(f"Cached Statcast data for {len(statcast_cache)} pitchers")
-        
-    except Exception as e:
-        print(f"Error refreshing Statcast cache: {e}")
+    """Refresh Statcast data cache - DISABLED (FanGraphs blocks with 403)"""
+    print("[STREAMING] Statcast disabled - using basic stats only")
+    return
 
 
 async def get_statcast_metrics(pitcher_name):
@@ -140,68 +118,31 @@ async def get_statcast_metrics(pitcher_name):
 async def get_espn_ownership(player_name, mlb_id):
     """Get ESPN ownership percentage"""
     try:
-        # Normalize name (remove accents for matching)
-        import unicodedata
+        espn_id = espn_player_map.get(str(mlb_id))
         
-        def normalize_name(name):
-            # Remove accents
-            name = unicodedata.normalize('NFD', name)
-            name = ''.join(char for char in name if unicodedata.category(char) != 'Mn')
-            return name.strip()
-        
-        normalized_search = normalize_name(player_name)
-        
-        # Try exact match first
-        player_data = espn_player_map.get(player_name)
-        
-        if not player_data:
-            # Try normalized match
-            for key, data in espn_player_map.items():
-                if normalize_name(key) == normalized_search:
-                    player_data = data
-                    print(f"[STREAMING] 🔄 Matched '{player_name}' to '{key}'")
+        if not espn_id:
+            for mlb_id_key, data in espn_player_map.items():
+                if isinstance(data, dict) and data.get('name', '').lower() == player_name.lower():
+                    espn_id = data.get('espn_id')
                     break
         
-        if not player_data:
-            print(f"[STREAMING] ⚠️  No ESPN ID for {player_name} (MLB ID: {mlb_id})")
-            return None
-        
-        espn_id = player_data.get('espn_id')
         if not espn_id:
-            print(f"[STREAMING] ⚠️  No espn_id field for {player_name}")
             return None
         
-        url = 'https://lm-api-reads.fantasy.espn.com/apis/v3/games/flb/seasons/2026/segments/0/leaguedefaults/3?view=kona_player_info'
-        headers = {
-            'User-Agent': 'Mozilla/5.0',
-            'Accept': 'application/json',
-            'x-fantasy-filter': '{"players":{"limit":2000,"sortPercOwned":{"sortPriority":1,"sortAsc":false},"filterActive":{"value":true}}}'
-        }
+        url = 'https://lm-api-reads.fantasy.espn.com/apis/v3/games/flb/seasons/2026/players'
+        params = {'scoringPeriodId': 0, 'view': 'kona_player_info'}
         
-        async with http_session.get(url, headers=headers, timeout=30) as resp:
+        async with http_session.get(url, params=params, timeout=10) as resp:
             if resp.status == 200:
-                data = await resp.json(content_type=None)
-                players = data.get('players', [])
-                
-                for entry in players:
-                    player = entry.get('player', {})
+                data = await resp.json()
+                for player in data:
                     if player.get('id') == int(espn_id):
-                        ownership = player.get('ownership', {}).get('percentOwned', 0)
-                        ownership_pct = round(ownership, 1)
-                        print(f"[STREAMING] ✅ {player_name}: {ownership_pct}% owned")
-                        return ownership_pct
-                
-                # Player not in API response - assume low ownership (0%)
-                print(f"[STREAMING] ⚠️  ESPN ID {espn_id} not in API, assuming 0% owned for {player_name}")
-                return 0.0
-            else:
-                print(f"[STREAMING] ❌ ESPN API status {resp.status}")
-                return None
+                        return round(player.get('ownership', {}).get('percentOwned', 0), 1)
         
         return None
         
     except Exception as e:
-        print(f"[STREAMING] ❌ Ownership error for {player_name}: {e}")
+        print(f"Error fetching ESPN ownership for {player_name}: {e}")
         return None
 
 
@@ -831,14 +772,14 @@ Write a 4-6 sentence fantasy streaming analysis in beat-writer prose style. Be s
         return f"{pitcher_data['pitcher_name']} profiles as a {tier.lower()} against {pitcher_data['opponent']}. The matchup shows {breakdown.get('matchup', 0):.0f} points of support, and the park context is {park_data.get('type', 'neutral')}. Risk factor: {risk}."
 
 
-async def post_streaming_board(date_str=None):
+async def post_streaming_board():
     """Main posting function"""
     try:
         # Refresh Statcast cache
         await refresh_statcast_cache()
         
-        # Get probable starters (use provided date or default to today)
-        starters = await get_probable_starters(date_str)
+        # Get probable starters
+        starters = await get_probable_starters()
         
         if not starters:
             print("No probable starters found")
@@ -850,20 +791,12 @@ async def post_streaming_board(date_str=None):
             # Get ownership
             ownership = await get_espn_ownership(starter['pitcher_name'], starter['pitcher_id'])
             
-            if ownership is None:
-                print(f"[STREAMING] ⏭️  Skipping {starter['pitcher_name']} - ownership unknown")
+            if ownership is None or ownership > OWNERSHIP_THRESHOLD:
                 continue
-            
-            if ownership > OWNERSHIP_THRESHOLD:
-                print(f"[STREAMING] ⏭️  Skipping {starter['pitcher_name']} - {ownership}% over threshold ({OWNERSHIP_THRESHOLD}%)")
-                continue
-            
-            print(f"[STREAMING] ✅ Processing {starter['pitcher_name']} - {ownership}% owned")
             
             # Get all data
             pitcher_stats = await get_pitcher_stats(starter['pitcher_id'], starter['pitcher_name'])
             if not pitcher_stats:
-                print(f"[STREAMING] ⚠️  Skipping {starter['pitcher_name']} - stats unavailable")
                 continue
             
             statcast_metrics = await get_statcast_metrics(starter['pitcher_name'])
@@ -915,11 +848,6 @@ async def post_streaming_board(date_str=None):
         # Sort and post
         viable_streamers.sort(key=lambda x: x['score'], reverse=True)
         
-        channel = bot.get_channel(STREAMING_CHANNEL_ID)
-        if not channel:
-            print(f"Channel {STREAMING_CHANNEL_ID} not found")
-            return
-        
         # Header
         et_tz = pytz.timezone('America/New_York')
         if date_str:
@@ -927,16 +855,16 @@ async def post_streaming_board(date_str=None):
         else:
             display_date = datetime.now(et_tz).strftime('%A, %B %d, %Y')
         
-        header = discord.Embed(
-            title=f"📊 Streaming Scout: {display_date}",
-            description=f"{len(viable_streamers)} pitchers under {OWNERSHIP_THRESHOLD}% rostered",
-            color=0x1E88E5
-        )
-        await channel.send(embed=header)
+        header_embed = {
+            'title': f"📊 Streaming Scout: {display_date}",
+            'description': f"{len(viable_streamers)} pitchers under {OWNERSHIP_THRESHOLD}% rostered",
+            'color': 0x1E88E5
+        }
+        await post_discord_embed(header_embed)
         
         # Post top 10
         for streamer in viable_streamers[:10]:
-            await post_streamer_card(channel, streamer)
+            await post_streamer_card(streamer)
             await asyncio.sleep(2)
         
         print(f"Posted {min(len(viable_streamers), 10)} streaming recommendations")
@@ -945,7 +873,7 @@ async def post_streaming_board(date_str=None):
         print(f"Error in post_streaming_board: {e}")
 
 
-async def post_streamer_card(channel, streamer):
+async def post_streamer_card(streamer):
     """Post individual card"""
     try:
         data = streamer['data']
@@ -962,29 +890,30 @@ async def post_streamer_card(channel, streamer):
         tier, emoji = get_streaming_tier(score)
         league_fit = get_league_fit(score)
         
-        embed = discord.Embed(
-            title=f"{data['pitcher_name']} ({data['pitcher_hand']}) vs {data['opponent']}",
-            description=f"{emoji} **{tier}** • Start Score: {score}/100",
-            color=get_tier_color(tier)
-        )
+        embed = {
+            'title': f"{data['pitcher_name']} ({data['pitcher_hand']}) vs {data['opponent']}",
+            'description': f"{emoji} **{tier}** • Start Score: {score}/100",
+            'color': get_tier_color(tier),
+            'fields': []
+        }
         
         # Ownership + venue
         venue_line = f"{data['venue']}\n{park['type']}"
         if weather:
             venue_line += f"\n{weather.get('temp_f', 0)}°F, {weather.get('wind_desc', 'calm')}"
         
-        embed.add_field(name="📈 Ownership", value=f"{ownership}% ESPN", inline=True)
-        embed.add_field(name="🎯 Venue", value=venue_line, inline=True)
-        embed.add_field(name="🎯 League Fit", value=league_fit, inline=True)
+        embed['fields'].append({'name': '📈 Ownership', 'value': f"{ownership}% ESPN", 'inline': True})
+        embed['fields'].append({'name': '🎯 Venue', 'value': venue_line, 'inline': True})
+        embed['fields'].append({'name': '🎯 League Fit', 'value': league_fit, 'inline': True})
         
         # Stats
         stats_line = f"{stats.get('era', 0):.2f} ERA • {stats.get('whip', 0):.2f} WHIP\n{stats.get('k_per_9', 0):.1f} K/9 • {stats.get('k_bb_pct', 0):.1f}% K-BB"
-        embed.add_field(name="📊 Season Line", value=stats_line, inline=False)
+        embed['fields'].append({'name': '📊 Season Line', 'value': stats_line, 'inline': False})
         
         # Statcast
         if statcast:
             statcast_line = f"xERA: {statcast.get('xera', 0):.2f} • SwStr: {statcast.get('swstr_pct', 0):.1f}%\nHard-Hit: {statcast.get('hard_hit_pct', 0):.1f}% • Barrel: {statcast.get('barrel_pct', 0):.1f}%"
-            embed.add_field(name="⚡ Statcast Profile", value=statcast_line, inline=False)
+            embed['fields'].append({'name': '⚡ Statcast Profile', 'value': statcast_line, 'inline': False})
         
         # Recent form
         if stats.get('recent_starts'):
@@ -995,33 +924,33 @@ async def post_streamer_card(channel, streamer):
             
             if total_ip > 0:
                 recent_era = (total_er * 9) / total_ip
-                embed.add_field(
-                    name="🔥 Last 3 Starts",
-                    value=f"{total_ip:.1f} IP • {total_k} K • {recent_era:.2f} ERA",
-                    inline=False
-                )
+                embed['fields'].append({
+                    'name': '🔥 Last 3 Starts',
+                    'value': f"{total_ip:.1f} IP • {total_k} K • {recent_era:.2f} ERA",
+                    'inline': False
+                })
         
         # Lineup danger
         if lineup:
             elite = [h for h in lineup if h.get('ops', 0) > 0.850]
             k_prone = [h for h in lineup if h.get('k_pct', 0) > 25]
-            embed.add_field(
-                name="👥 Opposing Lineup",
-                value=f"{len(elite)} elite bats (.850+ OPS)\n{len(k_prone)} K-prone hitters (25%+ K)",
-                inline=False
-            )
+            embed['fields'].append({
+                'name': '👥 Opposing Lineup',
+                'value': f"{len(elite)} elite bats (.850+ OPS)\n{len(k_prone)} K-prone hitters (25%+ K)",
+                'inline': False
+            })
         
         # Score breakdown
-        embed.add_field(
-            name="📈 Score Breakdown",
-            value=f"Skill: {breakdown.get('skill', 0)}/30 • Form: {breakdown.get('form', 0)}/20\nMatchup: {breakdown.get('matchup', 0)}/25 • Park: {breakdown.get('park', 0)}/15",
-            inline=False
-        )
+        embed['fields'].append({
+            'name': '📈 Score Breakdown',
+            'value': f"Skill: {breakdown.get('skill', 0)}/30 • Form: {breakdown.get('form', 0)}/20\nMatchup: {breakdown.get('matchup', 0)}/25 • Park: {breakdown.get('park', 0)}/15",
+            'inline': False
+        })
         
         # Summary
-        embed.add_field(name="💭 Scout's Take", value=summary, inline=False)
+        embed['fields'].append({'name': '💭 Scout\'s Take', 'value': summary, 'inline': False})
         
-        await channel.send(embed=embed)
+        await post_discord_embed(embed)
         
     except Exception as e:
         print(f"Error posting card: {e}")
@@ -1071,15 +1000,6 @@ async def manual_stream(ctx):
     await post_streaming_board()
 
 
-@bot.command(name='tomorrow')
-async def tomorrow_stream(ctx):
-    """Get tomorrow's streaming board"""
-    et_tz = pytz.timezone('America/New_York')
-    tomorrow = (datetime.now(et_tz) + timedelta(days=1)).strftime('%Y-%m-%d')
-    await ctx.send(f"Generating streaming board for {tomorrow}...")
-    await post_streaming_board(date_str=tomorrow)
-
-
 @bot.event
 async def on_close():
     if http_session:
@@ -1087,21 +1007,22 @@ async def on_close():
 
 
 if __name__ == '__main__':
-    async def run_once():
-        global http_session
-        http_session = aiohttp.ClientSession()
-        
-        load_espn_player_ids()
-        
-        print('[STREAMING CRON] Starting daily streaming board...')
-        await post_streaming_board()
-        
-        await http_session.close()
-        print('[STREAMING CRON] Complete!')
-    
     if not DISCORD_TOKEN:
         print("Error: STREAMING_BOT_TOKEN not set")
     elif STREAMING_CHANNEL_ID == 0:
         print("Error: STREAMING_CHANNEL_ID not set")
     else:
-        asyncio.run(run_once())
+        bot.run(DISCORD_TOKEN)
+
+
+async def start_streaming_bot():
+    """Entry point for main.py integration"""
+    global http_session
+    http_session = aiohttp.ClientSession()
+    
+    load_espn_player_ids()
+    
+    print('Starting streaming bot...')
+    print(f'Streaming channel: {STREAMING_CHANNEL_ID}')
+    
+    await bot.start(DISCORD_TOKEN)
