@@ -406,6 +406,7 @@ async def fetch_espn_pitcher_ownership(session):
                 'limit': 500,
                 'sortPercOwned': {'sortPriority': 1, 'sortAsc': False},
                 'filterActive': {'value': True},
+                'filterSlotIds': {'value': [13, 14]},  # 13=SP, 14=RP — pitchers only
             }
         }),
     }
@@ -910,10 +911,8 @@ async def build_hot_cold_hitters(session, opponent_id):
 async def enrich_starter(session, starter, ownership_map, savant_map):
     own = ownership_map.get(starter['pitcher_name'].lower())
     if not own:
-        print(f"[Probable Starters] Ownership miss: '{starter['pitcher_name']}' not found in ESPN map")
         return None
     if own['ownership'] > MAX_OWNERSHIP:
-        print(f"[Probable Starters] Ownership filter: {starter['pitcher_name']} at {own['ownership']}% exceeds {MAX_OWNERSHIP}%")
         return None
 
     espn_id = own.get('espn_id')
