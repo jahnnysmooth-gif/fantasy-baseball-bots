@@ -130,15 +130,22 @@ async def fetch_all_espn_ownership():
             if resp.status == 200:
                 data = await resp.json(content_type=None)
                 players = data.get('players', [])
-                print(f"[STREAMING] Retrieved {len(players)} players from ESPN")
+                print(f"[STREAMING] Retrieved {len(players)} players from ESPN", flush=True)
                 
                 # DEBUG: Dump first SP to see all fields
-                for entry in players[:50]:
+                found_sp = False
+                for entry in players:
                     player = entry.get('player', {})
-                    if player.get('defaultPositionId') == 10:  # SP
-                        print(f"\n[STREAMING DEBUG] Full player object for {player.get('fullName')}:")
-                        print(json.dumps(entry, indent=2))
+                    pos_id = player.get('defaultPositionId')
+                    if pos_id == 10:  # SP
+                        print(f"\n[STREAMING DEBUG] Full player object for {player.get('fullName')}:", flush=True)
+                        import json as json_module
+                        print(json_module.dumps(entry, indent=2), flush=True)
+                        found_sp = True
                         break
+                
+                if not found_sp:
+                    print(f"[STREAMING DEBUG] No SP found in first {len(players)} players", flush=True)
                 
                 # Build lookup dict by ESPN ID
                 ownership_cache = {}
@@ -862,17 +869,12 @@ async def post_streaming_board(date_str=None):
             print("No probable starters found")
             return
         
-        # Fetch ESPN ownership data once
-        ownership_cache = await fetch_all_espn_ownership()
-        
         viable_streamers = []
         
-        print(f"[STREAMING] Processing {len(starters)} starters for ownership check")
+        print(f"[STREAMING] Processing {len(starters)} starters")
         
         for starter in starters:
             print(f"[STREAMING] Checking {starter['pitcher_name']}")
-            # Get ownership
-            ownership = await get_espn_ownership(starter['pitcher_name'], starter['pitcher_id'], ownership_cache)
             
             # Get all data
             pitcher_stats = await get_pitcher_stats(starter['pitcher_id'], starter['pitcher_name'])
@@ -921,8 +923,7 @@ async def post_streaming_board(date_str=None):
                 'weather': weather,
                 'score': score,
                 'breakdown': breakdown,
-                'summary': summary,
-                'ownership': ownership
+                'summary': summary
             })
         
         # Sort and post
@@ -962,7 +963,6 @@ async def post_streamer_card(streamer):
         score = streamer['score']
         breakdown = streamer['breakdown']
         summary = streamer['summary']
-        ownership = streamer['ownership']
         park = streamer['park']
         weather = streamer['weather']
         lineup = streamer['lineup']
@@ -977,12 +977,11 @@ async def post_streamer_card(streamer):
             'fields': []
         }
         
-        # Ownership + venue
+        # Venue
         venue_line = f"{data['venue']}\n{park['type']}"
         if weather:
             venue_line += f"\n{weather.get('temp_f', 0)}°F, {weather.get('wind_desc', 'calm')}"
         
-        embed['fields'].append({'name': '📈 Ownership', 'value': f"{ownership}% ESPN", 'inline': True})
         embed['fields'].append({'name': '🎯 Venue', 'value': venue_line, 'inline': True})
         embed['fields'].append({'name': '🎯 League Fit', 'value': league_fit, 'inline': True})
         
