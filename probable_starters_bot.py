@@ -19,7 +19,8 @@ CLAUDE_API_KEY = os.getenv('STREAMING_BOT_SUMMARY')
 STATE_FILE = 'state/probable_starters_state.json'
 TIMEZONE = 'America/New_York'
 MAX_OWNERSHIP = 60.0
-MAX_STARTERS_PER_RUN = 8
+MAX_STARTERS_PER_RUN = 25
+MIN_START_SCORE_TO_POST = 55
 SCHED_HOUR = 7
 SCHED_MINUTE = 10
 
@@ -108,12 +109,25 @@ TEAM_LOGO_SLUGS = {
     'SF': 'sf', 'STL': 'stl', 'TB': 'tb', 'TEX': 'tex', 'TOR': 'tor', 'WSH': 'wsh',
 }
 
-STREAM_TIER_EMOJIS = {
-    'strong stream': '🔥',
-    'viable stream': '✅',
-    'deep-league stream': '🟡',
-    'risky stream': '⚠️',
-}
+def dart_rating(score):
+    try:
+        score = int(score or 0)
+    except Exception:
+        return '🎯'
+
+    if score >= 81:
+        count = 5
+    elif score >= 75:
+        count = 4
+    elif score >= 68:
+        count = 3
+    elif score >= 60:
+        count = 2
+    elif score >= 55:
+        count = 1
+    else:
+        count = 1
+    return '🎯' * count
 
 
 def team_logo_url(team_abbr):
@@ -122,9 +136,6 @@ def team_logo_url(team_abbr):
         return None
     return f'https://a.espncdn.com/i/teamlogos/mlb/500/{slug}.png'
 
-
-def stream_tier_emoji(tier):
-    return STREAM_TIER_EMOJIS.get(tier, '⚾')
 
 
 def load_state():
@@ -814,7 +825,8 @@ def build_header_embed(starters, target_date):
         title='⚾ Probable Starters',
         description=(
             f"Streaming board for **{target_date}**. "
-            f"Only starters at **{MAX_OWNERSHIP:.0f}% ESPN rostered or lower** are included."
+            f"Only starters at **{MAX_OWNERSHIP:.0f}% ESPN rostered or lower** are included. "
+            f"Only scores of **{MIN_START_SCORE_TO_POST}+** are posted."
         ),
         color=0x1D428A,
         timestamp=datetime.now(ZoneInfo('UTC')),
@@ -828,7 +840,17 @@ def build_header_embed(starters, target_date):
         ),
         inline=False,
     )
-    embed.set_footer(text='Probable starters bot • MLB + ESPN + Savant blend')
+    embed.add_field(
+        name='General interpretation',
+        value=(
+            '**76+** = elite / strong stream.\n'
+            '**68-75** = solid stream.\n'
+            '**60-67** = usable but risky.\n'
+            '**Below 60** = more speculative / desperation only.'
+        ),
+        inline=False,
+    )
+    embed.set_footer(text='Probable starters bot • MLB + ESPN + Savant blend.')
     return embed
 
 
@@ -842,10 +864,10 @@ def build_starter_embed(starter, summary):
     cold = starter.get('cold_hitters', [])
     at_vs = 'vs' if starter['is_home'] else '@'
     color = starter.get('team_color') or (0x2ECC71 if starter['start_score'] >= 76 else 0xF1C40F if starter['start_score'] >= 60 else 0xE74C3C)
-    tier_emoji = stream_tier_emoji(starter.get('start_tier'))
+    tier_emoji = dart_rating(starter.get('start_score'))
 
     embed = discord.Embed(
-        description=f"**{team}** | ESPN: **{starter['ownership']:.1f}% owned** | **{starter['start_score']}/100** {tier_emoji}",
+        description=f"**{team}** | **ESPN:** **{starter['ownership']:.1f}% owned** | **{starter['start_score']}/100** {tier_emoji}",
         color=color,
         timestamp=datetime.now(ZoneInfo('UTC')),
     )
@@ -936,6 +958,7 @@ async def post_probable_starters_report():
             print('[Probable Starters] No qualified probable starters found')
             return
 
+        enriched = [x for x in enriched if (x.get('start_score') or 0) >= MIN_START_SCORE_TO_POST]
         enriched.sort(key=lambda x: (x['start_score'], -x['ownership']), reverse=True)
         selected = enriched[:MAX_STARTERS_PER_RUN]
 
