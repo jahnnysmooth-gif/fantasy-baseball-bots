@@ -1345,10 +1345,14 @@ async def run_cycle(target_date):
         print('[Probable Starters] Missing ANALYTIC_BOT_TOKEN or STREAMING_CHANNEL_ID')
         return False
 
-    state = load_state()
-    posted_ids = set(state.get('posted_pitcher_ids', []))
-    confirmed_scratches = set(state.get('confirmed_scratches', []))
     is_test = os.getenv('PROBABLE_STARTERS_TEST_MODE', 'false').lower() == 'true'
+    state = load_state()
+    if is_test:
+        posted_ids = set()
+        confirmed_scratches = set()
+    else:
+        posted_ids = set(state.get('posted_pitcher_ids', []))
+        confirmed_scratches = set(state.get('confirmed_scratches', []))
 
     try:
         async with aiohttp.ClientSession() as session:
