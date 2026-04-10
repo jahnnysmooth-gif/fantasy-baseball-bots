@@ -132,6 +132,14 @@ async def fetch_all_espn_ownership():
                 players = data.get('players', [])
                 print(f"[STREAMING] Retrieved {len(players)} players from ESPN")
                 
+                # DEBUG: Dump first SP to see all fields
+                for entry in players[:50]:
+                    player = entry.get('player', {})
+                    if player.get('defaultPositionId') == 10:  # SP
+                        print(f"\n[STREAMING DEBUG] Full player object for {player.get('fullName')}:")
+                        print(json.dumps(entry, indent=2))
+                        break
+                
                 # Build lookup dict by ESPN ID
                 ownership_cache = {}
                 for entry in players:
@@ -865,9 +873,6 @@ async def post_streaming_board(date_str=None):
             print(f"[STREAMING] Checking {starter['pitcher_name']}")
             # Get ownership
             ownership = await get_espn_ownership(starter['pitcher_name'], starter['pitcher_id'], ownership_cache)
-            
-            if ownership is None or ownership > OWNERSHIP_THRESHOLD:
-                continue
             
             # Get all data
             pitcher_stats = await get_pitcher_stats(starter['pitcher_id'], starter['pitcher_name'])
