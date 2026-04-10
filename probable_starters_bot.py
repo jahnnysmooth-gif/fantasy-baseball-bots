@@ -1146,7 +1146,7 @@ def build_header_embed(starters, target_date):
     embed = discord.Embed(
         title='⚾ Probable Starters',
         description=(
-            f"Streaming board for **{target_date}**. "
+            f"Streaming board for **{datetime.strptime(target_date, '%Y-%m-%d').strftime('%B %-d, %Y')}**. "
             f"Only starters at **{MAX_OWNERSHIP:.0f}% ESPN rostered or lower** are included."
         ),
         color=0x1D428A,
@@ -1251,9 +1251,9 @@ def build_starter_embed(starter, summary):
     rhp_str = fmt_split(rhp) if rhp else '—'
 
     if hand == 'L':
-        split_line = f'**vs LHP:** {lhp_str} | vs RHP: {rhp_str}'
+        split_line = f'**vs LHP:** {lhp_str}'
     elif hand == 'R':
-        split_line = f'vs LHP: {lhp_str} | **vs RHP:** {rhp_str}'
+        split_line = f'**vs RHP:** {rhp_str}'
     else:
         split_line = f'vs LHP: {lhp_str} | vs RHP: {rhp_str}'
 
@@ -1345,14 +1345,10 @@ async def run_cycle(target_date):
         print('[Probable Starters] Missing ANALYTIC_BOT_TOKEN or STREAMING_CHANNEL_ID')
         return False
 
-    is_test = os.getenv('PROBABLE_STARTERS_TEST_MODE', 'false').lower() == 'true'
     state = load_state()
-    if is_test:
-        posted_ids = set()
-        confirmed_scratches = set()
-    else:
-        posted_ids = set(state.get('posted_pitcher_ids', []))
-        confirmed_scratches = set(state.get('confirmed_scratches', []))
+    posted_ids = set(state.get('posted_pitcher_ids', []))
+    confirmed_scratches = set(state.get('confirmed_scratches', []))
+    is_test = os.getenv('PROBABLE_STARTERS_TEST_MODE', 'false').lower() == 'true'
 
     try:
         async with aiohttp.ClientSession() as session:
