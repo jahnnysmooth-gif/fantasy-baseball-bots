@@ -754,6 +754,71 @@ async def fetch_pitcher_season_stats(session, pitcher_id):
     return out
 
 
+async def fetch_pitcher_handedness(session, pitcher_id):
+    """Return 'L', 'R', or None for the pitcher's throwing hand."""
+    url = f'https://statsapi.mlb.com/api/v1/people/{pitcher_id}'
+    try:
+        data = await fetch_json(session, url, timeout=15)
+        people = data.get('people', [])
+        if not people:
+            return None
+        return people[0].get('pitchHand', {}).get('code')
+    except Exception as e:
+        print(f'[Probable Starters] Error fetching pitcher handedness for {pitcher_id}: {e}')
+        return None
+
+
+async def fetch_team_splits(session, team_id):
+    """
+    Return opponent hitting splits vs LHP and RHP.
+    Keys: vs_lhp (dict), vs_rhp (dict), each with avg/obp/slg/ops/woba.
+    """
+    current_year = datetime.now(ZoneInfo(TIMEZONE)).year
+
+    def parse_split(data):
+        stats = data.get('stats', [])
+        if not stats or not stats[0].get('splits'):
+            return {}
+        stat = stats[0]['splits'][0].get('stat', {})
+        result = {
+            'avg': stat.get('avg'),
+            'obp': stat.get('obp'),
+            'slg': stat.get('slg'),
+            'ops': stat.get('ops'),
+            'woba': None,
+        }
+        try:
+            ab = float(stat.get('atBats') or 0)
+            bb = float(stat.get('baseOnBalls') or 0)
+            hbp = float(stat.get('hitByPitch') or 0)
+            sf = float(stat.get('sacFlies') or 0)
+            h = float(stat.get('hits') or 0)
+            doubles = float(stat.get('doubles') or 0)
+            triples = float(stat.get('triples') or 0)
+            hr = float(stat.get('homeRuns') or 0)
+            singles = h - doubles - triples - hr
+            denom = ab + bb + sf + hbp
+            if denom > 0:
+                woba = (0.72*bb + 0.75*hbp + 0.90*singles + 1.24*doubles + 1.56*triples + 1.95*hr) / denom
+                result['woba'] = round(woba, 3)
+        except Exception:
+            pass
+        return result
+
+    try:
+        lhp_data, rhp_data = await asyncio.gather(
+            fetch_json(session, f'https://statsapi.mlb.com/api/v1/teams/{team_id}/stats?stats=vsLeftPitchers&group=hitting&season={current_year}', timeout=20),
+            fetch_json(session, f'https://statsapi.mlb.com/api/v1/teams/{team_id}/stats?stats=vsRightPitchers&group=hitting&season={current_year}', timeout=20),
+        )
+        return {
+            'vs_lhp': parse_split(lhp_data),
+            'vs_rhp': parse_split(rhp_data),
+        }
+    except Exception as e:
+        print(f'[Probable Starters] Error fetching team splits for {team_id}: {e}')
+        return {'vs_lhp': {}, 'vs_rhp': {}}
+
+
 async def build_recent_form(session, pitcher_id):
     game_log = await fetch_pitcher_game_log(session, pitcher_id)
     last_three = game_log[-3:] if len(game_log) >= 3 else game_log
@@ -854,11 +919,13 @@ async def enrich_starter(session, starter, ownership_map, savant_map):
     if espn_id:
         headshot_url = f"https://a.espncdn.com/i/headshots/mlb/players/full/{espn_id}.png"
 
-    (season_stat, recent_offense), recent_form, season_pitching, hot_cold = await asyncio.gather(
+    (season_stat, recent_offense), recent_form, season_pitching, hot_cold, pitcher_hand, opponent_splits = await asyncio.gather(
         fetch_team_recent_offense(session, starter['opponent_id']),
         build_recent_form(session, starter['pitcher_id']),
         fetch_pitcher_season_stats(session, starter['pitcher_id']),
         build_hot_cold_hitters(session, starter['opponent_id']),
+        fetch_pitcher_handedness(session, starter['pitcher_id']),
+        fetch_team_splits(session, starter['opponent_id']),
     )
 
     savant = dict(savant_map.get(starter['pitcher_id'], {}) or {})
@@ -896,6 +963,8 @@ async def enrich_starter(session, starter, ownership_map, savant_map):
         'cold_hitters': hot_cold.get('cold', []),
         'park_factor': park_factor,
         'park_label': classify_park(park_abbr),
+        'pitcher_hand': pitcher_hand,
+        'opponent_splits': opponent_splits,
     }
 
     pa = season_stat.get('plateAppearances', 0) or 0
@@ -905,25 +974,47 @@ async def enrich_starter(session, starter, ownership_map, savant_map):
     except Exception:
         enriched['opponent_metrics']['k_pct_season'] = None
 
-    # Rough last-14 opponent quality proxy from runs/game
-    rpg = recent_offense.get('runs_per_game')
-    if rpg is not None:
-        # convert simple recent scoring proxy into a rough descriptive layer and pseudo-wOBA band
-        if rpg >= 5.3:
-            enriched['opponent_metrics']['woba_last14'] = 0.340
-            enriched['opponent_metrics']['k_pct_last14'] = 20.0
-        elif rpg >= 4.7:
-            enriched['opponent_metrics']['woba_last14'] = 0.325
-            enriched['opponent_metrics']['k_pct_last14'] = 21.5
-        elif rpg >= 4.1:
-            enriched['opponent_metrics']['woba_last14'] = 0.312
-            enriched['opponent_metrics']['k_pct_last14'] = 22.5
-        elif rpg >= 3.5:
-            enriched['opponent_metrics']['woba_last14'] = 0.302
-            enriched['opponent_metrics']['k_pct_last14'] = 23.5
-        else:
-            enriched['opponent_metrics']['woba_last14'] = 0.292
-            enriched['opponent_metrics']['k_pct_last14'] = 24.5
+    # Use actual platoon split wOBA for the pitcher's hand if available,
+    # otherwise fall back to the RPG-bucketed proxy
+    relevant_split = opponent_splits.get('vs_lhp' if pitcher_hand == 'L' else 'vs_rhp', {})
+    split_woba = relevant_split.get('woba')
+
+    if split_woba is not None:
+        enriched['opponent_metrics']['woba_vs_hand'] = split_woba
+        # Derive a k_pct_last14 proxy from RPG as before (split K% not in this endpoint)
+        rpg = recent_offense.get('runs_per_game')
+        if rpg is not None:
+            if rpg >= 5.3:
+                enriched['opponent_metrics']['k_pct_last14'] = 20.0
+            elif rpg >= 4.7:
+                enriched['opponent_metrics']['k_pct_last14'] = 21.5
+            elif rpg >= 4.1:
+                enriched['opponent_metrics']['k_pct_last14'] = 22.5
+            elif rpg >= 3.5:
+                enriched['opponent_metrics']['k_pct_last14'] = 23.5
+            else:
+                enriched['opponent_metrics']['k_pct_last14'] = 24.5
+        # Also keep woba_last14 pointing to the split wOBA for scoring
+        enriched['opponent_metrics']['woba_last14'] = split_woba
+    else:
+        # Fallback: RPG-bucketed proxy as before
+        rpg = recent_offense.get('runs_per_game')
+        if rpg is not None:
+            if rpg >= 5.3:
+                enriched['opponent_metrics']['woba_last14'] = 0.340
+                enriched['opponent_metrics']['k_pct_last14'] = 20.0
+            elif rpg >= 4.7:
+                enriched['opponent_metrics']['woba_last14'] = 0.325
+                enriched['opponent_metrics']['k_pct_last14'] = 21.5
+            elif rpg >= 4.1:
+                enriched['opponent_metrics']['woba_last14'] = 0.312
+                enriched['opponent_metrics']['k_pct_last14'] = 22.5
+            elif rpg >= 3.5:
+                enriched['opponent_metrics']['woba_last14'] = 0.302
+                enriched['opponent_metrics']['k_pct_last14'] = 23.5
+            else:
+                enriched['opponent_metrics']['woba_last14'] = 0.292
+                enriched['opponent_metrics']['k_pct_last14'] = 24.5
 
     enriched['start_score'] = build_start_score(enriched)
     enriched['start_tier'] = start_tier(enriched['start_score'])
@@ -970,6 +1061,8 @@ async def generate_summaries(starters):
             'hot_hitters': [{'name': h['name'], 'ops': h['ops'], 'avg': h['avg'], 'hr': h['hr']} for h in s['hot_hitters']],
             'cold_hitters': [{'name': h['name'], 'ops': h['ops'], 'avg': h['avg'], 'hr': h['hr']} for h in s['cold_hitters']],
             'park': {'label': s['park_label'], 'run': s['park_factor']['run'], 'hr': s['park_factor']['hr']},
+            'pitcher_hand': s.get('pitcher_hand'),
+            'opponent_splits': s.get('opponent_splits', {}),
         })
 
     SYSTEM_PROMPT = (
@@ -1136,11 +1229,34 @@ def build_starter_embed(starter, summary):
         inline=False,
     )
 
+    # Build platoon split line
+    splits = starter.get('opponent_splits', {})
+    hand = starter.get('pitcher_hand')
+    lhp = splits.get('vs_lhp', {})
+    rhp = splits.get('vs_rhp', {})
+
+    def fmt_split(split_dict):
+        ops = split_dict.get('ops', '—')
+        woba = split_dict.get('woba')
+        woba_str = f'.{str(round(woba * 1000)).zfill(3)}' if woba is not None else '—'
+        return f'{ops} OPS / {woba_str} wOBA'
+
+    lhp_str = fmt_split(lhp) if lhp else '—'
+    rhp_str = fmt_split(rhp) if rhp else '—'
+
+    if hand == 'L':
+        split_line = f'**vs LHP:** {lhp_str} | vs RHP: {rhp_str}'
+    elif hand == 'R':
+        split_line = f'vs LHP: {lhp_str} | **vs RHP:** {rhp_str}'
+    else:
+        split_line = f'vs LHP: {lhp_str} | vs RHP: {rhp_str}'
+
     embed.add_field(
         name=f'Opponent: {opp}',
         value=(
             f"**Season line:** {opp_metrics.get('avg', '—')} AVG / {opp_metrics.get('obp', '—')} OBP / {opp_metrics.get('slg', '—')} SLG\n"
             f"**Season K%:** {opp_metrics.get('k_pct_season', '—')} | **Last 14 RPG:** {opp_metrics.get('runs_per_game_last14', '—')}\n"
+            f"{split_line}\n"
             f"**Park:** {starter['park_label']} (Run {starter['park_factor']['run']}, HR {starter['park_factor']['hr']})"
         ),
         inline=False,
