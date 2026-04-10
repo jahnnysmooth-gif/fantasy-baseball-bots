@@ -269,13 +269,14 @@ async def get_probable_starters(date_str=None):
                         })
                         
             except Exception as e:
-                print(f"Error fetching game {game_pk}: {e}")
+                print(f"[STREAMING] Error fetching game {game_pk}: {e}")
                 continue
         
+        print(f"[STREAMING] Found {len(probable_starters)} probable starters")
         return probable_starters
         
     except Exception as e:
-        print(f"Error fetching probable starters: {e}")
+        print(f"[STREAMING] Error fetching probable starters: {e}")
         return []
 
 
