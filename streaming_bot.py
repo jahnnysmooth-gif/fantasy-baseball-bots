@@ -13,7 +13,6 @@ import pytz
 import json
 import math
 from anthropic import AsyncAnthropic
-import statsapi
 
 # Bot setup
 intents = discord.Intents.default()
@@ -262,43 +261,69 @@ def get_wind_description(direction, speed):
 
 
 async def get_probable_starters(date_str=None):
-    """Get probable starters"""
+    """Get probable starters using direct MLB API"""
     try:
         if date_str is None:
             et_tz = pytz.timezone('America/New_York')
             date_str = datetime.now(et_tz).strftime('%Y-%m-%d')
         
-        schedule = statsapi.schedule(date=date_str)
-        probable_starters = []
+        print(f"[STREAMING] Fetching probables for {date_str}")
         
-        for game in schedule:
-            game_pk = game.get('game_id')
+        # Direct API call instead of statsapi to reduce memory
+        url = f"https://statsapi.mlb.com/api/v1/schedule?sportId=1&date={date_str}&hydrate=probablePitcher"
+        
+        async with http_session.get(url, timeout=30) as resp:
+            if resp.status != 200:
+                print(f"[STREAMING] Schedule API returned {resp.status}")
+                return []
             
-            try:
-                game_data = statsapi.get('game', {'gamePk': game_pk})
+            data = await resp.json()
+            probable_starters = []
+            
+            games = data.get('dates', [{}])[0].get('games', [])
+            print(f"[STREAMING] Found {len(games)} games")
+            
+            for game in games:
+                game_pk = game.get('gamePk')
+                venue_name = game.get('venue', {}).get('name', 'Unknown')
+                game_time = game.get('gameDate')
                 
-                away_probable = game_data.get('gameData', {}).get('probablePitchers', {}).get('away')
-                home_probable = game_data.get('gameData', {}).get('probablePitchers', {}).get('home')
-                venue_name = game_data.get('gameData', {}).get('venue', {}).get('name', 'Unknown')
+                away_team = game.get('teams', {}).get('away', {}).get('team', {})
+                home_team = game.get('teams', {}).get('home', {}).get('team', {})
+                
+                away_probable = game.get('teams', {}).get('away', {}).get('probablePitcher')
+                home_probable = game.get('teams', {}).get('home', {}).get('probablePitcher')
                 
                 for pitcher_data, team_type in [(away_probable, 'away'), (home_probable, 'home')]:
                     if pitcher_data:
                         pitcher_id = pitcher_data.get('id')
                         pitcher_name = pitcher_data.get('fullName')
                         
-                        # Get pitcher details for handedness
-                        person_data = statsapi.get('person', {'personId': pitcher_id})
-                        hand_code = person_data.get('people', [{}])[0].get('pitchHand', {}).get('code', 'R')
+                        # Determine handedness from pitcher data if available, otherwise fetch
+                        hand_code = None
+                        if 'pitchHand' in pitcher_data:
+                            hand_code = pitcher_data.get('pitchHand', {}).get('code', 'R')
+                        
+                        if not hand_code:
+                            # Lightweight person fetch
+                            person_url = f"https://statsapi.mlb.com/api/v1/people/{pitcher_id}"
+                            async with http_session.get(person_url, timeout=10) as p_resp:
+                                if p_resp.status == 200:
+                                    person_data = await p_resp.json()
+                                    hand_code = person_data.get('people', [{}])[0].get('pitchHand', {}).get('code', 'R')
+                                else:
+                                    hand_code = 'R'
+                        
                         pitcher_hand = 'LHP' if hand_code == 'L' else 'RHP'
                         
                         if team_type == 'away':
-                            team = game.get('away_name')
-                            opponent = game.get('home_name')
-                            opponent_id = game_data.get('gameData', {}).get('teams', {}).get('home', {}).get('id')
+                            team = away_team.get('name')
+                            opponent = home_team.get('name')
+                            opponent_id = home_team.get('id')
                         else:
-                            team = game.get('home_name')
-                            opponent = game.get('away_name')
-                            opponent_id = game_data.get('gameData', {}).get('teams', {}).get('away', {}).get('id')
+                            team = home_team.get('name')
+                            opponent = away_team.get('name')
+                            opponent_id = away_team.get('id')
                         
                         probable_starters.append({
                             'pitcher_id': pitcher_id,
@@ -308,20 +333,18 @@ async def get_probable_starters(date_str=None):
                             'opponent': opponent,
                             'opponent_id': opponent_id,
                             'venue': venue_name,
-                            'game_time': game.get('game_datetime'),
+                            'game_time': game_time,
                             'is_home': team_type == 'home',
                             'game_pk': game_pk
                         })
-                        
-            except Exception as e:
-                print(f"[STREAMING] Error fetching game {game_pk}: {e}")
-                continue
-        
-        print(f"[STREAMING] Found {len(probable_starters)} probable starters")
-        return probable_starters
+            
+            print(f"[STREAMING] Found {len(probable_starters)} probable starters")
+            return probable_starters
         
     except Exception as e:
         print(f"[STREAMING] Error fetching probable starters: {e}")
+        import traceback
+        traceback.print_exc()
         return []
 
 
@@ -1036,7 +1059,6 @@ async def on_ready():
     http_session = aiohttp.ClientSession()
     
     load_espn_player_ids()
-    await bot.change_presence(status=discord.Status.invisible)
     
     print(f'{bot.user} is now running!')
     print(f'Streaming channel: {STREAMING_CHANNEL_ID}')
@@ -1052,12 +1074,6 @@ async def manual_stream(ctx):
     await post_streaming_board()
 
 
-@bot.event
-async def on_close():
-    if http_session:
-        await http_session.close()
-
-
 if __name__ == '__main__':
     if not DISCORD_TOKEN:
         print("Error: STREAMING_BOT_TOKEN not set")
@@ -1069,12 +1085,4 @@ if __name__ == '__main__':
 
 async def start_streaming_bot():
     """Entry point for main.py integration"""
-    global http_session
-    http_session = aiohttp.ClientSession()
-    
-    load_espn_player_ids()
-    
-    print('Starting streaming bot...')
-    print(f'Streaming channel: {STREAMING_CHANNEL_ID}')
-    
     await bot.start(DISCORD_TOKEN)
