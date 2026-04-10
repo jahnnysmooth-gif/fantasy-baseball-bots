@@ -115,8 +115,44 @@ async def get_statcast_metrics(pitcher_name):
     return statcast_cache.get(pitcher_name, {})
 
 
-async def get_espn_ownership(player_name, mlb_id):
-    """Get ESPN ownership percentage"""
+async def fetch_all_espn_ownership():
+    """Fetch all ESPN ownership data once and cache it"""
+    try:
+        url = 'https://lm-api-reads.fantasy.espn.com/apis/v3/games/flb/seasons/2026/segments/0/leaguedefaults/3'
+        headers = {
+            'User-Agent': 'Mozilla/5.0',
+            'Accept': 'application/json',
+            'x-fantasy-filter': '{"players":{"limit":2000,"sortPercOwned":{"sortPriority":1,"sortAsc":false},"filterActive":{"value":true}}}'
+        }
+        params = {'view': 'kona_player_info'}
+        
+        print(f"[STREAMING] Fetching ESPN ownership data...")
+        async with http_session.get(url, headers=headers, params=params, timeout=30) as resp:
+            if resp.status == 200:
+                data = await resp.json(content_type=None)
+                players = data.get('players', [])
+                print(f"[STREAMING] Retrieved {len(players)} players from ESPN")
+                
+                # Build lookup dict by ESPN ID
+                ownership_cache = {}
+                for entry in players:
+                    player = entry.get('player', {})
+                    espn_id = player.get('id')
+                    ownership = player.get('ownership', {}).get('percentOwned', 0)
+                    if espn_id:
+                        ownership_cache[espn_id] = round(ownership, 1)
+                
+                return ownership_cache
+            else:
+                print(f"[STREAMING] ESPN API returned status {resp.status}")
+                return {}
+    except Exception as e:
+        print(f"[STREAMING] Error fetching ESPN ownership: {e}")
+        return {}
+
+
+async def get_espn_ownership(player_name, mlb_id, ownership_cache):
+    """Get ESPN ownership percentage from cache"""
     try:
         import unicodedata
         
@@ -136,7 +172,6 @@ async def get_espn_ownership(player_name, mlb_id):
             for key, data in espn_player_map.items():
                 if normalize_name(key) == normalized_search:
                     player_data = data
-                    print(f"[STREAMING] 🔄 Matched '{player_name}' to '{key}'")
                     break
         
         if not player_data:
@@ -145,38 +180,14 @@ async def get_espn_ownership(player_name, mlb_id):
         
         espn_id = player_data.get('espn_id')
         if not espn_id:
-            print(f"[STREAMING] ⚠️  No espn_id field for {player_name}")
             return None
         
-        url = 'https://lm-api-reads.fantasy.espn.com/apis/v3/games/flb/seasons/2026/segments/0/leaguedefaults/3'
-        headers = {
-            'User-Agent': 'Mozilla/5.0',
-            'Accept': 'application/json',
-            'x-fantasy-filter': '{"players":{"limit":2000,"sortPercOwned":{"sortPriority":1,"sortAsc":false},"filterActive":{"value":true}}}'
-        }
-        params = {'view': 'kona_player_info'}
-        
-        async with http_session.get(url, headers=headers, params=params, timeout=30) as resp:
-            if resp.status == 200:
-                data = await resp.json(content_type=None)
-                players = data.get('players', [])
-                
-                for entry in players:
-                    player = entry.get('player', {})
-                    if player.get('id') == int(espn_id):
-                        ownership = player.get('ownership', {}).get('percentOwned', 0)
-                        ownership_pct = round(ownership, 1)
-                        print(f"[STREAMING] ✅ {player_name}: {ownership_pct}% owned")
-                        return ownership_pct
-                
-                print(f"[STREAMING] ⚠️  ESPN ID {espn_id} not in API for {player_name}, assuming 0%")
-                return 0.0
-            else:
-                print(f"[STREAMING] ❌ ESPN API status {resp.status}")
-                return None
+        ownership = ownership_cache.get(espn_id, 0.0)
+        print(f"[STREAMING] {player_name}: {ownership}% owned")
+        return ownership
         
     except Exception as e:
-        print(f"[STREAMING] ❌ Ownership error for {player_name}: {e}")
+        print(f"[STREAMING] Error for {player_name}: {e}")
         return None
 
 
@@ -820,6 +831,9 @@ async def post_streaming_board(date_str=None):
             print("No probable starters found")
             return
         
+        # Fetch ESPN ownership data once
+        ownership_cache = await fetch_all_espn_ownership()
+        
         viable_streamers = []
         
         print(f"[STREAMING] Processing {len(starters)} starters for ownership check")
@@ -827,7 +841,7 @@ async def post_streaming_board(date_str=None):
         for starter in starters:
             print(f"[STREAMING] Checking {starter['pitcher_name']}")
             # Get ownership
-            ownership = await get_espn_ownership(starter['pitcher_name'], starter['pitcher_id'])
+            ownership = await get_espn_ownership(starter['pitcher_name'], starter['pitcher_id'], ownership_cache)
             
             if ownership is None or ownership > OWNERSHIP_THRESHOLD:
                 continue
