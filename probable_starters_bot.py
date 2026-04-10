@@ -919,14 +919,20 @@ async def enrich_starter(session, starter, ownership_map, savant_map):
     if espn_id:
         headshot_url = f"https://a.espncdn.com/i/headshots/mlb/players/full/{espn_id}.png"
 
-    (season_stat, recent_offense), recent_form, season_pitching, hot_cold, pitcher_hand, opponent_splits = await asyncio.gather(
-        fetch_team_recent_offense(session, starter['opponent_id']),
-        build_recent_form(session, starter['pitcher_id']),
-        fetch_pitcher_season_stats(session, starter['pitcher_id']),
-        build_hot_cold_hitters(session, starter['opponent_id']),
-        fetch_pitcher_handedness(session, starter['pitcher_id']),
-        fetch_team_splits(session, starter['opponent_id']),
-    )
+    try:
+        (season_stat, recent_offense), recent_form, season_pitching, hot_cold, pitcher_hand, opponent_splits = await asyncio.gather(
+            fetch_team_recent_offense(session, starter['opponent_id']),
+            build_recent_form(session, starter['pitcher_id']),
+            fetch_pitcher_season_stats(session, starter['pitcher_id']),
+            build_hot_cold_hitters(session, starter['opponent_id']),
+            fetch_pitcher_handedness(session, starter['pitcher_id']),
+            fetch_team_splits(session, starter['opponent_id']),
+        )
+    except Exception as e:
+        import traceback
+        print(f"[Probable Starters] enrich_starter gather failed for {starter.get('pitcher_name')}: {e}")
+        traceback.print_exc()
+        return None
 
     savant = dict(savant_map.get(starter['pitcher_id'], {}) or {})
     if season_pitching.get('k_pct') is not None:
