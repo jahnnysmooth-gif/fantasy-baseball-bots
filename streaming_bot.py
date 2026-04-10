@@ -772,7 +772,7 @@ Write a 4-6 sentence fantasy streaming analysis in beat-writer prose style. Be s
         return f"{pitcher_data['pitcher_name']} profiles as a {tier.lower()} against {pitcher_data['opponent']}. The matchup shows {breakdown.get('matchup', 0):.0f} points of support, and the park context is {park_data.get('type', 'neutral')}. Risk factor: {risk}."
 
 
-async def post_streaming_board():
+async def post_streaming_board(date_str=None):
     """Main posting function"""
     try:
         # Refresh Statcast cache
