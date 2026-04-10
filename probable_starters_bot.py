@@ -2,6 +2,7 @@ import os
 import re
 import json
 import csv
+import io
 import asyncio
 from datetime import datetime, timedelta
 from zoneinfo import ZoneInfo
@@ -553,8 +554,9 @@ async def fetch_hitter_recent_form(session, hitter_id):
 async def fetch_savant_pitcher_metrics(session):
     url = 'https://baseballsavant.mlb.com/leaderboard/expected_statistics?type=pitcher&year=2026&position=&team=&min=1&csv=true'
     text = await fetch_text(session, url, timeout=30)
+    text = text.lstrip('\ufeff')
     rows = {}
-    csv_reader = csv.DictReader(text.splitlines())
+    csv_reader = csv.DictReader(io.StringIO(text))
     headers = csv_reader.fieldnames or []
 
     if not headers:
@@ -945,8 +947,7 @@ def build_header_embed(starters, target_date):
         title='⚾ Probable Starters',
         description=(
             f"Streaming board for **{target_date}**. "
-            f"Only starters at **{MAX_OWNERSHIP:.0f}% ESPN rostered or lower** are included. "
-            f"Only scores of **{MIN_START_SCORE_TO_POST}+** are posted."
+            f"Only starters at **{MAX_OWNERSHIP:.0f}% ESPN rostered or lower** are included."
         ),
         color=0x1D428A,
         timestamp=datetime.now(ZoneInfo('UTC')),
