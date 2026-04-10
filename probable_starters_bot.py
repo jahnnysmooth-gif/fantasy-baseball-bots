@@ -9,7 +9,6 @@ from zoneinfo import ZoneInfo
 
 import aiohttp
 import discord
-from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from anthropic import Anthropic
 
 # Environment variables
@@ -23,8 +22,8 @@ TIMEZONE = 'America/New_York'
 MAX_OWNERSHIP = float(os.getenv('PROBABLE_STARTERS_MAX_OWNERSHIP', '60'))
 MAX_STARTERS_PER_RUN = int(os.getenv('PROBABLE_STARTERS_MAX_POSTS', '25'))
 MIN_START_SCORE_TO_POST = int(os.getenv('PROBABLE_STARTERS_MIN_SCORE', '55'))
-SCHED_HOUR = int(os.getenv('PROBABLE_STARTERS_SCHED_HOUR', '7'))
-SCHED_MINUTE = int(os.getenv('PROBABLE_STARTERS_SCHED_MINUTE', '10'))
+EVENING_HOUR = 19  # 7 PM ET — start of nightly cycle
+HOURLY_INTERVAL = 3600  # seconds between hourly update checks
 
 # Discord client
 intents = discord.Intents.default()
@@ -33,9 +32,6 @@ client = discord.Client(intents=intents)
 
 # Claude client
 anthropic_client = Anthropic(api_key=CLAUDE_API_KEY) if CLAUDE_API_KEY else None
-
-# Scheduler
-scheduler = AsyncIOScheduler(timezone=TIMEZONE)
 
 TEAM_ABBR_BY_ID = {
     109: 'ARI', 110: 'BAL', 111: 'BOS', 112: 'CHC', 113: 'CIN', 114: 'CLE',
@@ -117,11 +113,9 @@ def dart_rating(score):
     except Exception:
         return '🎯'
 
-    if score >= 88:
-        count = 6
-    elif score >= 81:
+    if score >= 90:
         count = 5
-    elif score >= 75:
+    elif score >= 80:
         count = 4
     elif score >= 68:
         count = 3
@@ -143,9 +137,19 @@ def team_logo_url(team_abbr):
 def load_state():
     try:
         with open(STATE_FILE, 'r') as f:
-            return json.load(f)
+            state = json.load(f)
+            state.setdefault('posted_pitcher_ids', [])
+            state.setdefault('confirmed_scratches', [])
+            state.setdefault('target_date', None)
+            return state
     except FileNotFoundError:
-        return {'last_post_date': None, 'posted_gamepks': []}
+        return {
+            'last_post_date': None,
+            'posted_gamepks': [],
+            'posted_pitcher_ids': [],
+            'confirmed_scratches': [],
+            'target_date': None,
+        }
 
 
 def save_state(state):
@@ -1061,11 +1065,11 @@ def build_header_embed(starters, target_date):
     embed.add_field(
         name='General interpretation',
         value=(
-            '**88+** = elite stream.\n'
-            '**76-87** = strong stream.\n'
-            '**68-75** = solid stream.\n'
-            '**60-67** = usable but risky.\n'
-            '**Below 60** = more speculative / desperation only.'
+            '🎯🎯🎯🎯🎯 **90+** = elite stream.\n'
+            '🎯🎯🎯🎯 **80-89** = strong stream.\n'
+            '🎯🎯🎯 **68-79** = solid stream.\n'
+            '🎯🎯 **60-67** = usable but risky.\n'
+            '🎯 **Below 60** = speculative / desperation only.'
         ),
         inline=False,
     )
@@ -1162,40 +1166,116 @@ def build_starter_embed(starter, summary):
     return embed
 
 
-async def post_probable_starters_report():
-    now_et = datetime.now(ZoneInfo(TIMEZONE))
-    today = now_et.strftime('%Y-%m-%d')
-    print(f'\n[Probable Starters] Starting report for {today} at {now_et}')
+async def fetch_first_game_start(session, target_date):
+    """Return the UTC datetime of the earliest game on target_date, or None."""
+    url = (
+        f'https://statsapi.mlb.com/api/v1/schedule'
+        f'?sportId=1&date={target_date}&hydrate=game(content(summary))'
+    )
+    try:
+        data = await fetch_json(session, url, timeout=20)
+        times = []
+        for date_entry in data.get('dates', []):
+            for game in date_entry.get('games', []):
+                t = game.get('gameDate')
+                if t:
+                    times.append(datetime.fromisoformat(t.replace('Z', '+00:00')))
+        return min(times) if times else None
+    except Exception as e:
+        print(f'[Probable Starters] Error fetching first game start: {e}')
+        return None
 
+
+async def confirm_pitcher_scratched(session, pitcher_id, target_date):
+    """
+    Verify a pitcher is truly absent from the probable starters list.
+    Fetches the schedule directly and checks all probable pitcher IDs.
+    Returns True only if we can positively confirm absence.
+    """
+    url = (
+        f'https://statsapi.mlb.com/api/v1/schedule'
+        f'?sportId=1&date={target_date}&hydrate=probablePitcher,team'
+    )
+    try:
+        data = await fetch_json(session, url, timeout=20)
+        active_ids = set()
+        for date_entry in data.get('dates', []):
+            for game in date_entry.get('games', []):
+                for side in ('home', 'away'):
+                    pp = game.get('teams', {}).get(side, {}).get('probablePitcher', {})
+                    if pp.get('id'):
+                        active_ids.add(pp['id'])
+        if not active_ids:
+            # Empty response — API may be flaky, do not confirm scratch
+            return False
+        return pitcher_id not in active_ids
+    except Exception as e:
+        print(f'[Probable Starters] Scratch confirmation fetch failed: {e}')
+        return False
+
+
+async def run_cycle(target_date):
+    """
+    Single pass: fetch tomorrow's probables, diff against posted_pitcher_ids,
+    post new ones, return True if anything was posted.
+    """
     if not DISCORD_TOKEN or not CHANNEL_ID:
         print('[Probable Starters] Missing ANALYTIC_BOT_TOKEN or STREAMING_CHANNEL_ID')
-        return
+        return False
+
+    state = load_state()
+    posted_ids = set(state.get('posted_pitcher_ids', []))
+    confirmed_scratches = set(state.get('confirmed_scratches', []))
+    is_test = os.getenv('PROBABLE_STARTERS_TEST_MODE', 'false').lower() == 'true'
 
     try:
-        state = load_state()
-
-        if state.get('last_post_date') == today and os.getenv('PROBABLE_STARTERS_TEST_MODE', 'false').lower() != 'true':
-            print(f'[Probable Starters] Already posted for {today}, skipping')
-            return
-
         async with aiohttp.ClientSession() as session:
             ownership_map, probable, savant_map = await asyncio.gather(
                 fetch_espn_pitcher_ownership(session),
-                fetch_probable_starters(session, today),
+                fetch_probable_starters(session, target_date),
                 fetch_savant_pitcher_metrics(session),
             )
 
+            # Scratch verification: pitchers we previously posted who are no longer in the API
+            current_ids = {s['pitcher_id'] for s in probable}
+            possibly_scratched = posted_ids - current_ids - confirmed_scratches
+            if possibly_scratched:
+                scratch_checks = await asyncio.gather(*(
+                    confirm_pitcher_scratched(session, pid, target_date)
+                    for pid in possibly_scratched
+                ))
+                newly_confirmed = {pid for pid, scratched in zip(possibly_scratched, scratch_checks) if scratched}
+                if newly_confirmed:
+                    confirmed_scratches.update(newly_confirmed)
+                    print(f'[Probable Starters] Confirmed scratches: {newly_confirmed}')
+
+            # Only enrich pitchers not yet posted and not confirmed scratched
+            new_probable = [s for s in probable if s['pitcher_id'] not in posted_ids and s['pitcher_id'] not in confirmed_scratches]
+            if not new_probable:
+                print(f'[Probable Starters] No new probable starters for {target_date}')
+                # Still save updated scratch state
+                state['confirmed_scratches'] = list(confirmed_scratches)
+                if not is_test:
+                    save_state(state)
+                return False
+
             enriched = [
-                x for x in await asyncio.gather(*(enrich_starter(session, s, ownership_map, savant_map) for s in probable)) if x
+                x for x in await asyncio.gather(*(
+                    enrich_starter(session, s, ownership_map, savant_map) for s in new_probable
+                )) if x
             ]
 
         if not enriched:
-            print('[Probable Starters] No qualified probable starters found')
-            return
+            print('[Probable Starters] No qualified new starters after enrichment')
+            return False
 
         enriched = [x for x in enriched if (x.get('start_score') or 0) >= MIN_START_SCORE_TO_POST]
         enriched.sort(key=lambda x: (x['start_score'], -x['ownership']), reverse=True)
         selected = enriched[:MAX_STARTERS_PER_RUN]
+
+        if not selected:
+            print('[Probable Starters] No starters met the score threshold')
+            return False
 
         summaries = await generate_summaries(selected)
 
@@ -1203,23 +1283,94 @@ async def post_probable_starters_report():
         if channel is None:
             channel = await client.fetch_channel(CHANNEL_ID)
 
-        await channel.send(embed=build_header_embed(selected, today))
+        await channel.send(embed=build_header_embed(selected, target_date))
         for starter in selected:
-            await channel.send(embed=build_starter_embed(starter, summaries.get(starter['pitcher_name'], fallback_summary(starter))))
+            await channel.send(embed=build_starter_embed(
+                starter,
+                summaries.get(starter['pitcher_name'], fallback_summary(starter))
+            ))
             await asyncio.sleep(1.0)
 
-        state['last_post_date'] = today
+        # Update state
+        posted_ids.update(s['pitcher_id'] for s in selected)
+        state['target_date'] = target_date
+        state['posted_pitcher_ids'] = list(posted_ids)
+        state['confirmed_scratches'] = list(confirmed_scratches)
+        state['last_post_date'] = target_date
         state['posted_gamepks'] = list({s['game_pk'] for s in selected})
-        if os.getenv('PROBABLE_STARTERS_TEST_MODE', 'false').lower() != 'true':
+        if not is_test:
             save_state(state)
         else:
             print('[Probable Starters] TEST MODE: skipping state save')
-        print(f"[Probable Starters] Posted {len(selected)} starter embeds")
+
+        print(f'[Probable Starters] Posted {len(selected)} new starter embeds for {target_date}')
+        return True
 
     except Exception as e:
-        print(f'[Probable Starters] Error in report: {e}')
+        print(f'[Probable Starters] Error in run_cycle: {e}')
         import traceback
         traceback.print_exc()
+        return False
+
+
+def seconds_until_next_7pm():
+    """Return seconds until the next 7 PM ET from right now."""
+    now = datetime.now(ZoneInfo(TIMEZONE))
+    target = now.replace(hour=EVENING_HOUR, minute=0, second=0, microsecond=0)
+    if now >= target:
+        target += timedelta(days=1)
+    return (target - now).total_seconds()
+
+
+async def probable_starters_loop():
+    """
+    Main background loop:
+    1. Sleep until 7 PM ET
+    2. Run hourly cycle posting new probable starters for tomorrow
+    3. Stop once tomorrow's first game starts
+    4. Repeat
+    """
+    print('[Probable Starters] Background loop started')
+
+    while True:
+        # --- Sleep until 7 PM ET ---
+        wait = seconds_until_next_7pm()
+        print(f'[Probable Starters] Sleeping {wait:.0f}s until 7 PM ET')
+        await asyncio.sleep(wait)
+
+        now_et = datetime.now(ZoneInfo(TIMEZONE))
+        target_date = (now_et + timedelta(days=1)).strftime('%Y-%m-%d')
+        print(f'[Probable Starters] Evening cycle started. Target date: {target_date}')
+
+        # Reset per-cycle state for the new target date
+        state = load_state()
+        if state.get('target_date') != target_date:
+            state['target_date'] = target_date
+            state['posted_pitcher_ids'] = []
+            state['confirmed_scratches'] = []
+            is_test = os.getenv('PROBABLE_STARTERS_TEST_MODE', 'false').lower() == 'true'
+            if not is_test:
+                save_state(state)
+
+        # --- Hourly loop ---
+        while True:
+            await run_cycle(target_date)
+
+            # Check if tomorrow's first game has started
+            try:
+                async with aiohttp.ClientSession() as session:
+                    first_start = await fetch_first_game_start(session, target_date)
+            except Exception:
+                first_start = None
+
+            if first_start:
+                now_utc = datetime.now(ZoneInfo('UTC'))
+                if now_utc >= first_start:
+                    print(f'[Probable Starters] First game for {target_date} has started. Ending evening cycle.')
+                    break
+
+            print(f'[Probable Starters] Next check in {HOURLY_INTERVAL}s')
+            await asyncio.sleep(HOURLY_INTERVAL)
 
 
 @client.event
@@ -1231,22 +1382,13 @@ async def on_ready():
         return
 
     if os.getenv('PROBABLE_STARTERS_TEST_MODE', 'false').lower() == 'true':
-        print('[Probable Starters] TEST MODE: running report immediately')
-        await post_probable_starters_report()
+        print('[Probable Starters] TEST MODE: running cycle immediately for tomorrow')
+        now_et = datetime.now(ZoneInfo(TIMEZONE))
+        target_date = (now_et + timedelta(days=1)).strftime('%Y-%m-%d')
+        await run_cycle(target_date)
+        return
 
-    if not scheduler.get_job('probable_starters_daily_report'):
-        scheduler.add_job(
-            post_probable_starters_report,
-            'cron',
-            hour=SCHED_HOUR,
-            minute=SCHED_MINUTE,
-            timezone=TIMEZONE,
-            id='probable_starters_daily_report',
-        )
-        print(f'[Probable Starters] Scheduled daily post for {SCHED_HOUR}:{SCHED_MINUTE:02d} ET')
-
-    if not scheduler.running:
-        scheduler.start()
+    asyncio.ensure_future(probable_starters_loop())
 
 
 async def start_probable_starters_bot():
