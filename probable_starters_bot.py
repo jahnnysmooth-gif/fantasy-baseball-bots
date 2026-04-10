@@ -1085,6 +1085,8 @@ async def generate_summaries(starters):
         "A fringe streamer with nothing interesting going on gets 2. Never pad a blurb just to fill space.\n"
         "- Every blurb should feel structurally different from the others. No two should open the same way.\n"
         "- Do not mention roster percentage or ownership.\n"
+        "- Never use team abbreviations in the text — write out the full city or team name (e.g. Seattle, not SEA; Minnesota, not MIN).\n"
+        "- When the summary verdict is to fade or limit a pitcher who has a strong score, briefly acknowledge the contradiction — e.g. the underlying numbers are there but the results haven't followed, so temper expectations until he proves it.\n"
         "- Do not use phrases like \"lines up as\", \"carries a score\", \"underlying metrics suggest\", or \"tells a better story\".\n\n"
         "Return ONLY valid JSON in this shape:\n"
         "{\n"
