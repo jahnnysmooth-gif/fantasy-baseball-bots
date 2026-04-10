@@ -125,8 +125,6 @@ def dart_rating(score):
         count = 3
     elif score >= 60:
         count = 2
-    elif score >= 55:
-        count = 1
     else:
         count = 1
     return '🎯' * count
@@ -553,10 +551,11 @@ async def fetch_hitter_recent_form(session, hitter_id):
 
 
 async def fetch_savant_pitcher_metrics(session):
-    expected_url = 'https://baseballsavant.mlb.com/leaderboard/expected_statistics?type=pitcher&year=2026&position=&team=&min=1&csv=true'
+    current_year = datetime.now(ZoneInfo(TIMEZONE)).year
+    expected_url = f'https://baseballsavant.mlb.com/leaderboard/expected_statistics?type=pitcher&year={current_year}&position=&team=&min=1&csv=true'
     custom_url = (
         'https://baseballsavant.mlb.com/leaderboard/custom'
-        '?type=pitcher&year=2026&min=1&csv=true&chart=false&chartType=beeswarm&filter=&r=no'
+        f'?type=pitcher&year={current_year}&min=1&csv=true&chart=false&chartType=beeswarm&filter=&r=no'
         '&selections=player_id,pa,hard_hit_percent,barrel_batted_rate,avg_best_speed'
         '&sort=hard_hit_percent&sortDir=desc&x=pa&y=pa'
     )
@@ -689,9 +688,7 @@ async def fetch_savant_pitcher_metrics(session):
                     'avg_best_speed', 'avg ev (mph)', 'avg_ev', 'avg_hit_speed', 'average_exit_velocity', 'avg exit velocity'
                 ) or existing.get('avg_ev')
 
-                if existing.get('pitcher_name', '').lower() in ('roupp, landen', 'landen roupp'):
-                    print(f"[Probable Starters] Savant custom parsed metrics for {existing.get('pitcher_name')}: "
-                          f"hard_hit={existing.get('hard_hit_pct')}, barrel={existing.get('barrel_pct')}, avg_ev={existing.get('avg_ev')}")
+
         else:
             print('[Probable Starters] Savant custom leaderboard returned no headers')
     except Exception as e:
@@ -806,8 +803,11 @@ async def build_hot_cold_hitters(session, opponent_id):
     if not hitters:
         return {'hot': [], 'cold': []}
 
+    sem = asyncio.Semaphore(10)
+
     async def load(h):
-        form = await fetch_hitter_recent_form(session, h['id'])
+        async with sem:
+            form = await fetch_hitter_recent_form(session, h['id'])
         if not form:
             return None
         pa = int(form.get('plateAppearances', 0) or 0)
@@ -846,10 +846,12 @@ async def enrich_starter(session, starter, ownership_map, savant_map):
     if espn_id:
         headshot_url = f"https://a.espncdn.com/i/headshots/mlb/players/full/{espn_id}.png"
 
-    season_stat, recent_offense = await fetch_team_recent_offense(session, starter['opponent_id'])
-    recent_form = await build_recent_form(session, starter['pitcher_id'])
-    season_pitching = await fetch_pitcher_season_stats(session, starter['pitcher_id'])
-    hot_cold = await build_hot_cold_hitters(session, starter['opponent_id'])
+    (season_stat, recent_offense), recent_form, season_pitching, hot_cold = await asyncio.gather(
+        fetch_team_recent_offense(session, starter['opponent_id']),
+        build_recent_form(session, starter['pitcher_id']),
+        fetch_pitcher_season_stats(session, starter['pitcher_id']),
+        build_hot_cold_hitters(session, starter['opponent_id']),
+    )
 
     savant = dict(savant_map.get(starter['pitcher_id'], {}) or {})
     if season_pitching.get('k_pct') is not None:
@@ -858,7 +860,7 @@ async def enrich_starter(session, starter, ownership_map, savant_map):
         savant['bb_pct'] = season_pitching.get('bb_pct')
     if season_pitching.get('gb_pct') is not None and savant.get('gb_pct') in (None, '', '—'):
         savant['gb_pct'] = season_pitching.get('gb_pct')
-    park_abbr = starter['team_abbr'] if starter['is_home'] else starter['opponent_abbr']
+    park_abbr = starter['team_abbr'] if starter['is_home'] else starter['opponent_abbr']  # home team = park team
     park_factor = PARK_FACTORS.get(park_abbr, {'run': 100, 'hr': 100})
 
     enriched = {
@@ -962,30 +964,38 @@ async def generate_summaries(starters):
             'park': {'label': s['park_label'], 'run': s['park_factor']['run'], 'hr': s['park_factor']['hr']},
         })
 
-    prompt = f"""You are writing concise fantasy baseball probable starter blurbs for a Discord bot.
+    SYSTEM_PROMPT = (
+        "You are writing concise fantasy baseball probable starter blurbs for a Discord bot.\n\n"
+        "Write one sharp paragraph for each starter below. Focus on whether the pitcher is usable as a stream today. "
+        "Mention the matchup, recent form, strikeout path, risk level, and one or two specific supporting stats. "
+        "Keep each blurb to 3 sentences max. Avoid rigid repetitive phrasing.\n\n"
+        "Do not mention roster percentage or ownership unless availability is truly part of the story. "
+        "Most blurbs should not mention ownership at all.\n\n"
+        "Vary the structure from pitcher to pitcher. Some blurbs should open with the matchup, some with recent form, "
+        "some with strikeout upside, some with park context, and some with risk factors. "
+        "Avoid repetitive wording like \"lines up as\" or \"carries a score into the matchup.\"\n\n"
+        "Return ONLY valid JSON in this shape:\n"
+        "{\n"
+        '  "summaries": [\n'
+        '    {"pitcher": "Name", "summary": "text"}\n'
+        "  ]\n"
+        "}"
+    )
 
-Write one sharp paragraph for each starter below. Focus on whether the pitcher is usable as a stream today. Mention the matchup, recent form, strikeout path, risk level, and one or two specific supporting stats. Keep each blurb to 3 sentences max. Avoid rigid repetitive phrasing.
-
-Do not mention roster percentage or ownership unless availability is truly part of the story. Most blurbs should not mention ownership at all.
-
-Vary the structure from pitcher to pitcher. Some blurbs should open with the matchup, some with recent form, some with strikeout upside, some with park context, and some with risk factors. Avoid repetitive wording like "lines up as" or "carries a score into the matchup."
-
-Return ONLY valid JSON in this shape:
-{{
-  \"summaries\": [
-    {{\"pitcher\": \"Name\", \"summary\": \"text\"}}
-  ]
-}}
-
-Starters:
-{json.dumps(prompt_rows, indent=2)}
-"""
+    user_prompt = f"Starters:\n{json.dumps(prompt_rows, indent=2)}"
 
     try:
         message = anthropic_client.messages.create(
             model='claude-sonnet-4-6',
             max_tokens=2500,
-            messages=[{'role': 'user', 'content': prompt}],
+            system=[
+                {
+                    'type': 'text',
+                    'text': SYSTEM_PROMPT,
+                    'cache_control': {'type': 'ephemeral'},
+                }
+            ],
+            messages=[{'role': 'user', 'content': user_prompt}],
         )
         text = message.content[0].text.strip()
         text = re.sub(r'^```json\s*|```$', '', text, flags=re.MULTILINE).strip()
@@ -1159,6 +1169,10 @@ async def post_probable_starters_report():
     try:
         state = load_state()
 
+        if state.get('last_post_date') == today and os.getenv('PROBABLE_STARTERS_TEST_MODE', 'false').lower() != 'true':
+            print(f'[Probable Starters] Already posted for {today}, skipping')
+            return
+
         async with aiohttp.ClientSession() as session:
             ownership_map, probable, savant_map = await asyncio.gather(
                 fetch_espn_pitcher_ownership(session),
@@ -1191,7 +1205,10 @@ async def post_probable_starters_report():
 
         state['last_post_date'] = today
         state['posted_gamepks'] = list({s['game_pk'] for s in selected})
-        save_state(state)
+        if os.getenv('PROBABLE_STARTERS_TEST_MODE', 'false').lower() != 'true':
+            save_state(state)
+        else:
+            print('[Probable Starters] TEST MODE: skipping state save')
         print(f"[Probable Starters] Posted {len(selected)} starter embeds")
 
     except Exception as e:
