@@ -562,6 +562,7 @@ async def fetch_savant_pitcher_metrics(session):
         return rows
 
     print(f"[Probable Starters] Savant headers: {headers}")
+    print('[Probable Starters] Expected Stats CSV only includes x-stats; K/BB are filled from MLB season pitching stats.')
 
     normalized_map = {normalize_header_key(h): h for h in headers if h}
 
@@ -601,12 +602,12 @@ async def fetch_savant_pitcher_metrics(session):
             'xslg': value_from_candidates(row, normalized_map, 'est_slg', 'xslg', 'xslgagainst', 'expectedslg'),
             'xwoba': value_from_candidates(row, normalized_map, 'est_woba', 'xwoba', 'expectedwoba'),
             'xera': value_from_candidates(row, normalized_map, 'xera', 'est_xera', 'expectedera', 'era_estimator'),
-            'k_pct': value_from_candidates(row, normalized_map, 'strikeout', 'strikeout_percent', 'strikeoutpct', 'k_percent', 'k_pct', 'kpct'),
-            'bb_pct': value_from_candidates(row, normalized_map, 'walk', 'walk_percent', 'walkpct', 'bb_percent', 'bb_pct', 'bbpct'),
+            'k_pct': None,
+            'bb_pct': None,
             'hard_hit_pct': value_from_candidates(row, normalized_map, 'hard_hit_percent', 'hardhit_percent', 'hardhitpct', 'hard_hit_pct', 'hardhitpercentage'),
             'barrel_pct': value_from_candidates(row, normalized_map, 'barrel_batted_rate', 'barrel_percent', 'barrel_pct', 'barrelpct', 'barrelsperbbe', 'barrelpercentage'),
             'avg_ev': value_from_candidates(row, normalized_map, 'avg_best_speed', 'avg_hit_speed', 'average_exit_velocity', 'avgev', 'avg_exit_velocity'),
-            'gb_pct': value_from_candidates(row, normalized_map, 'groundballs_percent', 'ground_ball_percent', 'groundball_percent', 'gb_percent', 'gb_pct', 'gbpct'),
+            'gb_pct': None,
         }
 
         rows[pid_int] = metric_row
@@ -617,6 +618,54 @@ async def fetch_savant_pitcher_metrics(session):
 
     print(f'[Probable Starters] Loaded Savant metrics for {len(rows)} pitchers')
     return rows
+
+
+async def fetch_pitcher_season_stats(session, pitcher_id):
+    current_year = datetime.now(ZoneInfo(TIMEZONE)).year
+    url = f'https://statsapi.mlb.com/api/v1/people/{pitcher_id}/stats?stats=season&group=pitching&season={current_year}'
+    data = await fetch_json(session, url, timeout=20)
+    stats = data.get('stats', [])
+    if not stats or not stats[0].get('splits'):
+        return {}
+    stat = stats[0]['splits'][0].get('stat', {}) or {}
+
+    batters_faced = stat.get('battersFaced')
+    strikeouts = stat.get('strikeOuts')
+    walks = stat.get('baseOnBalls')
+    ground_outs = stat.get('groundOuts')
+    air_outs = stat.get('airOuts')
+
+    out = {
+        'batters_faced': batters_faced,
+        'strike_outs': strikeouts,
+        'walks': walks,
+    }
+
+    try:
+        bf = float(batters_faced or 0)
+        so = float(strikeouts or 0)
+        if bf > 0:
+            out['k_pct'] = round((so / bf) * 100, 1)
+    except Exception:
+        pass
+
+    try:
+        bf = float(batters_faced or 0)
+        bb = float(walks or 0)
+        if bf > 0:
+            out['bb_pct'] = round((bb / bf) * 100, 1)
+    except Exception:
+        pass
+
+    try:
+        go = float(ground_outs or 0)
+        ao = float(air_outs or 0)
+        if (go + ao) > 0:
+            out['gb_pct'] = round((go / (go + ao)) * 100, 1)
+    except Exception:
+        pass
+
+    return out
 
 
 async def build_recent_form(session, pitcher_id):
@@ -718,9 +767,16 @@ async def enrich_starter(session, starter, ownership_map, savant_map):
 
     season_stat, recent_offense = await fetch_team_recent_offense(session, starter['opponent_id'])
     recent_form = await build_recent_form(session, starter['pitcher_id'])
+    season_pitching = await fetch_pitcher_season_stats(session, starter['pitcher_id'])
     hot_cold = await build_hot_cold_hitters(session, starter['opponent_id'])
 
-    savant = savant_map.get(starter['pitcher_id'], {})
+    savant = dict(savant_map.get(starter['pitcher_id'], {}) or {})
+    if season_pitching.get('k_pct') is not None:
+        savant['k_pct'] = season_pitching.get('k_pct')
+    if season_pitching.get('bb_pct') is not None:
+        savant['bb_pct'] = season_pitching.get('bb_pct')
+    if season_pitching.get('gb_pct') is not None and savant.get('gb_pct') in (None, '', '—'):
+        savant['gb_pct'] = season_pitching.get('gb_pct')
     park_abbr = starter['team_abbr'] if starter['is_home'] else starter['opponent_abbr']
     park_factor = PARK_FACTORS.get(park_abbr, {'run': 100, 'hr': 100})
 
@@ -732,6 +788,7 @@ async def enrich_starter(session, starter, ownership_map, savant_map):
         'headshot_url': headshot_url,
         'team_color': TEAM_COLORS.get(starter['team_abbr'], 0x1D428A),
         'pitcher_metrics': savant,
+        'pitcher_season_stats': season_pitching,
         'recent_form': recent_form,
         'opponent_metrics': {
             'avg': season_stat.get('avg'),
@@ -954,13 +1011,25 @@ def build_starter_embed(starter, summary):
         inline=False,
     )
 
+    metric_lines = [
+        f"**xERA:** {fmt_num(metrics.get('xera'))} | **K%:** {fmt_pct(metrics.get('k_pct'))} | **BB%:** {fmt_pct(metrics.get('bb_pct'))}",
+        f"**xBA/xSLG allowed:** {fmt_avg(metrics.get('xba'))} / {fmt_avg(metrics.get('xslg'))}",
+    ]
+    contact_bits = []
+    if metrics.get('hard_hit_pct') not in (None, '', '—'):
+        contact_bits.append(f"**HardHit%:** {fmt_pct(metrics.get('hard_hit_pct'))}")
+    if metrics.get('barrel_pct') not in (None, '', '—'):
+        contact_bits.append(f"**Barrel%:** {fmt_pct(metrics.get('barrel_pct'))}")
+    if metrics.get('avg_ev') not in (None, '', '—'):
+        contact_bits.append(f"**Avg EV:** {fmt_num(metrics.get('avg_ev'))}")
+    if metrics.get('gb_pct') not in (None, '', '—'):
+        contact_bits.append(f"**GB%:** {fmt_pct(metrics.get('gb_pct'))}")
+    if contact_bits:
+        metric_lines.append(' | '.join(contact_bits))
+
     embed.add_field(
         name='Underlying metrics',
-        value=(
-            f"**xERA:** {fmt_num(metrics.get('xera'))} | **K%:** {fmt_pct(metrics.get('k_pct'))} | **BB%:** {fmt_pct(metrics.get('bb_pct'))}\n"
-            f"**HardHit%:** {fmt_pct(metrics.get('hard_hit_pct'))} | **Barrel%:** {fmt_pct(metrics.get('barrel_pct'))}\n"
-            f"**xBA/xSLG allowed:** {fmt_avg(metrics.get('xba'))} / {fmt_avg(metrics.get('xslg'))}"
-        ),
+        value='\n'.join(metric_lines),
         inline=False,
     )
 
