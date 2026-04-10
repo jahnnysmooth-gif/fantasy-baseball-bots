@@ -966,6 +966,10 @@ async def generate_summaries(starters):
 
 Write one sharp paragraph for each starter below. Focus on whether the pitcher is usable as a stream today. Mention the matchup, recent form, strikeout path, risk level, and one or two specific supporting stats. Keep each blurb to 3 sentences max. Avoid rigid repetitive phrasing.
 
+Do not mention roster percentage or ownership unless availability is truly part of the story. Most blurbs should not mention ownership at all.
+
+Vary the structure from pitcher to pitcher. Some blurbs should open with the matchup, some with recent form, some with strikeout upside, some with park context, and some with risk factors. Avoid repetitive wording like "lines up as" or "carries a score into the matchup."
+
 Return ONLY valid JSON in this shape:
 {{
   \"summaries\": [
