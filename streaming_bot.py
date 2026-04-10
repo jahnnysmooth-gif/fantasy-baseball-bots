@@ -171,20 +171,29 @@ async def get_espn_ownership(player_name, mlb_id):
             print(f"[STREAMING] ⚠️  No espn_id field for {player_name}")
             return None
         
-        url = 'https://lm-api-reads.fantasy.espn.com/apis/v3/games/flb/seasons/2026/players'
-        params = {'scoringPeriodId': 0, 'view': 'kona_player_info'}
+        url = 'https://lm-api-reads.fantasy.espn.com/apis/v3/games/flb/seasons/2026/segments/0/leaguedefaults/3?view=kona_player_info'
+        headers = {
+            'User-Agent': 'Mozilla/5.0',
+            'Accept': 'application/json',
+            'x-fantasy-filter': '{"players":{"limit":2000,"sortPercOwned":{"sortPriority":1,"sortAsc":false},"filterActive":{"value":true}}}'
+        }
         
-        async with http_session.get(url, params=params, timeout=10) as resp:
+        async with http_session.get(url, headers=headers, timeout=30) as resp:
             if resp.status == 200:
-                data = await resp.json()
-                for player in data:
-                    if player.get('id') == int(espn_id):
-                        ownership = round(player.get('ownership', {}).get('percentOwned', 0), 1)
-                        print(f"[STREAMING] ✅ {player_name}: {ownership}% owned")
-                        return ownership
+                data = await resp.json(content_type=None)
+                players = data.get('players', [])
                 
-                print(f"[STREAMING] ⚠️  ESPN ID {espn_id} not in API response for {player_name}")
-                return None
+                for entry in players:
+                    player = entry.get('player', {})
+                    if player.get('id') == int(espn_id):
+                        ownership = player.get('ownership', {}).get('percentOwned', 0)
+                        ownership_pct = round(ownership, 1)
+                        print(f"[STREAMING] ✅ {player_name}: {ownership_pct}% owned")
+                        return ownership_pct
+                
+                # Player not in API response - assume low ownership (0%)
+                print(f"[STREAMING] ⚠️  ESPN ID {espn_id} not in API, assuming 0% owned for {player_name}")
+                return 0.0
             else:
                 print(f"[STREAMING] ❌ ESPN API status {resp.status}")
                 return None
