@@ -1,6 +1,7 @@
 import os
 import re
 import json
+import csv
 import asyncio
 from datetime import datetime, timedelta
 from zoneinfo import ZoneInfo
@@ -18,11 +19,11 @@ CLAUDE_API_KEY = os.getenv('STREAMING_BOT_SUMMARY')
 # Configuration
 STATE_FILE = 'state/probable_starters_state.json'
 TIMEZONE = 'America/New_York'
-MAX_OWNERSHIP = 60.0
-MAX_STARTERS_PER_RUN = 25
-MIN_START_SCORE_TO_POST = 55
-SCHED_HOUR = 7
-SCHED_MINUTE = 10
+MAX_OWNERSHIP = float(os.getenv('PROBABLE_STARTERS_MAX_OWNERSHIP', '60'))
+MAX_STARTERS_PER_RUN = int(os.getenv('PROBABLE_STARTERS_MAX_POSTS', '25'))
+MIN_START_SCORE_TO_POST = int(os.getenv('PROBABLE_STARTERS_MIN_SCORE', '55'))
+SCHED_HOUR = int(os.getenv('PROBABLE_STARTERS_SCHED_HOUR', '7'))
+SCHED_MINUTE = int(os.getenv('PROBABLE_STARTERS_SCHED_MINUTE', '10'))
 
 # Discord client
 intents = discord.Intents.default()
@@ -342,6 +343,31 @@ def start_tier(score):
         return 'deep-league stream'
     return 'risky stream'
 
+def first_non_empty(row, *keys):
+    for key in keys:
+        value = row.get(key)
+        if value not in (None, '', 'null', 'None', 'N/A', 'NA', '--', '—'):
+            return value
+    return None
+
+
+def normalize_header_key(key):
+    return re.sub(r'[^a-z0-9]+', '', (key or '').strip().lower())
+
+
+def value_from_candidates(row, normalized_map, *candidates):
+    for candidate in candidates:
+        value = row.get(candidate)
+        if value not in (None, '', 'null', 'None', 'N/A', 'NA', '--', '—'):
+            return value
+        norm = normalize_header_key(candidate)
+        actual = normalized_map.get(norm)
+        if actual:
+            value = row.get(actual)
+            if value not in (None, '', 'null', 'None', 'N/A', 'NA', '--', '—'):
+                return value
+    return None
+
 
 async def fetch_json(session, url, headers=None, timeout=20):
     async with session.get(url, headers=headers, timeout=timeout) as response:
@@ -528,30 +554,67 @@ async def fetch_savant_pitcher_metrics(session):
     url = 'https://baseballsavant.mlb.com/leaderboard/expected_statistics?type=pitcher&year=2026&position=&team=&min=1&csv=true'
     text = await fetch_text(session, url, timeout=30)
     rows = {}
-    lines = text.splitlines()
-    if len(lines) < 2:
+    csv_reader = csv.DictReader(text.splitlines())
+    headers = csv_reader.fieldnames or []
+
+    if not headers:
+        print('[Probable Starters] Savant CSV returned no headers')
         return rows
-    headers = [h.strip().strip('"') for h in lines[0].split(',')]
-    for line in lines[1:]:
-        parts = [p.strip().strip('"') for p in line.split(',')]
-        if len(parts) != len(headers):
+
+    print(f"[Probable Starters] Savant headers: {headers}")
+
+    normalized_map = {normalize_header_key(h): h for h in headers if h}
+
+    for row in csv_reader:
+        if not row:
             continue
-        row = dict(zip(headers, parts))
-        pid = row.get('player_id')
+
+        pid = first_non_empty(
+            row,
+            'player_id',
+            'pitcher_id',
+            'mlb_id',
+            'playerid',
+            normalized_map.get('playerid', ''),
+            normalized_map.get('player_id', ''),
+        )
         if not pid:
             continue
-        rows[int(pid)] = {
-            'xba': row.get('est_ba'),
-            'xslg': row.get('est_slg'),
-            'xwoba': row.get('est_woba'),
-            'xera': row.get('xera') or row.get('est_woba'),
-            'k_pct': row.get('strikeout'),
-            'bb_pct': row.get('walk'),
-            'hard_hit_pct': row.get('hard_hit_percent'),
-            'barrel_pct': row.get('barrel_batted_rate'),
-            'avg_ev': row.get('avg_best_speed') or row.get('avg_hit_speed'),
-            'gb_pct': row.get('groundballs_percent'),
+
+        try:
+            pid_int = int(float(pid))
+        except Exception:
+            continue
+
+        player_name = first_non_empty(
+            row,
+            'player_name',
+            'last_name, first_name',
+            'name',
+            normalized_map.get('playername', ''),
+            normalized_map.get('lastnamefirstname', ''),
+        )
+
+        metric_row = {
+            'pitcher_name': player_name,
+            'xba': value_from_candidates(row, normalized_map, 'est_ba', 'xba', 'xbaagainst', 'expectedba'),
+            'xslg': value_from_candidates(row, normalized_map, 'est_slg', 'xslg', 'xslgagainst', 'expectedslg'),
+            'xwoba': value_from_candidates(row, normalized_map, 'est_woba', 'xwoba', 'expectedwoba'),
+            'xera': value_from_candidates(row, normalized_map, 'xera', 'est_xera', 'expectedera', 'era_estimator'),
+            'k_pct': value_from_candidates(row, normalized_map, 'strikeout', 'strikeout_percent', 'strikeoutpct', 'k_percent', 'k_pct', 'kpct'),
+            'bb_pct': value_from_candidates(row, normalized_map, 'walk', 'walk_percent', 'walkpct', 'bb_percent', 'bb_pct', 'bbpct'),
+            'hard_hit_pct': value_from_candidates(row, normalized_map, 'hard_hit_percent', 'hardhit_percent', 'hardhitpct', 'hard_hit_pct', 'hardhitpercentage'),
+            'barrel_pct': value_from_candidates(row, normalized_map, 'barrel_batted_rate', 'barrel_percent', 'barrel_pct', 'barrelpct', 'barrelsperbbe', 'barrelpercentage'),
+            'avg_ev': value_from_candidates(row, normalized_map, 'avg_best_speed', 'avg_hit_speed', 'average_exit_velocity', 'avgev', 'avg_exit_velocity'),
+            'gb_pct': value_from_candidates(row, normalized_map, 'groundballs_percent', 'ground_ball_percent', 'groundball_percent', 'gb_percent', 'gb_pct', 'gbpct'),
         }
+
+        rows[pid_int] = metric_row
+
+        if player_name and player_name.lower() == 'landen roupp':
+            print(f"[Probable Starters] Savant row keys for {player_name}: {list(row.keys())}")
+            print(f"[Probable Starters] Savant parsed metrics for {player_name}: {metric_row}")
+
     print(f'[Probable Starters] Loaded Savant metrics for {len(rows)} pitchers')
     return rows
 
