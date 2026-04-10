@@ -23,9 +23,6 @@ try:
     from waiver_wire_bot import start_waiver_wire_bot
     print("Loaded waiver_wire_bot", flush=True)
 
-    from streaming_bot import start_streaming_bot
-    print("Loaded streaming_bot", flush=True)
-
     from probable_starters_bot import start_probable_starters_bot
     print("Loaded probable_starters_bot", flush=True)
 
@@ -105,9 +102,6 @@ async def main() -> None:
     await asyncio.sleep(3)
 
     tasks.append(asyncio.create_task(run_forever("waiver_wire_bot", start_waiver_wire_bot)))
-    await asyncio.sleep(3)
-
-    tasks.append(asyncio.create_task(run_forever("streaming_bot", start_streaming_bot)))
     await asyncio.sleep(3)
 
     tasks.append(asyncio.create_task(run_forever("probable_starters_bot", start_probable_starters_bot)))
