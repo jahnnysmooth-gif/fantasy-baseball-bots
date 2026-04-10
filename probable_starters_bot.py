@@ -807,8 +807,8 @@ async def fetch_team_splits(session, team_id):
 
     try:
         lhp_data, rhp_data = await asyncio.gather(
-            fetch_json(session, f'https://statsapi.mlb.com/api/v1/teams/{team_id}/stats?stats=vsLeftPitchers&group=hitting&season={current_year}', timeout=20),
-            fetch_json(session, f'https://statsapi.mlb.com/api/v1/teams/{team_id}/stats?stats=vsRightPitchers&group=hitting&season={current_year}', timeout=20),
+            fetch_json(session, f'https://statsapi.mlb.com/api/v1/teams/{team_id}/stats?stats=statSplits&sitCodes=vl&group=hitting&season={current_year}', timeout=20),
+            fetch_json(session, f'https://statsapi.mlb.com/api/v1/teams/{team_id}/stats?stats=statSplits&sitCodes=vr&group=hitting&season={current_year}', timeout=20),
         )
         return {
             'vs_lhp': parse_split(lhp_data),
