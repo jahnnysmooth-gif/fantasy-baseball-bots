@@ -140,14 +140,26 @@ async def get_statcast_metrics(pitcher_name):
 async def get_espn_ownership(player_name, mlb_id):
     """Get ESPN ownership percentage"""
     try:
-        # JSON is keyed by player name, not MLB ID
+        # Normalize name (remove accents for matching)
+        import unicodedata
+        
+        def normalize_name(name):
+            # Remove accents
+            name = unicodedata.normalize('NFD', name)
+            name = ''.join(char for char in name if unicodedata.category(char) != 'Mn')
+            return name.strip()
+        
+        normalized_search = normalize_name(player_name)
+        
+        # Try exact match first
         player_data = espn_player_map.get(player_name)
         
         if not player_data:
-            # Try variations of the name
-            for key in espn_player_map.keys():
-                if key.lower() == player_name.lower():
-                    player_data = espn_player_map[key]
+            # Try normalized match
+            for key, data in espn_player_map.items():
+                if normalize_name(key) == normalized_search:
+                    player_data = data
+                    print(f"[STREAMING] 🔄 Matched '{player_name}' to '{key}'")
                     break
         
         if not player_data:
