@@ -118,31 +118,65 @@ async def get_statcast_metrics(pitcher_name):
 async def get_espn_ownership(player_name, mlb_id):
     """Get ESPN ownership percentage"""
     try:
-        espn_id = espn_player_map.get(str(mlb_id))
+        import unicodedata
         
-        if not espn_id:
-            for mlb_id_key, data in espn_player_map.items():
-                if isinstance(data, dict) and data.get('name', '').lower() == player_name.lower():
-                    espn_id = data.get('espn_id')
+        def normalize_name(name):
+            # Remove accents
+            name = unicodedata.normalize('NFD', name)
+            name = ''.join(char for char in name if unicodedata.category(char) != 'Mn')
+            return name.strip()
+        
+        normalized_search = normalize_name(player_name)
+        
+        # Try exact match first (JSON is keyed by player name)
+        player_data = espn_player_map.get(player_name)
+        
+        if not player_data:
+            # Try normalized match
+            for key, data in espn_player_map.items():
+                if normalize_name(key) == normalized_search:
+                    player_data = data
+                    print(f"[STREAMING] 🔄 Matched '{player_name}' to '{key}'")
                     break
         
-        if not espn_id:
+        if not player_data:
+            print(f"[STREAMING] ⚠️  No ESPN ID for {player_name}")
             return None
         
-        url = 'https://lm-api-reads.fantasy.espn.com/apis/v3/games/flb/seasons/2026/players'
-        params = {'scoringPeriodId': 0, 'view': 'kona_player_info'}
+        espn_id = player_data.get('espn_id')
+        if not espn_id:
+            print(f"[STREAMING] ⚠️  No espn_id field for {player_name}")
+            return None
         
-        async with http_session.get(url, params=params, timeout=10) as resp:
+        url = 'https://lm-api-reads.fantasy.espn.com/apis/v3/games/flb/seasons/2026/segments/0/leaguedefaults/3'
+        headers = {
+            'User-Agent': 'Mozilla/5.0',
+            'Accept': 'application/json',
+            'x-fantasy-filter': '{"players":{"limit":2000,"sortPercOwned":{"sortPriority":1,"sortAsc":false},"filterActive":{"value":true}}}'
+        }
+        params = {'view': 'kona_player_info'}
+        
+        async with http_session.get(url, headers=headers, params=params, timeout=30) as resp:
             if resp.status == 200:
-                data = await resp.json()
-                for player in data:
+                data = await resp.json(content_type=None)
+                players = data.get('players', [])
+                
+                for entry in players:
+                    player = entry.get('player', {})
                     if player.get('id') == int(espn_id):
-                        return round(player.get('ownership', {}).get('percentOwned', 0), 1)
-        
-        return None
+                        ownership = player.get('ownership', {}).get('percentOwned', 0)
+                        ownership_pct = round(ownership, 1)
+                        print(f"[STREAMING] ✅ {player_name}: {ownership_pct}% owned")
+                        return ownership_pct
+                
+                print(f"[STREAMING] ⚠️  ESPN ID {espn_id} not in API for {player_name}, assuming 0%")
+                return 0.0
+            else:
+                print(f"[STREAMING] ❌ ESPN API status {resp.status}")
+                return None
         
     except Exception as e:
-        print(f"Error fetching ESPN ownership for {player_name}: {e}")
+        print(f"[STREAMING] ❌ Ownership error for {player_name}: {e}")
         return None
 
 
