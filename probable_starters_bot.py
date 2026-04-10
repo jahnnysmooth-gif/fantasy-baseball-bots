@@ -117,7 +117,9 @@ def dart_rating(score):
     except Exception:
         return '🎯'
 
-    if score >= 81:
+    if score >= 88:
+        count = 6
+    elif score >= 81:
         count = 5
     elif score >= 75:
         count = 4
@@ -330,10 +332,12 @@ def build_start_score(starter):
     except Exception:
         pass
 
-    return max(20, min(85, int(round(score))))
+    return max(20, min(100, int(round(score))))
 
 
 def start_tier(score):
+    if score >= 88:
+        return 'elite stream'
     if score >= 76:
         return 'strong stream'
     if score >= 68:
@@ -1050,14 +1054,15 @@ def build_header_embed(starters, target_date):
         value=(
             f"**Qualified arms:** {len(starters)}\n"
             f"**Top score on board:** {max((s['start_score'] for s in starters), default='—')}\n"
-            f"**Strong stream tier:** {sum(1 for s in starters if s['start_score'] >= 76)}"
+            f"**Strong stream tier (76+):** {sum(1 for s in starters if s['start_score'] >= 76)}"
         ),
         inline=False,
     )
     embed.add_field(
         name='General interpretation',
         value=(
-            '**76+** = elite / strong stream.\n'
+            '**88+** = elite stream.\n'
+            '**76-87** = strong stream.\n'
             '**68-75** = solid stream.\n'
             '**60-67** = usable but risky.\n'
             '**Below 60** = more speculative / desperation only.'
