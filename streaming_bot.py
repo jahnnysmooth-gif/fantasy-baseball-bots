@@ -788,7 +788,10 @@ async def post_streaming_board(date_str=None):
         
         viable_streamers = []
         
+        print(f"[STREAMING] Processing {len(starters)} starters for ownership check")
+        
         for starter in starters:
+            print(f"[STREAMING] Checking {starter['pitcher_name']}")
             # Get ownership
             ownership = await get_espn_ownership(starter['pitcher_name'], starter['pitcher_id'])
             
