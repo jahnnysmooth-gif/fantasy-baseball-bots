@@ -100,6 +100,32 @@ TEAM_COLORS = {
     'WSH': 0xAB0003,
 }
 
+TEAM_LOGO_SLUGS = {
+    'ARI': 'ari', 'ATL': 'atl', 'BAL': 'bal', 'BOS': 'bos', 'CHC': 'chc', 'CHW': 'cws',
+    'CIN': 'cin', 'CLE': 'cle', 'COL': 'col', 'DET': 'det', 'HOU': 'hou', 'KC': 'kc',
+    'LAA': 'laa', 'LAD': 'lad', 'MIA': 'mia', 'MIL': 'mil', 'MIN': 'min', 'NYM': 'nym',
+    'NYY': 'nyy', 'ATH': 'oak', 'PHI': 'phi', 'PIT': 'pit', 'SD': 'sd', 'SEA': 'sea',
+    'SF': 'sf', 'STL': 'stl', 'TB': 'tb', 'TEX': 'tex', 'TOR': 'tor', 'WSH': 'wsh',
+}
+
+STREAM_TIER_EMOJIS = {
+    'strong stream': '🔥',
+    'viable stream': '✅',
+    'deep-league stream': '🟡',
+    'risky stream': '⚠️',
+}
+
+
+def team_logo_url(team_abbr):
+    slug = TEAM_LOGO_SLUGS.get(team_abbr)
+    if not slug:
+        return None
+    return f'https://a.espncdn.com/i/teamlogos/mlb/500/{slug}.png'
+
+
+def stream_tier_emoji(tier):
+    return STREAM_TIER_EMOJIS.get(tier, '⚾')
+
 
 def load_state():
     try:
@@ -816,17 +842,22 @@ def build_starter_embed(starter, summary):
     cold = starter.get('cold_hitters', [])
     at_vs = 'vs' if starter['is_home'] else '@'
     color = starter.get('team_color') or (0x2ECC71 if starter['start_score'] >= 76 else 0xF1C40F if starter['start_score'] >= 60 else 0xE74C3C)
+    tier_emoji = stream_tier_emoji(starter.get('start_tier'))
 
     embed = discord.Embed(
-        title=f"{starter['pitcher_name']} {at_vs} {opp}",
-        description=f"**{team}** | ESPN: **{starter['ownership']:.1f}% owned** | **{starter['start_score']}/100** ({starter['start_tier']})",
+        description=f"**{team}** | ESPN: **{starter['ownership']:.1f}% owned** | **{starter['start_score']}/100** {tier_emoji}",
         color=color,
         timestamp=datetime.now(ZoneInfo('UTC')),
     )
 
+    logo_url = team_logo_url(team)
+    embed.set_author(name=f"{starter['pitcher_name']} {at_vs} {opp}", icon_url=logo_url or discord.Embed.Empty)
+
     headshot_url = starter.get('headshot_url')
     if headshot_url:
         embed.set_thumbnail(url=headshot_url)
+
+    print(f"[Probable Starters] Metrics for {starter['pitcher_name']}: {metrics}")
 
     embed.add_field(
         name='Recent form',
@@ -858,10 +889,10 @@ def build_starter_embed(starter, summary):
         inline=False,
     )
 
-    hot_text = ', '.join(f"{h['name']} ({h['ops']})" for h in hot[:3]) or '—'
-    cold_text = ', '.join(f"{h['name']} ({h['ops']})" for h in cold[:3]) or '—'
-    embed.add_field(name='Who’s hot', value=safe_truncate(hot_text, 256), inline=False)
-    embed.add_field(name='Who’s cold', value=safe_truncate(cold_text, 256), inline=False)
+    hot_names = ' | '.join(h['name'] for h in hot[:3]) or '—'
+    cold_names = ' | '.join(h['name'] for h in cold[:3]) or '—'
+    embed.add_field(name='Who’s hot', value=safe_truncate(hot_names, 256), inline=False)
+    embed.add_field(name='Who’s cold', value=safe_truncate(cold_names, 256), inline=False)
     embed.add_field(name='Summary', value=safe_truncate(summary, 1024), inline=False)
 
     game_time = starter.get('game_time')
