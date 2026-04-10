@@ -1087,21 +1087,26 @@ async def on_close():
 
 
 if __name__ == '__main__':
-    async def run_once():
-        global http_session
-        http_session = aiohttp.ClientSession()
+    # Check if running as cron job (no Discord bot needed)
+    if os.getenv('RUN_AS_CRON', 'false').lower() == 'true':
+        async def run_once():
+            global http_session
+            http_session = aiohttp.ClientSession()
+            
+            load_espn_player_ids()
+            
+            print('[STREAMING CRON] Starting daily streaming board...')
+            await post_streaming_board()
+            
+            await http_session.close()
+            print('[STREAMING CRON] Complete!')
         
-        load_espn_player_ids()
-        
-        print('[STREAMING CRON] Starting daily streaming board...')
-        await post_streaming_board()
-        
-        await http_session.close()
-        print('[STREAMING CRON] Complete!')
-    
-    if not DISCORD_TOKEN:
-        print("Error: STREAMING_BOT_TOKEN not set")
-    elif STREAMING_CHANNEL_ID == 0:
-        print("Error: STREAMING_CHANNEL_ID not set")
-    else:
         asyncio.run(run_once())
+    else:
+        # Run as Discord bot for testing
+        if not DISCORD_TOKEN:
+            print("Error: STREAMING_BOT_TOKEN not set")
+        elif STREAMING_CHANNEL_ID == 0:
+            print("Error: STREAMING_CHANNEL_ID not set")
+        else:
+            bot.run(DISCORD_TOKEN)
