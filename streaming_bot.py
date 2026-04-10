@@ -140,16 +140,23 @@ async def get_statcast_metrics(pitcher_name):
 async def get_espn_ownership(player_name, mlb_id):
     """Get ESPN ownership percentage"""
     try:
-        espn_id = espn_player_map.get(str(mlb_id))
+        # JSON is keyed by player name, not MLB ID
+        player_data = espn_player_map.get(player_name)
         
-        if not espn_id:
-            for mlb_id_key, data in espn_player_map.items():
-                if isinstance(data, dict) and data.get('name', '').lower() == player_name.lower():
-                    espn_id = data.get('espn_id')
+        if not player_data:
+            # Try variations of the name
+            for key in espn_player_map.keys():
+                if key.lower() == player_name.lower():
+                    player_data = espn_player_map[key]
                     break
         
-        if not espn_id:
+        if not player_data:
             print(f"[STREAMING] ⚠️  No ESPN ID for {player_name} (MLB ID: {mlb_id})")
+            return None
+        
+        espn_id = player_data.get('espn_id')
+        if not espn_id:
+            print(f"[STREAMING] ⚠️  No espn_id field for {player_name}")
             return None
         
         url = 'https://lm-api-reads.fantasy.espn.com/apis/v3/games/flb/seasons/2026/players'
