@@ -551,24 +551,34 @@ async def fetch_hitter_recent_form(session, hitter_id):
     }
 
 
-async def fetch_savant_pitcher_metrics(session):
-    url = 'https://baseballsavant.mlb.com/leaderboard/expected_statistics?type=pitcher&year=2026&position=&team=&min=1&csv=true'
-    text = await fetch_text(session, url, timeout=30)
-    text = text.lstrip('\ufeff')
-    rows = {}
-    csv_reader = csv.DictReader(io.StringIO(text))
-    headers = csv_reader.fieldnames or []
 
-    if not headers:
-        print('[Probable Starters] Savant CSV returned no headers')
+async def fetch_savant_pitcher_metrics(session):
+    expected_url = 'https://baseballsavant.mlb.com/leaderboard/expected_statistics?type=pitcher&year=2026&position=&team=&min=1&csv=true'
+    custom_url = (
+        'https://baseballsavant.mlb.com/leaderboard/custom'
+        '?type=pitcher&year=2026&min=1&csv=true&chart=false&chartType=beeswarm&filter=&r=no'
+        '&selections=player_id,pa,hard_hit_percent,barrel_batted_rate,avg_best_speed'
+        '&sort=hard_hit_percent&sortDir=desc&x=pa&y=pa'
+    )
+
+    rows = {}
+
+    # Expected stats endpoint: xERA / xBA / xSLG / xwOBA
+    expected_text = await fetch_text(session, expected_url, timeout=30)
+    expected_text = expected_text.lstrip('\ufeff')
+    expected_reader = csv.DictReader(io.StringIO(expected_text))
+    expected_headers = expected_reader.fieldnames or []
+
+    if not expected_headers:
+        print('[Probable Starters] Savant expected-stats CSV returned no headers')
         return rows
 
-    print(f"[Probable Starters] Savant headers: {headers}")
+    print(f"[Probable Starters] Savant expected headers: {expected_headers}")
     print('[Probable Starters] Expected Stats CSV only includes x-stats; K/BB are filled from MLB season pitching stats.')
 
-    normalized_map = {normalize_header_key(h): h for h in headers if h}
+    expected_normalized = {normalize_header_key(h): h for h in expected_headers if h}
 
-    for row in csv_reader:
+    for row in expected_reader:
         if not row:
             continue
 
@@ -578,8 +588,8 @@ async def fetch_savant_pitcher_metrics(session):
             'pitcher_id',
             'mlb_id',
             'playerid',
-            normalized_map.get('playerid', ''),
-            normalized_map.get('player_id', ''),
+            expected_normalized.get('playerid', ''),
+            expected_normalized.get('player_id', ''),
         )
         if not pid:
             continue
@@ -594,29 +604,98 @@ async def fetch_savant_pitcher_metrics(session):
             'player_name',
             'last_name, first_name',
             'name',
-            normalized_map.get('playername', ''),
-            normalized_map.get('lastnamefirstname', ''),
+            expected_normalized.get('playername', ''),
+            expected_normalized.get('lastnamefirstname', ''),
         )
 
-        metric_row = {
+        rows[pid_int] = {
             'pitcher_name': player_name,
-            'xba': value_from_candidates(row, normalized_map, 'est_ba', 'xba', 'xbaagainst', 'expectedba'),
-            'xslg': value_from_candidates(row, normalized_map, 'est_slg', 'xslg', 'xslgagainst', 'expectedslg'),
-            'xwoba': value_from_candidates(row, normalized_map, 'est_woba', 'xwoba', 'expectedwoba'),
-            'xera': value_from_candidates(row, normalized_map, 'xera', 'est_xera', 'expectedera', 'era_estimator'),
+            'xba': value_from_candidates(row, expected_normalized, 'est_ba', 'xba', 'xbaagainst', 'expectedba'),
+            'xslg': value_from_candidates(row, expected_normalized, 'est_slg', 'xslg', 'xslgagainst', 'expectedslg'),
+            'xwoba': value_from_candidates(row, expected_normalized, 'est_woba', 'xwoba', 'expectedwoba'),
+            'xera': value_from_candidates(row, expected_normalized, 'xera', 'est_xera', 'expectedera', 'era_estimator'),
             'k_pct': None,
             'bb_pct': None,
-            'hard_hit_pct': value_from_candidates(row, normalized_map, 'hard_hit_percent', 'hardhit_percent', 'hardhitpct', 'hard_hit_pct', 'hardhitpercentage'),
-            'barrel_pct': value_from_candidates(row, normalized_map, 'barrel_batted_rate', 'barrel_percent', 'barrel_pct', 'barrelpct', 'barrelsperbbe', 'barrelpercentage'),
-            'avg_ev': value_from_candidates(row, normalized_map, 'avg_best_speed', 'avg_hit_speed', 'average_exit_velocity', 'avgev', 'avg_exit_velocity'),
+            'hard_hit_pct': None,
+            'barrel_pct': None,
+            'avg_ev': None,
             'gb_pct': None,
         }
 
-        rows[pid_int] = metric_row
+    # Custom leaderboard endpoint: contact-quality stats
+    try:
+        custom_text = await fetch_text(session, custom_url, timeout=30)
+        custom_text = custom_text.lstrip('\ufeff')
+        custom_reader = csv.DictReader(io.StringIO(custom_text))
+        custom_headers = custom_reader.fieldnames or []
+        if custom_headers:
+            print(f"[Probable Starters] Savant custom headers: {custom_headers}")
+            custom_normalized = {normalize_header_key(h): h for h in custom_headers if h}
 
-        if player_name and player_name.lower() == 'landen roupp':
-            print(f"[Probable Starters] Savant row keys for {player_name}: {list(row.keys())}")
-            print(f"[Probable Starters] Savant parsed metrics for {player_name}: {metric_row}")
+            for row in custom_reader:
+                if not row:
+                    continue
+
+                pid = first_non_empty(
+                    row,
+                    'player_id',
+                    'pitcher_id',
+                    'mlb_id',
+                    'playerid',
+                    custom_normalized.get('playerid', ''),
+                    custom_normalized.get('player_id', ''),
+                )
+                if not pid:
+                    continue
+
+                try:
+                    pid_int = int(float(pid))
+                except Exception:
+                    continue
+
+                existing = rows.setdefault(pid_int, {
+                    'pitcher_name': first_non_empty(
+                        row,
+                        'player_name',
+                        'last_name, first_name',
+                        'name',
+                        custom_normalized.get('playername', ''),
+                        custom_normalized.get('lastnamefirstname', ''),
+                    ),
+                    'xba': None,
+                    'xslg': None,
+                    'xwoba': None,
+                    'xera': None,
+                    'k_pct': None,
+                    'bb_pct': None,
+                    'hard_hit_pct': None,
+                    'barrel_pct': None,
+                    'avg_ev': None,
+                    'gb_pct': None,
+                })
+
+                existing['hard_hit_pct'] = value_from_candidates(
+                    row, custom_normalized,
+                    'hard_hit_percent', 'hard hit %', 'hardhitpercent', 'hardhitpct', 'hard_hit_pct'
+                ) or existing.get('hard_hit_pct')
+
+                existing['barrel_pct'] = value_from_candidates(
+                    row, custom_normalized,
+                    'barrel_batted_rate', 'barrel%', 'barrel %', 'barrel_percent', 'barrel_pct', 'barrelpct'
+                ) or existing.get('barrel_pct')
+
+                existing['avg_ev'] = value_from_candidates(
+                    row, custom_normalized,
+                    'avg_best_speed', 'avg ev (mph)', 'avg_ev', 'avg_hit_speed', 'average_exit_velocity', 'avg exit velocity'
+                ) or existing.get('avg_ev')
+
+                if existing.get('pitcher_name', '').lower() in ('roupp, landen', 'landen roupp'):
+                    print(f"[Probable Starters] Savant custom parsed metrics for {existing.get('pitcher_name')}: "
+                          f"hard_hit={existing.get('hard_hit_pct')}, barrel={existing.get('barrel_pct')}, avg_ev={existing.get('avg_ev')}")
+        else:
+            print('[Probable Starters] Savant custom leaderboard returned no headers')
+    except Exception as e:
+        print(f'[Probable Starters] Savant custom leaderboard fetch failed: {e}')
 
     print(f'[Probable Starters] Loaded Savant metrics for {len(rows)} pitchers')
     return rows
