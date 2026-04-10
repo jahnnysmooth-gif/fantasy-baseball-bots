@@ -67,6 +67,40 @@ PARK_FACTORS = {
 }
 
 
+TEAM_COLORS = {
+    'ARI': 0xA71930,
+    'ATL': 0xCE1141,
+    'BAL': 0xDF4601,
+    'BOS': 0xBD3039,
+    'CHC': 0x0E3386,
+    'CHW': 0x27251F,
+    'CIN': 0xC6011F,
+    'CLE': 0xE31937,
+    'COL': 0x33006F,
+    'DET': 0x0C2340,
+    'HOU': 0xEB6E1F,
+    'KC': 0x004687,
+    'LAA': 0xBA0021,
+    'LAD': 0x005A9C,
+    'MIA': 0x00A3E0,
+    'MIL': 0x12284B,
+    'MIN': 0x002B5C,
+    'NYM': 0x002D72,
+    'NYY': 0x0C2340,
+    'ATH': 0x003831,
+    'PHI': 0xE81828,
+    'PIT': 0xFDB827,
+    'SD': 0x2F241D,
+    'SEA': 0x005C5C,
+    'SF': 0xFD5A1E,
+    'STL': 0xC41E3A,
+    'TB': 0x092C5C,
+    'TEX': 0x003278,
+    'TOR': 0x134A8E,
+    'WSH': 0xAB0003,
+}
+
+
 def load_state():
     try:
         with open(STATE_FILE, 'r') as f:
@@ -577,6 +611,11 @@ async def enrich_starter(session, starter, ownership_map, savant_map):
     if own['ownership'] > MAX_OWNERSHIP:
         return None
 
+    espn_id = own.get('espn_id')
+    headshot_url = None
+    if espn_id:
+        headshot_url = f"https://a.espncdn.com/i/headshots/mlb/players/full/{espn_id}.png"
+
     season_stat, recent_offense = await fetch_team_recent_offense(session, starter['opponent_id'])
     recent_form = await build_recent_form(session, starter['pitcher_id'])
     hot_cold = await build_hot_cold_hitters(session, starter['opponent_id'])
@@ -589,6 +628,9 @@ async def enrich_starter(session, starter, ownership_map, savant_map):
         **starter,
         'ownership': own['ownership'],
         'ownership_change': own['change'],
+        'espn_id': espn_id,
+        'headshot_url': headshot_url,
+        'team_color': TEAM_COLORS.get(starter['team_abbr'], 0x1D428A),
         'pitcher_metrics': savant,
         'recent_form': recent_form,
         'opponent_metrics': {
@@ -773,7 +815,7 @@ def build_starter_embed(starter, summary):
     hot = starter.get('hot_hitters', [])
     cold = starter.get('cold_hitters', [])
     at_vs = 'vs' if starter['is_home'] else '@'
-    color = 0x2ECC71 if starter['start_score'] >= 76 else 0xF1C40F if starter['start_score'] >= 60 else 0xE74C3C
+    color = starter.get('team_color') or (0x2ECC71 if starter['start_score'] >= 76 else 0xF1C40F if starter['start_score'] >= 60 else 0xE74C3C)
 
     embed = discord.Embed(
         title=f"{starter['pitcher_name']} {at_vs} {opp}",
@@ -781,6 +823,10 @@ def build_starter_embed(starter, summary):
         color=color,
         timestamp=datetime.now(ZoneInfo('UTC')),
     )
+
+    headshot_url = starter.get('headshot_url')
+    if headshot_url:
+        embed.set_thumbnail(url=headshot_url)
 
     embed.add_field(
         name='Recent form',
