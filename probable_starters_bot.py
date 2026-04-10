@@ -1322,25 +1322,54 @@ def seconds_until_next_7pm():
     return (target - now).total_seconds()
 
 
+async def seconds_until_cycle_start():
+    """
+    Return seconds until we should start posting tomorrow's probables.
+    Trigger: today's first game start time.
+    Fallback: 7 PM ET if today has no games.
+    """
+    today = datetime.now(ZoneInfo(TIMEZONE)).strftime('%Y-%m-%d')
+    try:
+        async with aiohttp.ClientSession() as session:
+            first_start = await fetch_first_game_start(session, today)
+    except Exception:
+        first_start = None
+
+    now_utc = datetime.now(ZoneInfo('UTC'))
+
+    if first_start:
+        wait = (first_start - now_utc).total_seconds()
+        if wait > 0:
+            print(f'[Probable Starters] Today has games. Waiting {wait:.0f}s until first game starts.')
+            return wait
+        else:
+            # First game already started — begin immediately
+            print('[Probable Starters] First game today already started. Beginning cycle now.')
+            return 0
+    else:
+        wait = seconds_until_next_7pm()
+        print(f'[Probable Starters] No games today. Falling back to 7 PM ET ({wait:.0f}s).')
+        return wait
+
+
 async def probable_starters_loop():
     """
     Main background loop:
-    1. Sleep until 7 PM ET
-    2. Run hourly cycle posting new probable starters for tomorrow
-    3. Stop once tomorrow's first game starts
-    4. Repeat
+    1. Sleep until today's first game starts (fallback: 7 PM ET if no games today)
+    2. Run hourly cycle posting new probable starters for tomorrow — runs indefinitely
+    3. Each new day, recalculate the trigger and sleep again
     """
     print('[Probable Starters] Background loop started')
 
     while True:
-        # --- Sleep until 7 PM ET ---
-        wait = seconds_until_next_7pm()
-        print(f'[Probable Starters] Sleeping {wait:.0f}s until 7 PM ET')
-        await asyncio.sleep(wait)
+        # --- Sleep until trigger ---
+        wait = await seconds_until_cycle_start()
+        if wait > 0:
+            await asyncio.sleep(wait)
 
         now_et = datetime.now(ZoneInfo(TIMEZONE))
         target_date = (now_et + timedelta(days=1)).strftime('%Y-%m-%d')
-        print(f'[Probable Starters] Evening cycle started. Target date: {target_date}')
+        print(f'[Probable Starters] Cycle started. Target date: {target_date}')
 
         # Reset per-cycle state for the new target date
         state = load_state()
@@ -1352,22 +1381,15 @@ async def probable_starters_loop():
             if not is_test:
                 save_state(state)
 
-        # --- Hourly loop ---
+        # --- Hourly loop — runs until midnight ET rolls into the next calendar day ---
         while True:
             await run_cycle(target_date)
 
-            # Check if tomorrow's first game has started
-            try:
-                async with aiohttp.ClientSession() as session:
-                    first_start = await fetch_first_game_start(session, target_date)
-            except Exception:
-                first_start = None
-
-            if first_start:
-                now_utc = datetime.now(ZoneInfo('UTC'))
-                if now_utc >= first_start:
-                    print(f'[Probable Starters] First game for {target_date} has started. Ending evening cycle.')
-                    break
+            # If we've crossed into the target date's calendar day, hand off to the next cycle
+            now_et = datetime.now(ZoneInfo(TIMEZONE))
+            if now_et.strftime('%Y-%m-%d') >= target_date:
+                print(f'[Probable Starters] Rolled into {target_date}. Starting new cycle.')
+                break
 
             print(f'[Probable Starters] Next check in {HOURLY_INTERVAL}s')
             await asyncio.sleep(HOURLY_INTERVAL)
