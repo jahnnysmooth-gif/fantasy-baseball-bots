@@ -141,6 +141,8 @@ def load_state():
             state.setdefault('posted_pitcher_ids', [])
             state.setdefault('confirmed_scratches', [])
             state.setdefault('target_date', None)
+            state.setdefault('header_message_id', None)
+            state.setdefault('header_stats', {'count': 0, 'top_score': 0, 'strong_count': 0})
             return state
     except FileNotFoundError:
         return {
@@ -149,6 +151,8 @@ def load_state():
             'posted_pitcher_ids': [],
             'confirmed_scratches': [],
             'target_date': None,
+            'header_message_id': None,
+            'header_stats': {'count': 0, 'top_score': 0, 'strong_count': 0},
         }
 
 
@@ -1149,7 +1153,7 @@ def fallback_summary(starter):
     )
 
 
-def build_header_embed(starters, target_date):
+def build_header_embed(target_date, count, top_score, strong_count):
     embed = discord.Embed(
         title='⚾ Probable Starters',
         description=(
@@ -1162,9 +1166,9 @@ def build_header_embed(starters, target_date):
     embed.add_field(
         name='Slate snapshot',
         value=(
-            f"**Qualified arms:** {len(starters)}\n"
-            f"**Top score on board:** {max((s['start_score'] for s in starters), default='—')}\n"
-            f"**Strong stream tier (76+):** {sum(1 for s in starters if s['start_score'] >= 76)}"
+            f"**Qualified arms:** {count}\n"
+            f"**Top score on board:** {top_score}\n"
+            f"**Strong stream tier (76+):** {strong_count}"
         ),
         inline=False,
     )
@@ -1416,7 +1420,27 @@ async def run_cycle(target_date):
         if channel is None:
             channel = await client.fetch_channel(CHANNEL_ID)
 
-        await channel.send(embed=build_header_embed(selected, target_date))
+        # Compute updated header stats combining previous + new
+        prev_stats = state.get('header_stats', {'count': 0, 'top_score': 0, 'strong_count': 0})
+        new_count = prev_stats['count'] + len(selected)
+        new_top = max(prev_stats['top_score'], max(s['start_score'] for s in selected))
+        new_strong = prev_stats['strong_count'] + sum(1 for s in selected if s['start_score'] >= 76)
+
+        header_message_id = state.get('header_message_id')
+        if header_message_id:
+            # Edit existing header
+            try:
+                header_msg = await channel.fetch_message(header_message_id)
+                await header_msg.edit(embed=build_header_embed(target_date, new_count, new_top, new_strong))
+            except Exception as e:
+                print(f'[Probable Starters] Could not edit header message: {e}')
+                header_msg = await channel.send(embed=build_header_embed(target_date, new_count, new_top, new_strong))
+                state['header_message_id'] = header_msg.id
+        else:
+            # First post — send new header
+            header_msg = await channel.send(embed=build_header_embed(target_date, new_count, new_top, new_strong))
+            state['header_message_id'] = header_msg.id
+
         for starter in selected:
             await channel.send(embed=build_starter_embed(
                 starter,
@@ -1431,6 +1455,7 @@ async def run_cycle(target_date):
         state['confirmed_scratches'] = list(confirmed_scratches)
         state['last_post_date'] = target_date
         state['posted_gamepks'] = list({s['game_pk'] for s in selected})
+        state['header_stats'] = {'count': new_count, 'top_score': new_top, 'strong_count': new_strong}
         if not is_test:
             save_state(state)
         else:
@@ -1510,6 +1535,8 @@ async def probable_starters_loop():
             state['target_date'] = target_date
             state['posted_pitcher_ids'] = []
             state['confirmed_scratches'] = []
+            state['header_message_id'] = None
+            state['header_stats'] = {'count': 0, 'top_score': 0, 'strong_count': 0}
             is_test = os.getenv('PROBABLE_STARTERS_TEST_MODE', 'false').lower() == 'true'
             if not is_test:
                 save_state(state)
