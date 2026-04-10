@@ -1146,7 +1146,7 @@ def build_header_embed(starters, target_date):
     embed = discord.Embed(
         title='⚾ Probable Starters',
         description=(
-            f"Streaming board for **{target_date}**. "
+            f"Streaming board for **{datetime.strptime(target_date, '%Y-%m-%d').strftime('%B %-d, %Y')}**. "
             f"Only starters at **{MAX_OWNERSHIP:.0f}% ESPN rostered or lower** are included."
         ),
         color=0x1D428A,
