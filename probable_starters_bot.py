@@ -1251,9 +1251,9 @@ def build_starter_embed(starter, summary):
     rhp_str = fmt_split(rhp) if rhp else '—'
 
     if hand == 'L':
-        split_line = f'**vs LHP:** {lhp_str} | vs RHP: {rhp_str}'
+        split_line = f'**vs LHP:** {lhp_str}'
     elif hand == 'R':
-        split_line = f'vs LHP: {lhp_str} | **vs RHP:** {rhp_str}'
+        split_line = f'**vs RHP:** {rhp_str}'
     else:
         split_line = f'vs LHP: {lhp_str} | vs RHP: {rhp_str}'
 
