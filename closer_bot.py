@@ -10,6 +10,7 @@ import requests
 
 from utils.closer_depth_chart import fetch_closer_depth_chart
 from utils.closer_tracker import build_tracked_relief_map, normalize_name
+from utils.team_data import TEAM_COLORS, normalize_team_abbr, get_logo, normalize_lookup_name
 
 # ---------------- CONFIG ----------------
 
@@ -58,41 +59,6 @@ VELOCITY_MIN_PITCHES = 10
 VELOCITY_MIN_FASTBALLS = 3
 FASTBALL_PITCH_CODES = {"FF", "FT", "SI", "FC", "FA", "FS"}
 
-# ---------------- TEAM STYLE ----------------
-
-TEAM_COLORS = {
-    "ARI": 0xA71930,
-    "ATH": 0x003831,
-    "ATL": 0xCE1141,
-    "BAL": 0xDF4601,
-    "BOS": 0xBD3039,
-    "CHC": 0x0E3386,
-    "CWS": 0x27251F,
-    "CIN": 0xC6011F,
-    "CLE": 0xE31937,
-    "COL": 0x33006F,
-    "DET": 0x0C2340,
-    "HOU": 0xEB6E1F,
-    "KC": 0x004687,
-    "LAA": 0xBA0021,
-    "LAD": 0x005A9C,
-    "MIA": 0x00A3E0,
-    "MIL": 0x12284B,
-    "MIN": 0x002B5C,
-    "NYM": 0xFF5910,
-    "NYY": 0x0C2340,
-    "PHI": 0xE81828,
-    "PIT": 0xFDB827,
-    "SD": 0x2F241D,
-    "SF": 0xFD5A1E,
-    "SEA": 0x005C5C,
-    "STL": 0xC41E3A,
-    "TB": 0x092C5C,
-    "TEX": 0x003278,
-    "TOR": 0x134A8E,
-    "WSH": 0xAB0003,
-}
-
 appearance_cache = {}
 pitching_stats_cache = {}
 player_meta_cache = {}
@@ -104,55 +70,6 @@ player_headshot_index = None
 
 def log(msg: str):
     print(f"[CLOSER] {msg}", flush=True)
-
-
-def normalize_team_abbr(team: str) -> str:
-    key = str(team or "").strip().upper()
-    alias_map = {
-        "AZ": "ARI",
-        "ARI": "ARI",
-        "CHW": "CWS",
-        "CWS": "CWS",
-        "WAS": "WSH",
-        "WSN": "WSH",
-        "WSH": "WSH",
-        "TBR": "TB",
-        "TB": "TB",
-        "KCR": "KC",
-        "KC": "KC",
-        "SDP": "SD",
-        "SD": "SD",
-        "SFG": "SF",
-        "SF": "SF",
-        "OAK": "ATH",
-        "ATH": "ATH",
-    }
-    return alias_map.get(key, key)
-
-
-def get_logo(team: str) -> str:
-    normalized_team = normalize_team_abbr(team)
-    logo_key_map = {
-        "CWS": "chw",
-        "ATH": "oak",
-        "ARI": "ari",
-        "WSH": "wsh",
-        "TB": "tb",
-        "KC": "kc",
-        "SD": "sd",
-        "SF": "sf",
-    }
-    key = logo_key_map.get(normalized_team, normalized_team.lower())
-    return f"https://a.espncdn.com/i/teamlogos/mlb/500/{key}.png"
-
-
-def normalize_lookup_name(name: str) -> str:
-    if not name:
-        return ""
-    cleaned = name.lower()
-    for ch in [".", ",", "'", "`", "-", "_", "(", ")", "[", "]"]:
-        cleaned = cleaned.replace(ch, " ")
-    return " ".join(cleaned.split())
 
 
 def load_player_headshot_index() -> dict:

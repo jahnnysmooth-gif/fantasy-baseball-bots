@@ -9,6 +9,7 @@ from zoneinfo import ZoneInfo
 import aiohttp
 import discord
 import requests
+from utils.team_data import TEAM_COLORS, TEAM_NAME_MAP, normalize_team_abbr, get_logo, normalize_lookup_name
 
 # ---------------- CONFIG ----------------
 
@@ -112,73 +113,6 @@ def is_top_300_player(name: str) -> bool:
     return any(last and entry.split()[-1] == last for entry in top_300)
 
 
-TEAM_COLORS = {
-    "ARI": 0xA71930,
-    "ATH": 0x003831,
-    "ATL": 0xCE1141,
-    "BAL": 0xDF4601,
-    "BOS": 0xBD3039,
-    "CHC": 0x0E3386,
-    "CWS": 0x27251F,
-    "CIN": 0xC6011F,
-    "CLE": 0xE31937,
-    "COL": 0x33006F,
-    "DET": 0x0C2340,
-    "HOU": 0xEB6E1F,
-    "KC": 0x004687,
-    "LAA": 0xBA0021,
-    "LAD": 0x005A9C,
-    "MIA": 0x00A3E0,
-    "MIL": 0x12284B,
-    "MIN": 0x002B5C,
-    "NYM": 0xFF5910,
-    "NYY": 0x0C2340,
-    "PHI": 0xE81828,
-    "PIT": 0xFDB827,
-    "SD": 0x2F241D,
-    "SF": 0xFD5A1E,
-    "SEA": 0x005C5C,
-    "STL": 0xC41E3A,
-    "TB": 0x092C5C,
-    "TEX": 0x003278,
-    "TOR": 0x134A8E,
-    "WSH": 0xAB0003,
-}
-
-TEAM_NAME_MAP = {
-    "ARI": "Diamondbacks",
-    "ATH": "Athletics",
-    "ATL": "Braves",
-    "BAL": "Orioles",
-    "BOS": "Red Sox",
-    "CHC": "Cubs",
-    "CWS": "White Sox",
-    "CIN": "Reds",
-    "CLE": "Guardians",
-    "COL": "Rockies",
-    "DET": "Tigers",
-    "HOU": "Astros",
-    "KC": "Royals",
-    "LAA": "Angels",
-    "LAD": "Dodgers",
-    "MIA": "Marlins",
-    "MIL": "Brewers",
-    "MIN": "Twins",
-    "NYM": "Mets",
-    "NYY": "Yankees",
-    "PHI": "Phillies",
-    "PIT": "Pirates",
-    "SD": "Padres",
-    "SF": "Giants",
-    "SEA": "Mariners",
-    "STL": "Cardinals",
-    "TB": "Rays",
-    "TEX": "Rangers",
-    "TOR": "Blue Jays",
-    "WSH": "Nationals",
-}
-
-
 # ---------------- LOGGING / HELPERS ----------------
 
 def log(msg: str) -> None:
@@ -197,22 +131,6 @@ def safe_int(value, default: int = 0) -> int:
             return default
 
 
-def normalize_team_abbr(team: str | None) -> str:
-    key = str(team or "").strip().upper()
-    aliases = {
-        "AZ": "ARI",
-        "CHW": "CWS",
-        "WAS": "WSH",
-        "WSN": "WSH",
-        "TBR": "TB",
-        "KCR": "KC",
-        "SDP": "SD",
-        "SFG": "SF",
-        "OAK": "ATH",
-    }
-    return aliases.get(key, key)
-
-
 def team_name_from_abbr(team: str | None) -> str:
     normalized = normalize_team_abbr(team)
     return TEAM_NAME_MAP.get(normalized, normalized or "opponent")
@@ -223,29 +141,6 @@ def team_possessive(team_name: str) -> str:
     if cleaned.endswith("s"):
         return f"{cleaned}'"
     return f"{cleaned}'s"
-
-
-def get_logo(team: str | None) -> str:
-    normalized = normalize_team_abbr(team)
-    logo_key_map = {
-        "CWS": "chw",
-        "ATH": "oak",
-        "ARI": "ari",
-        "WSH": "wsh",
-        "TB": "tb",
-        "KC": "kc",
-        "SD": "sd",
-        "SF": "sf",
-    }
-    key = logo_key_map.get(normalized, normalized.lower())
-    return f"https://a.espncdn.com/i/teamlogos/mlb/500/{key}.png"
-
-
-def normalize_lookup_name(name: str) -> str:
-    cleaned = (name or "").lower()
-    for ch in [".", ",", "'", "`", "-", "_", "(", ")", "[", "]"]:
-        cleaned = cleaned.replace(ch, " ")
-    return " ".join(cleaned.split())
 
 
 # ---------------- HEADSHOTS ----------------
