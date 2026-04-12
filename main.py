@@ -26,6 +26,9 @@ try:
     from probable_starters_bot import start_probable_starters_bot
     print("Loaded probable_starters_bot", flush=True)
 
+    from recap_bot import start_recap_bot
+    print("Loaded recap_bot", flush=True)
+
 except Exception as e:
     print("IMPORT CRASH:", repr(e), flush=True)
     import traceback
@@ -105,6 +108,9 @@ async def main() -> None:
     await asyncio.sleep(3)
 
     tasks.append(asyncio.create_task(run_forever("probable_starters_bot", start_probable_starters_bot)))
+    await asyncio.sleep(3)
+
+    tasks.append(asyncio.create_task(run_forever("recap_bot", start_recap_bot)))
 
     await asyncio.gather(*tasks, return_exceptions=True)
 

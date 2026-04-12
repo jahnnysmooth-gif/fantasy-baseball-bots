@@ -5,7 +5,6 @@ import re
 from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any, Optional
-from urllib.parse import quote_plus
 from zoneinfo import ZoneInfo
 
 import aiohttp
@@ -94,18 +93,22 @@ logger.propagate = False  # Don't send to root logger
 class RecapBot:
     """MLB game recap bot - posts YouTube highlight videos when games finish."""
     
+    MLB_YOUTUBE_CHANNEL_ID = "UCoLrcjPV5PbUrUyXq5mjc_A"
+
     def __init__(
         self,
         discord_client: discord.Client,
         http_session: aiohttp.ClientSession,
         channel_id: int,
         state_path: Path,
+        youtube_api_key: str,
         poll_seconds: int = 300,
     ):
         self.client = discord_client
         self.http_session = http_session
         self.channel_id = channel_id
         self.state_path = state_path
+        self.youtube_api_key = youtube_api_key
         self.poll_seconds = poll_seconds
         
         self.posted_game_ids: set[str] = set()
@@ -315,92 +318,60 @@ class RecapBot:
         await asyncio.sleep(2)
 
     async def _search_youtube_highlights(
-        self, 
-        away_team: str, 
-        home_team: str, 
-        game_date: str
+        self,
+        away_team: str,
+        home_team: str,
+        game_date: str,
     ) -> Optional[str]:
-        """Get game highlights from MLB Stats API content endpoint."""
-        
-        # We already have the game_pk from _process_game, but we need to pass it here
-        # For now, let's try a different approach - search MLB.com's video feed
-        
-        logger.info("RECAP_BOT_MLB: === TRYING MLB VIDEO FEED ===")
-        
-        # MLB.com has a video feed API
-        # Format: https://www.mlb.com/video/search?q=Cardinals+Tigers
+        """Search MLB's YouTube channel for game highlights via YouTube Data API v3."""
+        if not self.youtube_api_key:
+            logger.warning("RECAP_BOT_YT: No YOUTUBE_API_KEY set — cannot search for highlights")
+            return None
+
         away_short = self._shorten_team_name(away_team)
         home_short = self._shorten_team_name(home_team)
-        
+
         try:
             date_obj = datetime.fromisoformat(game_date.replace("Z", "+00:00"))
-            date_str = date_obj.strftime("%Y-%m-%d")
-        except:
-            date_str = datetime.now(EASTERN).strftime("%Y-%m-%d")
-        
-        # Try MLB's video search
-        query = f"{away_short} {home_short} highlights {date_str}"
-        mlb_search_url = f"https://www.mlb.com/video/search?q={quote_plus(query)}"
-        
-        logger.info("RECAP_BOT_MLB: Search URL: %s", mlb_search_url)
-        
+            date_str = date_obj.strftime("%B %d, %Y")  # e.g. "April 11, 2025"
+        except Exception:
+            date_str = datetime.now(EASTERN).strftime("%B %d, %Y")
+
+        query = f"{away_short} vs. {home_short} Highlights {date_str}"
+        logger.info("RECAP_BOT_YT: Searching YouTube for: %s", query)
+
+        params = {
+            "part": "snippet",
+            "channelId": self.MLB_YOUTUBE_CHANNEL_ID,
+            "q": query,
+            "type": "video",
+            "order": "date",
+            "maxResults": 1,
+            "key": self.youtube_api_key,
+        }
         try:
-            async with self.http_session.get(mlb_search_url) as response:
-                logger.info("RECAP_BOT_MLB: Response status: %s", response.status)
-                html = await response.text()
-                
-                # Look for YouTube video IDs in MLB.com's search results
-                # They embed YouTube videos, so we can extract the IDs
-                youtube_pattern = r'youtube\.com/watch\?v=([a-zA-Z0-9_-]{11})'
-                matches = re.findall(youtube_pattern, html)
-                
-                if matches:
-                    video_id = matches[0]  # First result
-                    video_url = f"https://www.youtube.com/watch?v={video_id}"
-                    logger.info("RECAP_BOT_MLB: ✓ Found YouTube video from MLB.com: %s", video_url)
-                    return video_url
-                
-                logger.warning("RECAP_BOT_MLB: No YouTube videos found in MLB.com search")
-        except Exception as e:
-            logger.warning("RECAP_BOT_MLB: MLB.com search failed: %s", e)
-        
-        # FALLBACK: Direct YouTube search with very specific query
-        return await self._search_youtube_fallback(away_short, home_short, date_str)
-    
-    async def _search_youtube_fallback(
-        self,
-        away_short: str,
-        home_short: str,
-        date_str: str
-    ) -> Optional[str]:
-        """Fallback: general YouTube search for MLB highlights."""
-        
-        logger.info("RECAP_BOT_YT: === YOUTUBE FALLBACK ===")
-        
-        # Simple YouTube search
-        query = f"MLB {away_short} vs {home_short} highlights {date_str}"
-        search_url = f"https://www.youtube.com/results?search_query={quote_plus(query)}"
-        
-        logger.info("RECAP_BOT_YT: Search URL: %s", search_url)
-        
-        try:
-            async with self.http_session.get(search_url) as response:
-                html = await response.text()
-                
-                # Simple pattern - just find first video ID
-                pattern = r'"videoId":"([a-zA-Z0-9_-]{11})"'
-                match = re.search(pattern, html)
-                
-                if match:
-                    video_id = match.group(1)
-                    video_url = f"https://www.youtube.com/watch?v={video_id}"
-                    logger.info("RECAP_BOT_YT: ✓ Found video: %s", video_url)
-                    return video_url
-                
-                logger.warning("RECAP_BOT_YT: No videos found")
-                return None
-        except Exception as e:
-            logger.exception("RECAP_BOT_YT: Error: %s", e)
+            async with self.http_session.get(
+                "https://www.googleapis.com/youtube/v3/search", params=params
+            ) as response:
+                if response.status != 200:
+                    body = await response.text()
+                    logger.warning("RECAP_BOT_YT: API error %s — %s", response.status, body[:200])
+                    return None
+
+                data = await response.json(content_type=None)
+                items = data.get("items", [])
+                if not items:
+                    logger.info("RECAP_BOT_YT: No results for query: %s", query)
+                    return None
+
+                video_id = items[0]["id"]["videoId"]
+                video_url = f"https://www.youtube.com/watch?v={video_id}"
+                title = items[0]["snippet"]["title"]
+                logger.info("RECAP_BOT_YT: ✓ Found — %s | %s", title, video_url)
+                return video_url
+
+        except Exception as exc:
+            logger.exception("RECAP_BOT_YT: Unexpected error searching YouTube: %s", exc)
             return None
 
     def _build_recap_embed(
@@ -524,10 +495,12 @@ async def start_recap_bot() -> None:
     HIGHLIGHTS_BOT_TOKEN = os.getenv("HIGHLIGHTS_BOT_TOKEN", "")
     RECAP_CHANNEL_ID = int(os.getenv("RECAP_CHANNEL_ID", "0"))
     RECAP_BOT_POLL_SECONDS = int(os.getenv("RECAP_BOT_POLL_SECONDS", "300"))
-    
+    YOUTUBE_API_KEY = os.getenv("YOUTUBE_API_KEY", "")
+
     logger.info("RECAP_BOT: Token present: %s", "Yes" if HIGHLIGHTS_BOT_TOKEN else "NO - MISSING!")
     logger.info("RECAP_BOT: Channel ID: %s", RECAP_CHANNEL_ID)
     logger.info("RECAP_BOT: Poll interval: %s seconds", RECAP_BOT_POLL_SECONDS)
+    logger.info("RECAP_BOT: YouTube API key present: %s", "Yes" if YOUTUBE_API_KEY else "NO - MISSING!")
     
     if not HIGHLIGHTS_BOT_TOKEN:
         logger.error("RECAP_BOT: FATAL - Missing HIGHLIGHTS_BOT_TOKEN environment variable")
@@ -564,6 +537,7 @@ async def start_recap_bot() -> None:
             http_session=http_session,
             channel_id=RECAP_CHANNEL_ID,
             state_path=state_path,
+            youtube_api_key=YOUTUBE_API_KEY,
             poll_seconds=RECAP_BOT_POLL_SECONDS,
         )
         recap_bot_instance.start()
