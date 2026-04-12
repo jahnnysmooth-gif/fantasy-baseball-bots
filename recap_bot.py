@@ -74,7 +74,11 @@ class RecapBot:
     async def _run_loop(self) -> None:
         logger.info("RECAP_BOT: Waiting for Discord client...")
         await self.client.wait_until_ready()
-        logger.info("RECAP_BOT: Client ready, entering loop")
+        logger.info("RECAP_BOT: Client ready, running startup poll for yesterday's games")
+        try:
+            await self._poll_completed_games()
+        except Exception as exc:
+            logger.exception("RECAP_BOT: Error in startup poll: %s", exc)
 
         while not self.client.is_closed():
             try:
@@ -225,9 +229,10 @@ class RecapBot:
                 if status in self.SKIP_STATUSES:
                     continue
                 if status in self.FINAL_STATUSES:
-                    # Record the time we first saw this game as final
                     game_pk = str(game.get("gamePk") or "")
-                    if game_pk and game_pk not in self.game_final_times:
+                    # Only record final time for today's games — yesterday's games
+                    # are already old enough to bypass the 30-min delay
+                    if game_pk and scan_date == today_et and game_pk not in self.game_final_times:
                         self.game_final_times[game_pk] = datetime.now(EASTERN).isoformat()
                         self._save_state()
                         logger.info("RECAP_BOT: Game %s went final, recorded timestamp", game_pk)
