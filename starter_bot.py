@@ -80,6 +80,43 @@ def log_exception(context: str):
     traceback.print_exc()
 
 
+MAX_PLAYER_CACHE_SIZE = 1500
+
+
+def cleanup_starter_caches():
+    """Prune stale entries from all starter bot caches."""
+    today_et = datetime.now(ET).date()
+    current_season = today_et.year
+
+    # Prune date-keyed pitching stats (keep last 30 days)
+    cutoff = today_et - timedelta(days=30)
+    stale_dates = [d for d in list(pitching_stats_cache) if d < cutoff]
+    for d in stale_dates:
+        del pitching_stats_cache[d]
+
+    # Prune season-keyed caches (drop prior seasons)
+    stale_team = [k for k in list(team_hitting_cache) if k[1] < current_season]
+    for k in stale_team:
+        del team_hitting_cache[k]
+
+    stale_mix = [k for k in list(pitch_mix_cache) if k[1] < current_season]
+    for k in stale_mix:
+        del pitch_mix_cache[k]
+
+    # Cap player-id caches to prevent unbounded growth
+    if len(player_meta_cache) > MAX_PLAYER_CACHE_SIZE:
+        player_meta_cache.clear()
+        log("player_meta_cache cleared (size cap reached)")
+
+    if len(career_stats_cache) > MAX_PLAYER_CACHE_SIZE:
+        career_stats_cache.clear()
+        log("career_stats_cache cleared (size cap reached)")
+
+    total_pruned = len(stale_dates) + len(stale_team) + len(stale_mix)
+    if total_pruned:
+        log(f"Cache cleanup: pruned {total_pruned} stale entries")
+
+
 # ---------------- HTTP / RETRY ----------------
 
 def fetch_with_retry(url: str, timeout: int = 30) -> dict | None:
@@ -4089,14 +4126,7 @@ async def loop():
             games = await asyncio.to_thread(get_games)
             log(f"Checking {len(games)} games")
 
-            # Prune pitching_stats_cache to last 30 days to prevent unbounded growth
-            today_et = datetime.now(ET).date()
-            cutoff = today_et - timedelta(days=30)
-            stale_dates = [d for d in list(pitching_stats_cache.keys()) if d < cutoff]
-            for d in stale_dates:
-                del pitching_stats_cache[d]
-            if stale_dates:
-                log(f"Pruned {len(stale_dates)} stale dates from pitching_stats_cache")
+            cleanup_starter_caches()
 
             # Clear next_start_cache each cycle so stale probable data doesn't persist
             next_start_cache.clear()

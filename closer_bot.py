@@ -72,6 +72,30 @@ def log(msg: str):
     print(f"[CLOSER] {msg}", flush=True)
 
 
+MAX_PLAYER_CACHE_SIZE = 1500
+
+
+def cleanup_closer_caches():
+    """Prune date-keyed caches to 30 days; cap player-id caches at MAX_PLAYER_CACHE_SIZE."""
+    from datetime import date as _date
+    cutoff = datetime.now(ET).date() - timedelta(days=30)
+
+    pruned = 0
+    for cache in (pitching_stats_cache, appearance_cache):
+        stale = [k for k in list(cache) if isinstance(k, _date) and k < cutoff]
+        for k in stale:
+            del cache[k]
+        pruned += len(stale)
+
+    if len(player_meta_cache) > MAX_PLAYER_CACHE_SIZE:
+        player_meta_cache.clear()
+        log("player_meta_cache cleared (size cap reached)")
+
+    if pruned:
+        log(f"Cache cleanup: pruned {pruned} stale date entries from pitching/appearance caches")
+
+
+
 def load_player_headshot_index() -> dict:
     global player_headshot_index
     if player_headshot_index is not None:
@@ -3538,6 +3562,7 @@ async def loop():
                     trend_pitcher_cache = []
                     trend_pitcher_cache_date = None
                     log("Season stats cache cleared for new day")
+                    cleanup_closer_caches()
 
                 games = await get_games()
                 log(f"Checking {len(games)} games")
