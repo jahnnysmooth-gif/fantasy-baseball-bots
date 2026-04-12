@@ -366,7 +366,7 @@ class RecapBot:
             "q": query,
             "type": "video",
             "order": "date",
-            "maxResults": 1,
+            "maxResults": 5,
             "key": self.youtube_api_key,
         }
         if published_after:
@@ -387,22 +387,24 @@ class RecapBot:
                     logger.info("RECAP_BOT_YT: No results for: %s", query)
                     return None
 
-                video_id  = items[0]["id"]["videoId"]
-                video_url = f"https://www.youtube.com/watch?v={video_id}"
-                title     = html.unescape(items[0]["snippet"]["title"])
+                # Check each result until we find one whose title matches both teams
+                for item in items:
+                    video_id  = item["id"]["videoId"]
+                    video_url = f"https://www.youtube.com/watch?v={video_id}"
+                    title     = html.unescape(item["snippet"]["title"])
+                    title_lower = title.lower()
 
-                # Validate the returned title contains both team names so we
-                # don't post a video for the wrong game
-                title_lower = title.lower()
-                if away_short.lower() not in title_lower or home_short.lower() not in title_lower:
+                    if away_short.lower() in title_lower and home_short.lower() in title_lower:
+                        logger.info("RECAP_BOT_YT: ✓ Found — %s | %s", title, video_url)
+                        return video_url
+
                     logger.warning(
-                        "RECAP_BOT_YT: Title mismatch — expected '%s vs. %s', got: %s",
+                        "RECAP_BOT_YT: Skipping — expected '%s vs. %s', got: %s",
                         away_short, home_short, title,
                     )
-                    return None
 
-                logger.info("RECAP_BOT_YT: ✓ Found — %s | %s", title, video_url)
-                return video_url
+                logger.info("RECAP_BOT_YT: No matching title in %d results for: %s", len(items), query)
+                return None
 
         except Exception as exc:
             logger.exception("RECAP_BOT_YT: Unexpected error: %s", exc)
