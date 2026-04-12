@@ -1,8 +1,9 @@
 import asyncio
+import html
 import json
 import logging
 import random
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Optional
 from zoneinfo import ZoneInfo
@@ -344,15 +345,22 @@ class RecapBot:
         home_short = self._shorten_team_name(home_team)
 
         try:
-            date_obj = datetime.fromisoformat(game_date.replace("Z", "+00:00"))
-            date_str = date_obj.strftime("%B %d, %Y")
+            date_obj    = datetime.fromisoformat(game_date.replace("Z", "+00:00"))
+            # Convert to Eastern so late west-coast games (e.g. 10pm ET = next day UTC)
+            # use the correct local date in the search query
+            date_et     = date_obj.astimezone(EASTERN)
+            date_str    = date_et.strftime("%B %d, %Y")
+            # publishedAfter = midnight ET on game day, converted to UTC RFC 3339
+            midnight_et      = date_et.replace(hour=0, minute=0, second=0, microsecond=0)
+            published_after  = midnight_et.astimezone(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
         except Exception:
-            date_str = datetime.now(EASTERN).strftime("%B %d, %Y")
+            date_str        = datetime.now(EASTERN).strftime("%B %d, %Y")
+            published_after = None
 
         query = f"{away_short} vs. {home_short} Highlights {date_str}"
-        logger.info("RECAP_BOT_YT: Searching for: %s", query)
+        logger.info("RECAP_BOT_YT: Searching for: %s (publishedAfter: %s)", query, published_after)
 
-        params = {
+        params: dict[str, Any] = {
             "part": "snippet",
             "channelId": self.MLB_YOUTUBE_CHANNEL_ID,
             "q": query,
@@ -361,6 +369,9 @@ class RecapBot:
             "maxResults": 1,
             "key": self.youtube_api_key,
         }
+        if published_after:
+            params["publishedAfter"] = published_after
+
         try:
             async with self.http_session.get(
                 "https://www.googleapis.com/youtube/v3/search", params=params
@@ -378,7 +389,18 @@ class RecapBot:
 
                 video_id  = items[0]["id"]["videoId"]
                 video_url = f"https://www.youtube.com/watch?v={video_id}"
-                title     = items[0]["snippet"]["title"]
+                title     = html.unescape(items[0]["snippet"]["title"])
+
+                # Validate the returned title contains both team names so we
+                # don't post a video for the wrong game
+                title_lower = title.lower()
+                if away_short.lower() not in title_lower or home_short.lower() not in title_lower:
+                    logger.warning(
+                        "RECAP_BOT_YT: Title mismatch — expected '%s vs. %s', got: %s",
+                        away_short, home_short, title,
+                    )
+                    return None
+
                 logger.info("RECAP_BOT_YT: ✓ Found — %s | %s", title, video_url)
                 return video_url
 
