@@ -1,7 +1,7 @@
 import asyncio
 import json
 import logging
-import re
+import random
 from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any, Optional
@@ -13,87 +13,24 @@ import discord
 
 EASTERN = ZoneInfo("America/New_York")
 
-TEAM_COLORS = {
-    "Arizona Diamondbacks": 0xA71930,
-    "Atlanta Braves": 0xCE1141,
-    "Baltimore Orioles": 0xDF4601,
-    "Boston Red Sox": 0xBD3039,
-    "Chicago Cubs": 0x0E3386,
-    "Chicago White Sox": 0x27251F,
-    "Cincinnati Reds": 0xC6011F,
-    "Cleveland Guardians": 0x0C2340,
-    "Colorado Rockies": 0x33006F,
-    "Detroit Tigers": 0x0C2340,
-    "Houston Astros": 0xEB6E1F,
-    "Kansas City Royals": 0x004687,
-    "Los Angeles Angels": 0xBA0021,
-    "Los Angeles Dodgers": 0x005A9C,
-    "Miami Marlins": 0x00A3E0,
-    "Milwaukee Brewers": 0x12284B,
-    "Minnesota Twins": 0x002B5C,
-    "New York Mets": 0x002D72,
-    "New York Yankees": 0x0C2340,
-    "Athletics": 0x003831,
-    "Philadelphia Phillies": 0xE81828,
-    "Pittsburgh Pirates": 0xFDB827,
-    "San Diego Padres": 0x2F241D,
-    "San Francisco Giants": 0xFD5A1E,
-    "Seattle Mariners": 0x005C5C,
-    "St. Louis Cardinals": 0xC41E3A,
-    "Tampa Bay Rays": 0x092C5C,
-    "Texas Rangers": 0x003278,
-    "Toronto Blue Jays": 0x134A8E,
-    "Washington Nationals": 0xAB0003,
-}
-DEFAULT_EMBED_COLOR = 0x1D428A
-
-# Team ID to ESPN abbreviation mapping for logos
-TEAM_ID_TO_ABBR = {
-    109: "ari",  # Diamondbacks
-    144: "atl",  # Braves
-    110: "bal",  # Orioles
-    111: "bos",  # Red Sox
-    112: "chc",  # Cubs
-    145: "chw",  # White Sox (chw not cws!)
-    113: "cin",  # Reds
-    114: "cle",  # Guardians
-    115: "col",  # Rockies
-    116: "det",  # Tigers
-    117: "hou",  # Astros
-    118: "kc",   # Royals
-    108: "laa",  # Angels
-    119: "lad",  # Dodgers
-    146: "mia",  # Marlins
-    158: "mil",  # Brewers
-    142: "min",  # Twins
-    121: "nym",  # Mets
-    147: "nyy",  # Yankees
-    133: "oak",  # Athletics
-    143: "phi",  # Phillies
-    134: "pit",  # Pirates
-    135: "sd",   # Padres
-    137: "sf",   # Giants
-    136: "sea",  # Mariners
-    138: "stl",  # Cardinals
-    139: "tb",   # Rays
-    140: "tex",  # Rangers
-    141: "tor",  # Blue Jays
-    120: "wsh",  # Nationals
-}
+VIDEO_SEARCH_DELAY_MINUTES = 30  # Wait this long after a game goes final before searching YouTube
+MAX_SEARCH_ATTEMPTS = 25         # Give up on a game after this many failed YouTube searches
 
 logger = logging.getLogger("recap_bot")
-# Configure logger to output to stdout so Render can see it
 handler = logging.StreamHandler()
 handler.setFormatter(logging.Formatter('[%(asctime)s] [RECAP_BOT] %(message)s'))
 logger.addHandler(handler)
 logger.setLevel(logging.INFO)
-logger.propagate = False  # Don't send to root logger
+logger.propagate = False
 
 
 class RecapBot:
     """MLB game recap bot - posts YouTube highlight videos when games finish."""
-    
+
     MLB_YOUTUBE_CHANNEL_ID = "UCoLrcjPV5PbUrUyXq5mjc_A"
+
+    FINAL_STATUSES = {"final", "game over", "completed early", "completed"}
+    SKIP_STATUSES  = {"postponed", "suspended", "delayed start", "cancelled"}
 
     def __init__(
         self,
@@ -102,128 +39,211 @@ class RecapBot:
         channel_id: int,
         state_path: Path,
         youtube_api_key: str,
-        poll_seconds: int = 300,
     ):
         self.client = discord_client
         self.http_session = http_session
         self.channel_id = channel_id
         self.state_path = state_path
         self.youtube_api_key = youtube_api_key
-        self.poll_seconds = poll_seconds
-        
+
         self.posted_game_ids: set[str] = set()
-        self.checked_no_recap: dict[str, int] = {}  # game_pk -> attempt_count
-        
+        self.checked_no_recap: dict[str, int] = {}   # game_pk -> attempt count
+        self.game_final_times: dict[str, str] = {}   # game_pk -> ISO timestamp when first detected final
+
         self._load_state()
         self._task: Optional[asyncio.Task] = None
 
+    # ------------------------------------------------------------------
+    # Lifecycle
+    # ------------------------------------------------------------------
+
     def start(self) -> None:
-        """Start the recap bot polling loop."""
         if self._task is None or self._task.done():
             self._task = asyncio.create_task(self._run_loop())
-            logger.info("RECAP_BOT: Started, polling every %s seconds", self.poll_seconds)
+            logger.info("RECAP_BOT: Started")
 
     def stop(self) -> None:
-        """Stop the recap bot polling loop."""
         if self._task and not self._task.done():
             self._task.cancel()
             logger.info("RECAP_BOT: Stopped")
 
+    # ------------------------------------------------------------------
+    # Main loop
+    # ------------------------------------------------------------------
+
     async def _run_loop(self) -> None:
-        """Main polling loop."""
-        logger.info("RECAP_BOT: _run_loop started, waiting for client ready...")
+        logger.info("RECAP_BOT: Waiting for Discord client...")
         await self.client.wait_until_ready()
-        logger.info("RECAP_BOT: Client ready!")
-        
-        # Run immediately on startup (don't wait for first interval)
-        logger.info("RECAP_BOT: Running initial poll immediately...")
-        try:
-            await self._poll_completed_games()
-        except Exception as exc:
-            logger.exception("RECAP_BOT: Error in initial poll: %s", exc)
-        
-        logger.info("RECAP_BOT: Entering main polling loop...")
+        logger.info("RECAP_BOT: Client ready, entering loop")
+
         while not self.client.is_closed():
             try:
-                await asyncio.sleep(self.poll_seconds)
+                today = datetime.now(EASTERN).date()
+                todays_games = await self._fetch_schedule(today)
+
+                if not self._any_games_final(todays_games):
+                    logger.info("RECAP_BOT: No games final yet today — checking again in 30 min")
+                    await asyncio.sleep(1800)
+                    continue
+
+                # At least one game is final — run the poll
                 await self._poll_completed_games()
+
+                if self._is_day_complete(todays_games):
+                    sleep_secs = await self._seconds_until_first_game(today + timedelta(days=1))
+                    logger.info(
+                        "RECAP_BOT: Day complete — sleeping %.0f seconds until tomorrow's first game",
+                        sleep_secs,
+                    )
+                    await asyncio.sleep(sleep_secs)
+                else:
+                    sleep_secs = random.uniform(300, 420)
+                    logger.info("RECAP_BOT: Next poll in %.0f seconds", sleep_secs)
+                    await asyncio.sleep(sleep_secs)
+
             except Exception as exc:
-                logger.exception("RECAP_BOT: Error in poll loop: %s", exc)
+                logger.exception("RECAP_BOT: Unhandled error in run loop: %s", exc)
+                await asyncio.sleep(60)
+
+    # ------------------------------------------------------------------
+    # State
+    # ------------------------------------------------------------------
 
     def _load_state(self) -> None:
         if not self.state_path.exists():
             return
         try:
             data = json.loads(self.state_path.read_text(encoding="utf-8"))
-            self.posted_game_ids = set(data.get("posted_game_ids", []))
+            self.posted_game_ids  = set(data.get("posted_game_ids", []))
             self.checked_no_recap = data.get("checked_no_recap", {})
+            self.game_final_times = data.get("game_final_times", {})
             logger.info(
-                "RECAP_BOT: Loaded state - %s game ids, %s pending recaps",
+                "RECAP_BOT: Loaded state — %d posted, %d pending, %d final-time records",
                 len(self.posted_game_ids),
                 len(self.checked_no_recap),
+                len(self.game_final_times),
             )
         except Exception as exc:
-            logger.warning("RECAP_BOT: Could not load state file %s: %s", self.state_path, exc)
+            logger.warning("RECAP_BOT: Could not load state: %s", exc)
 
     def _save_state(self) -> None:
-        # Cleanup old entries if state gets too large (keep ~10 days worth)
         if len(self.posted_game_ids) > 1000:
             self._cleanup_old_state()
-        
         data = {
-            "posted_game_ids": sorted(self.posted_game_ids),
+            "posted_game_ids":  sorted(self.posted_game_ids),
             "checked_no_recap": self.checked_no_recap,
+            "game_final_times": self.game_final_times,
             "saved_at": datetime.now(EASTERN).isoformat(),
         }
         self.state_path.write_text(json.dumps(data, indent=2), encoding="utf-8")
 
     def _cleanup_old_state(self) -> None:
-        """Keep only the most recent 800 game IDs to prevent unbounded growth."""
         if len(self.posted_game_ids) <= 800:
             return
-        
-        sorted_ids = sorted(self.posted_game_ids)
-        keep_count = 800
-        self.posted_game_ids = set(sorted_ids[-keep_count:])
-        logger.info("RECAP_BOT: Cleaned up state - kept %s most recent game IDs", keep_count)
+        sorted_ids = sorted(self.posted_game_ids, key=lambda x: int(x) if x.isdigit() else 0)
+        self.posted_game_ids = set(sorted_ids[-800:])
+        logger.info("RECAP_BOT: Trimmed state to 800 most recent game IDs")
+
+    # ------------------------------------------------------------------
+    # Schedule helpers
+    # ------------------------------------------------------------------
+
+    def _any_games_final(self, games: list[dict]) -> bool:
+        return any(
+            self._game_status(g) in self.FINAL_STATUSES
+            for g in games
+        )
+
+    def _is_day_complete(self, games: list[dict]) -> bool:
+        """True when every non-skipped game is final AND handled (posted or retries exhausted)."""
+        for game in games:
+            status = self._game_status(game)
+            if status in self.SKIP_STATUSES:
+                continue
+            if status not in self.FINAL_STATUSES:
+                return False  # Still in progress or scheduled
+            game_pk = str(game.get("gamePk") or "")
+            if not game_pk:
+                continue
+            if game_pk in self.posted_game_ids:
+                continue
+            if self.checked_no_recap.get(game_pk, 0) >= MAX_SEARCH_ATTEMPTS:
+                continue
+            return False  # Final but not yet handled
+        return True
+
+    async def _seconds_until_first_game(self, date) -> float:
+        """Seconds from now until the first scheduled game on the given date."""
+        games = await self._fetch_schedule(date)
+        if not games:
+            return 86400  # No games — sleep 24 hours
+
+        earliest: Optional[datetime] = None
+        for game in games:
+            raw = game.get("gameDate") or ""
+            if not raw:
+                continue
+            try:
+                t = datetime.fromisoformat(raw.replace("Z", "+00:00"))
+                if earliest is None or t < earliest:
+                    earliest = t
+            except Exception:
+                continue
+
+        if earliest is None:
+            return 86400
+
+        now = datetime.now(earliest.tzinfo)
+        delta = (earliest - now).total_seconds() - 300  # arrive 5 min early
+        return max(delta, 300)
+
+    @staticmethod
+    def _game_status(game: dict) -> str:
+        return (((game.get("status") or {}).get("detailedState") or "").strip().lower())
+
+    # ------------------------------------------------------------------
+    # Polling
+    # ------------------------------------------------------------------
 
     async def _poll_completed_games(self) -> None:
-        logger.info("RECAP_BOT: === _poll_completed_games CALLED ===")
         channel = self.client.get_channel(self.channel_id)
         if channel is None:
-            logger.error("RECAP_BOT: Channel %s not found. Check RECAP_CHANNEL_ID.", self.channel_id)
+            logger.error("RECAP_BOT: Channel %s not found", self.channel_id)
             return
         if not isinstance(channel, discord.abc.Messageable):
-            logger.error("RECAP_BOT: Channel %s is not messageable.", self.channel_id)
+            logger.error("RECAP_BOT: Channel %s is not messageable", self.channel_id)
             return
 
-        today_et = datetime.now(EASTERN).date()
+        today_et     = datetime.now(EASTERN).date()
         yesterday_et = today_et - timedelta(days=1)
-        dates_to_scan = [yesterday_et]  # Scan yesterday for testing (games finish late)
 
-        logger.info("RECAP_BOT: Scanning MLB schedule for %s", ", ".join(str(d) for d in dates_to_scan))
-
-        all_finished_games = []
-        for scan_date in dates_to_scan:
+        finished_games = []
+        for scan_date in [yesterday_et, today_et]:
             games = await self._fetch_schedule(scan_date)
             for game in games:
-                status = (((game.get("status") or {}).get("detailedState") or "").strip().lower())
-                skip_statuses = {"postponed", "suspended", "delayed start", "cancelled"}
-                if status in skip_statuses:
+                status = self._game_status(game)
+                if status in self.SKIP_STATUSES:
                     continue
-                if status in {"final", "game over", "completed early", "completed"}:
-                    all_finished_games.append(game)
-        
-        # For testing: only process the last 3 finished games
-        games_to_post = all_finished_games[-3:] if len(all_finished_games) > 3 else all_finished_games
-        logger.info("RECAP_BOT: Found %d finished games, posting last %d for testing", 
-                    len(all_finished_games), len(games_to_post))
-        
-        for game in games_to_post:
+                if status in self.FINAL_STATUSES:
+                    # Record the time we first saw this game as final
+                    game_pk = str(game.get("gamePk") or "")
+                    if game_pk and game_pk not in self.game_final_times:
+                        self.game_final_times[game_pk] = datetime.now(EASTERN).isoformat()
+                        self._save_state()
+                        logger.info("RECAP_BOT: Game %s went final, recorded timestamp", game_pk)
+                    finished_games.append(game)
+
+        logger.info("RECAP_BOT: %d finished games across yesterday + today", len(finished_games))
+
+        for game in finished_games:
             try:
                 await self._process_game(channel, game)
             except Exception as exc:
-                logger.exception("RECAP_BOT: Failed processing game %s: %s", game.get("gamePk") or "unknown", exc)
+                logger.exception(
+                    "RECAP_BOT: Failed processing game %s: %s",
+                    game.get("gamePk") or "unknown",
+                    exc,
+                )
 
     async def _fetch_json(self, url: str) -> dict[str, Any]:
         for attempt in range(3):
@@ -234,88 +254,76 @@ class RecapBot:
             except (aiohttp.ClientError, asyncio.TimeoutError) as exc:
                 if attempt == 2:
                     raise
-                logger.warning("RECAP_BOT: Fetch failed (attempt %d/3) for %s: %s", attempt + 1, url, exc)
+                logger.warning("RECAP_BOT: Fetch failed (attempt %d/3) %s: %s", attempt + 1, url, exc)
                 await asyncio.sleep(2 ** attempt)
         return {}
 
     async def _fetch_schedule(self, date_obj) -> list[dict[str, Any]]:
-        url = (
-            "https://statsapi.mlb.com/api/v1/schedule"
-            f"?sportId=1&date={date_obj.isoformat()}"
-        )
+        url = f"https://statsapi.mlb.com/api/v1/schedule?sportId=1&date={date_obj.isoformat()}"
         payload = await self._fetch_json(url)
         dates = payload.get("dates", [])
         if not dates:
             return []
         return dates[0].get("games", [])
 
+    # ------------------------------------------------------------------
+    # Per-game processing
+    # ------------------------------------------------------------------
+
     async def _process_game(self, channel: discord.abc.Messageable, game: dict[str, Any]) -> None:
         game_pk = str(game.get("gamePk") or "")
         if not game_pk or game_pk in self.posted_game_ids:
             return
-
-        away_team = (((game.get("teams") or {}).get("away") or {}).get("team") or {})
-        home_team = (((game.get("teams") or {}).get("home") or {}).get("team") or {})
-        away = away_team.get("name", "Away Team")
-        home = home_team.get("name", "Home Team")
-        away_id = away_team.get("id")
-        home_id = home_team.get("id")
-        away_score = int((((game.get("teams") or {}).get("away") or {}).get("score") or 0))
-        home_score = int((((game.get("teams") or {}).get("home") or {}).get("score") or 0))
-        game_date_raw = game.get("gameDate") or ""
-        game_number = game.get("gameNumber", 1)
-
-        logger.info("RECAP_BOT: Processing game %s - %s at %s", game_pk, away, home)
-
-        # Search YouTube for highlights
-        youtube_url = await self._search_youtube_highlights(away, home, game_date_raw)
-        
-        if not youtube_url:
-            # Track attempts to find video - retry up to 5 times before giving up
-            attempts = self.checked_no_recap.get(game_pk, 0)
-            if attempts < 5:
-                self.checked_no_recap[game_pk] = attempts + 1
-                self._save_state()
-                logger.info(
-                    "RECAP_BOT: No YouTube video found yet for %s at %s (%s) - attempt %d/5",
-                    away,
-                    home,
-                    game_pk,
-                    attempts + 1,
-                )
+        if self.checked_no_recap.get(game_pk, 0) >= MAX_SEARCH_ATTEMPTS:
             return
 
-        # Video found - remove from retry tracking if present
+        away = (((game.get("teams") or {}).get("away") or {}).get("team") or {}).get("name", "Away Team")
+        home = (((game.get("teams") or {}).get("home") or {}).get("team") or {}).get("name", "Home Team")
+        game_date_raw = game.get("gameDate") or ""
+
+        # Enforce 30-minute wait after game goes final before searching YouTube
+        final_time_str = self.game_final_times.get(game_pk)
+        if final_time_str:
+            final_time = datetime.fromisoformat(final_time_str)
+            elapsed = (datetime.now(EASTERN) - final_time).total_seconds() / 60
+            if elapsed < VIDEO_SEARCH_DELAY_MINUTES:
+                remaining = VIDEO_SEARCH_DELAY_MINUTES - elapsed
+                logger.info(
+                    "RECAP_BOT: %s at %s — waiting %.0f more min before searching",
+                    away, home, remaining,
+                )
+                return
+
+        logger.info("RECAP_BOT: Searching for %s at %s (attempt %d)",
+                    away, home, self.checked_no_recap.get(game_pk, 0) + 1)
+
+        youtube_url = await self._search_youtube_highlights(away, home, game_date_raw)
+
+        if not youtube_url:
+            attempts = self.checked_no_recap.get(game_pk, 0) + 1
+            self.checked_no_recap[game_pk] = attempts
+            self._save_state()
+            logger.info(
+                "RECAP_BOT: No video yet for %s at %s — attempt %d/%d",
+                away, home, attempts, MAX_SEARCH_ATTEMPTS,
+            )
+            return
+
         if game_pk in self.checked_no_recap:
             del self.checked_no_recap[game_pk]
 
-        winner_name = self._winner_name(away, home, away_score, home_score)
-        winner_id = away_id if away_score > home_score else home_id
-        
-        embed = self._build_recap_embed(
-            away=away,
-            home=home,
-            away_score=away_score,
-            home_score=home_score,
-            winner_name=winner_name,
-            winner_id=winner_id,
-            game_date_raw=game_date_raw,
-            game_number=game_number,
-            video_url=youtube_url,
-        )
-
-        # Post YouTube URL first (Discord will auto-embed)
         await channel.send(content=youtube_url)
-        
-        # Post custom embed as a follow-up (doesn't break YouTube embed)
-        await channel.send(embed=embed)
 
-        logger.info("RECAP_BOT: ✓ Posted %s at %s (%d-%d) | %s", away, home, away_score, home_score, youtube_url)
+        logger.info("RECAP_BOT: ✓ Posted %s at %s | %s", away, home, youtube_url)
         self.posted_game_ids.add(game_pk)
         self._save_state()
-        
-        # Throttle to avoid blasting channel when many games finish simultaneously
-        await asyncio.sleep(2)
+
+        # Random delay between posts so the channel doesn't get flooded
+        await asyncio.sleep(random.uniform(15, 45))
+
+    # ------------------------------------------------------------------
+    # YouTube search
+    # ------------------------------------------------------------------
 
     async def _search_youtube_highlights(
         self,
@@ -323,9 +331,8 @@ class RecapBot:
         home_team: str,
         game_date: str,
     ) -> Optional[str]:
-        """Search MLB's YouTube channel for game highlights via YouTube Data API v3."""
         if not self.youtube_api_key:
-            logger.warning("RECAP_BOT_YT: No YOUTUBE_API_KEY set — cannot search for highlights")
+            logger.warning("RECAP_BOT_YT: No YOUTUBE_API_KEY set")
             return None
 
         away_short = self._shorten_team_name(away_team)
@@ -333,12 +340,12 @@ class RecapBot:
 
         try:
             date_obj = datetime.fromisoformat(game_date.replace("Z", "+00:00"))
-            date_str = date_obj.strftime("%B %d, %Y")  # e.g. "April 11, 2025"
+            date_str = date_obj.strftime("%B %d, %Y")
         except Exception:
             date_str = datetime.now(EASTERN).strftime("%B %d, %Y")
 
         query = f"{away_short} vs. {home_short} Highlights {date_str}"
-        logger.info("RECAP_BOT_YT: Searching YouTube for: %s", query)
+        logger.info("RECAP_BOT_YT: Searching for: %s", query)
 
         params = {
             "part": "snippet",
@@ -361,92 +368,24 @@ class RecapBot:
                 data = await response.json(content_type=None)
                 items = data.get("items", [])
                 if not items:
-                    logger.info("RECAP_BOT_YT: No results for query: %s", query)
+                    logger.info("RECAP_BOT_YT: No results for: %s", query)
                     return None
 
-                video_id = items[0]["id"]["videoId"]
+                video_id  = items[0]["id"]["videoId"]
                 video_url = f"https://www.youtube.com/watch?v={video_id}"
-                title = items[0]["snippet"]["title"]
+                title     = items[0]["snippet"]["title"]
                 logger.info("RECAP_BOT_YT: ✓ Found — %s | %s", title, video_url)
                 return video_url
 
         except Exception as exc:
-            logger.exception("RECAP_BOT_YT: Unexpected error searching YouTube: %s", exc)
+            logger.exception("RECAP_BOT_YT: Unexpected error: %s", exc)
             return None
 
-    def _build_recap_embed(
-        self,
-        *,
-        away: str,
-        home: str,
-        away_score: int,
-        home_score: int,
-        winner_name: str,
-        winner_id: Optional[int],
-        game_date_raw: str,
-        game_number: int,
-        video_url: str,
-    ) -> discord.Embed:
-        display_date = self._format_game_date(game_date_raw)
-        color = TEAM_COLORS.get(winner_name, DEFAULT_EMBED_COLOR)
-        
-        # Handle doubleheader games
-        title = f"⚾ {away} at {home}"
-        if game_number > 1:
-            title += f" (Game {game_number})"
+    # ------------------------------------------------------------------
+    # Team name helpers
+    # ------------------------------------------------------------------
 
-        # No URL in embed - it's already posted above
-        embed = discord.Embed(
-            title=title,
-            color=color,
-        )
-        
-        # Put winner first in score line
-        if away_score > home_score:
-            # Away team won
-            score_text = f"{away} {away_score}, {home} {home_score}"
-        else:
-            # Home team won
-            score_text = f"{home} {home_score}, {away} {away_score}"
-        
-        embed.add_field(name="Final", value=score_text, inline=False)
-        
-        # Normalize embed width by padding to minimum character count
-        # Discord embed width is based on content length, so we pad short content
-        MIN_WIDTH_CHARS = 200
-        current_length = len(score_text)
-        if current_length < MIN_WIDTH_CHARS:
-            # Add invisible zero-width spaces to reach minimum
-            padding = "\u200B" * (MIN_WIDTH_CHARS - current_length)
-            embed.description = padding
-        
-        # Add winner team logo (ESPN CDN - uses lowercase abbreviations)
-        if winner_id and winner_id in TEAM_ID_TO_ABBR:
-            team_abbr = TEAM_ID_TO_ABBR[winner_id]
-            embed.set_thumbnail(url=f"https://a.espncdn.com/i/teamlogos/mlb/500/{team_abbr}.png")
-        
-        embed.set_footer(text=f"MLB Highlights • {display_date}")
-        return embed
-
-    def _winner_name(self, away: str, home: str, away_score: int, home_score: int) -> str:
-        if away_score > home_score:
-            return away
-        if home_score > away_score:
-            return home
-        return home
-
-    def _format_game_date(self, game_date_raw: str) -> str:
-        if not game_date_raw:
-            return datetime.now(EASTERN).strftime("%b %d, %Y")
-        try:
-            parsed = datetime.fromisoformat(game_date_raw.replace("Z", "+00:00"))
-            return parsed.astimezone(EASTERN).strftime("%b %d, %Y")
-        except ValueError:
-            return game_date_raw[:10]
-    
     def _shorten_team_name(self, full_name: str) -> str:
-        """Convert full team name to MLB's shortened format used in video titles."""
-        # MLB uses shortened versions like: "D-backs", "A's", "Rays", "Tigers"
         shortenings = {
             "Arizona Diamondbacks": "D-backs",
             "Atlanta Braves": "Braves",
@@ -489,60 +428,51 @@ class RecapBot:
 async def start_recap_bot() -> None:
     """Entry point called by main.py's run_forever wrapper."""
     import os
-    
-    logger.info("RECAP_BOT: === STARTING UP ===")
-    
-    HIGHLIGHTS_BOT_TOKEN = os.getenv("HIGHLIGHTS_BOT_TOKEN", "")
-    RECAP_CHANNEL_ID = int(os.getenv("RECAP_CHANNEL_ID", "0"))
-    RECAP_BOT_POLL_SECONDS = int(os.getenv("RECAP_BOT_POLL_SECONDS", "300"))
-    YOUTUBE_API_KEY = os.getenv("YOUTUBE_API_KEY", "")
 
-    logger.info("RECAP_BOT: Token present: %s", "Yes" if HIGHLIGHTS_BOT_TOKEN else "NO - MISSING!")
-    logger.info("RECAP_BOT: Channel ID: %s", RECAP_CHANNEL_ID)
-    logger.info("RECAP_BOT: Poll interval: %s seconds", RECAP_BOT_POLL_SECONDS)
+    logger.info("RECAP_BOT: === STARTING UP ===")
+
+    HIGHLIGHTS_BOT_TOKEN = os.getenv("HIGHLIGHTS_BOT_TOKEN", "")
+    RECAP_CHANNEL_ID     = int(os.getenv("RECAP_CHANNEL_ID", "0"))
+    YOUTUBE_API_KEY      = os.getenv("YOUTUBE_API_KEY", "")
+
+    logger.info("RECAP_BOT: Token present:          %s", "Yes" if HIGHLIGHTS_BOT_TOKEN else "NO - MISSING!")
+    logger.info("RECAP_BOT: Channel ID:             %s", RECAP_CHANNEL_ID)
     logger.info("RECAP_BOT: YouTube API key present: %s", "Yes" if YOUTUBE_API_KEY else "NO - MISSING!")
-    
+
     if not HIGHLIGHTS_BOT_TOKEN:
-        logger.error("RECAP_BOT: FATAL - Missing HIGHLIGHTS_BOT_TOKEN environment variable")
+        logger.error("RECAP_BOT: FATAL - Missing HIGHLIGHTS_BOT_TOKEN")
         raise SystemExit("Missing HIGHLIGHTS_BOT_TOKEN environment variable")
     if RECAP_CHANNEL_ID <= 0:
-        logger.warning("RECAP_BOT: RECAP_CHANNEL_ID not set - bot will not run")
-        # Sleep forever to keep the task alive but inactive
-        await asyncio.sleep(float('inf'))
+        logger.warning("RECAP_BOT: RECAP_CHANNEL_ID not set — bot will not run")
+        await asyncio.sleep(float("inf"))
         return
-    
-    # State directory (Render persistent disk)
+
     state_dir = Path("/opt/render/project/.data")
     state_dir.mkdir(parents=True, exist_ok=True)
     state_path = state_dir / "recap_bot_state.json"
-    
+
     intents = discord.Intents.default()
-    client = discord.Client(intents=intents)
-    
+    client  = discord.Client(intents=intents)
+
     http_session: Optional[aiohttp.ClientSession] = None
     recap_bot_instance: Optional[RecapBot] = None
-    
+
     @client.event
     async def on_ready() -> None:
         nonlocal http_session, recap_bot_instance
         logger.info("RECAP_BOT: Logged in as %s (%s)", client.user, client.user.id if client.user else "n/a")
-        
-        # Create shared HTTP session
-        timeout = aiohttp.ClientTimeout(total=30)
-        http_session = aiohttp.ClientSession(timeout=timeout)
-        
-        # Initialize and start the recap bot
+
+        http_session = aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=30))
+
         recap_bot_instance = RecapBot(
             discord_client=client,
             http_session=http_session,
             channel_id=RECAP_CHANNEL_ID,
             state_path=state_path,
             youtube_api_key=YOUTUBE_API_KEY,
-            poll_seconds=RECAP_BOT_POLL_SECONDS,
         )
         recap_bot_instance.start()
-        logger.info("RECAP_BOT: Started - polling every %s seconds", RECAP_BOT_POLL_SECONDS)
-    
+
     try:
         logger.info("RECAP_BOT: Connecting to Discord...")
         await client.start(HIGHLIGHTS_BOT_TOKEN)
@@ -550,7 +480,6 @@ async def start_recap_bot() -> None:
         logger.exception("RECAP_BOT: FATAL - Failed to start Discord client: %s", e)
         raise
     finally:
-        # Cleanup
         if recap_bot_instance:
             recap_bot_instance.stop()
         if http_session and not http_session.closed:
