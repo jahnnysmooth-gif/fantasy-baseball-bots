@@ -3,6 +3,7 @@ import json
 import os
 import random
 import time
+import traceback
 from datetime import datetime, date, timedelta, timezone
 from zoneinfo import ZoneInfo
 
@@ -107,6 +108,11 @@ def log(msg: str):
     print(f"[STARTER] {msg}", flush=True)
 
 
+def log_exception(context: str):
+    log(context)
+    traceback.print_exc()
+
+
 # ---------------- HTTP / RETRY ----------------
 
 def fetch_with_retry(url: str, timeout: int = 30) -> dict | None:
@@ -121,7 +127,7 @@ def fetch_with_retry(url: str, timeout: int = 30) -> dict | None:
                 log(f"Request failed (attempt {attempt}/{API_RETRY_ATTEMPTS}): {e} — retrying in {wait}s")
                 time.sleep(wait)
             else:
-                log(f"Request failed after {API_RETRY_ATTEMPTS} attempts: {url} — {e}")
+                log_exception(f"Request failed after {API_RETRY_ATTEMPTS} attempts: {url} — {e}")
     return None
 
 
@@ -310,12 +316,12 @@ def apply_player_card_chrome(embed: discord.Embed, name: str, team: str):
             embed.set_thumbnail(url=headshot_url)
             return
         except Exception:
-            pass
+            log_exception(f"Failed to set player headshot thumbnail for {name}")
 
     try:
         embed.set_thumbnail(url=logo_url)
     except Exception:
-        pass
+        log_exception(f"Failed to set fallback team logo thumbnail for {name}")
 
 
 # ---------------- STATE ----------------
@@ -334,7 +340,7 @@ def load_state():
         if isinstance(data, dict):
             base.update(data)
     except Exception:
-        pass
+        log_exception(f"Failed to load starter state from {STATE_FILE}")
 
     return base
 
