@@ -159,6 +159,7 @@ class RecapBot:
             "saved_at": datetime.now(EASTERN).isoformat(),
         }
         self.state_path.write_text(json.dumps(data, indent=2), encoding="utf-8")
+        self.state_path.chmod(0o666)
 
     def _cleanup_old_state(self) -> None:
         if len(self.posted_game_ids) <= 800:
