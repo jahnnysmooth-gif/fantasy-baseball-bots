@@ -27,13 +27,13 @@ LIVE_URL = "https://statsapi.mlb.com/api/v1.1/game/{}/feed/live"
 PLAYER_SEASON_STATS_URL = "https://statsapi.mlb.com/api/v1/people/{}/stats?stats=season&group=pitching&sportId=1&gameType=R&season={}"
 
 POLL_MINUTES = 10
-POST_STAGGER_SECONDS = 45
 MAX_POSTS_PER_LOOP = 4
 GAME_RECENCY_HOURS = 15  # use start time as proxy; 15h covers a game starting at 10 PM + 3h game + buffer
 RESET_CLOSER_STATE = os.getenv("RESET_CLOSER_STATE", "").lower() in {"1", "true", "yes"}
 ANTHROPIC_API_KEY = os.getenv("bullpen_bot_summary", "")
 DEPTH_CHART_OVERRIDE_CHANNEL_ID = int(os.getenv("DEPTH_CHART_OVERRIDE_CHANNEL_ID", "1484232761597366412"))
 TREND_STATE_FILE = "state/closer/trend_state.json"
+LEVERAGE_STATE_FILE = "state/closer/leverage_state.json"
 
 TREND_FAMILY_COOLDOWN_MINUTES = {
     "strikeout": 240,    # raised — bat-missing trends are high signal, don't flood
@@ -47,12 +47,16 @@ TREND_FAMILY_COOLDOWN_MINUTES = {
     "workload": 120,     # fatigue flags can fire more often, different pitchers
     "misc": 120,
 }
-TREND_RANDOM_INTERVAL_MIN_MINUTES = 6
-TREND_RANDOM_INTERVAL_MAX_MINUTES = 16
+TREND_RANDOM_INTERVAL_MIN_MINUTES = 4
+TREND_RANDOM_INTERVAL_MAX_MINUTES = 25
 TREND_HOURS_START = 2   # 2 AM ET — trend blurbs + velocity alerts window opens
 CARD_HOURS_START = 14   # 2 PM ET — tracked card posting window opens
 CARD_HOURS_END = 2      # 2 AM ET — tracked card posting window closes (crosses midnight)
 TREND_MAX_PER_HOUR = 2
+LEVERAGE_K9_THRESHOLD = 10.0
+LEVERAGE_MIN_APPEARANCES = 5
+LEVERAGE_HOURS_START = 2   # 2 AM ET
+LEVERAGE_HOURS_END = 14    # 2 PM ET
 VELOCITY_DELTA_THRESHOLD = 1.0
 VELOCITY_MIN_PITCHES = 10
 VELOCITY_MIN_FASTBALLS = 3
@@ -209,7 +213,7 @@ def apply_player_card_chrome(embed: discord.Embed, name: str, team: str):
 # ---------------- STATE ----------------
 
 def load_state():
-    base = {"posted": [], "trend_posted": {}, "trend_history": {}, "trend_last_post_at": None, "trend_next_eligible_at": None, "trend_post_count_by_hour": {}, "trend_total_by_date": {}, "trend_family_last_post_at": {}, "velocity_posted": {}}
+    base = {"posted": [], "trend_posted": {}, "trend_history": {}, "trend_last_post_at": None, "trend_next_eligible_at": None, "trend_post_count_by_hour": {}, "trend_total_by_date": {}, "trend_family_last_post_at": {}, "velocity_posted": {}, "leverage_queue": [], "leverage_queue_date": None}
 
     if RESET_CLOSER_STATE:
         return base
@@ -236,6 +240,17 @@ def load_state():
         except Exception:
             pass
 
+    if os.path.exists(LEVERAGE_STATE_FILE):
+        try:
+            with open(LEVERAGE_STATE_FILE, "r", encoding="utf-8") as f:
+                ldata = json.load(f)
+            if isinstance(ldata, dict):
+                for key in ["leverage_queue", "leverage_queue_date"]:
+                    if key in ldata:
+                        base[key] = ldata[key]
+        except Exception:
+            pass
+
     return base
 
 
@@ -255,6 +270,13 @@ def save_state(state):
     }
     with open(TREND_STATE_FILE, "w", encoding="utf-8") as f:
         json.dump(trend_payload, f, indent=2)
+
+    leverage_payload = {
+        "leverage_queue": state.get("leverage_queue", []),
+        "leverage_queue_date": state.get("leverage_queue_date"),
+    }
+    with open(LEVERAGE_STATE_FILE, "w", encoding="utf-8") as f:
+        json.dump(leverage_payload, f, indent=2)
 
 
 # ---------------- BASIC HELPERS ----------------
@@ -2219,7 +2241,7 @@ def build_summary(name: str, team: str, s: dict, label: str, context: dict, stre
     )
 
     pieces = [line1, line2]
-    velocity_sentence = build_velocity_inline_sentence(velocity_alert) if tracked_info else ""
+    velocity_sentence = build_velocity_inline_sentence(velocity_alert) if velocity_alert else ""
 
     if velocity_sentence and random.random() < 0.4:
         pieces.append(velocity_sentence)
@@ -3015,6 +3037,151 @@ async def gather_trend_candidates_from_recent_games(tracked: dict, processed_pit
     return candidates
 
 
+# ---------------- LEVERAGE ARM SYSTEM ----------------
+
+async def get_leverage_arm_candidates(tracked: dict) -> list:
+    """
+    Find relief pitchers from yesterday's Final games who qualify for a leverage arm card:
+      - Not the starting pitcher
+      - Not already on the tracked depth chart
+      - Season K/9 >= LEVERAGE_K9_THRESHOLD
+      - Season appearances >= LEVERAGE_MIN_APPEARANCES
+    Returns a list of candidate dicts with enough info to post a card later.
+    """
+    yesterday = (datetime.now(ET) - timedelta(days=1)).date()
+    loop = asyncio.get_event_loop()
+    candidates = []
+    seen_pitcher_ids = set()
+    tracked_names = get_all_tracked_names(tracked)
+
+    try:
+        games = await loop.run_in_executor(None, _fetch_schedule_sync, yesterday.isoformat())
+    except Exception as e:
+        log(f"Leverage arm: schedule fetch failed for {yesterday}: {e}")
+        return candidates
+
+    for g in games:
+        if g.get("status", {}).get("detailedState") != "Final":
+            continue
+        game_id = g.get("gamePk")
+        if not game_id:
+            continue
+
+        try:
+            feed = await get_feed(game_id)
+        except Exception as e:
+            log(f"Leverage arm: feed fetch failed for game {game_id}: {e}")
+            continue
+
+        box = feed.get("liveData", {}).get("boxscore", {}).get("teams", {})
+        game_teams = feed.get("gameData", {}).get("teams", {})
+
+        for side in ["home", "away"]:
+            team = normalize_team_abbr(game_teams.get(side, {}).get("abbreviation"))
+            if not team:
+                team = normalize_team_abbr(box.get(side, {}).get("team", {}).get("abbreviation", "UNK"))
+
+            pitchers_order = box.get(side, {}).get("pitchers", [])
+            starter_id = pitchers_order[0] if pitchers_order else None
+            players = box.get(side, {}).get("players", {})
+
+            for p in players.values():
+                stats = p.get("stats", {}).get("pitching")
+                if not stats or not stats.get("inningsPitched"):
+                    continue
+
+                pitcher_id = p.get("person", {}).get("id")
+                if pitcher_id is None:
+                    continue
+
+                # Skip starters
+                if pitcher_id == starter_id:
+                    continue
+
+                # Skip duplicates (doubleheaders)
+                if pitcher_id in seen_pitcher_ids:
+                    continue
+
+                name = _fix_name(p.get("person", {}).get("fullName", "Unknown Pitcher"))
+
+                # Skip tracked pitchers — they get cards through the normal flow
+                norm = normalize_name(name)
+                if norm in tracked_names:
+                    continue
+
+                # Fetch and check season stats
+                season_stats = await get_player_season_stats(pitcher_id)
+                if not season_stats:
+                    continue
+
+                appearances = safe_int(season_stats.get("gamesPlayed", 0), 0)
+                if appearances < LEVERAGE_MIN_APPEARANCES:
+                    continue
+
+                # K/9 — use API field if available, otherwise calculate
+                k9_raw = season_stats.get("strikeoutsPer9Inn")
+                if k9_raw not in (None, "", "-"):
+                    k9 = safe_float(k9_raw, 0.0)
+                else:
+                    season_outs = baseball_ip_to_outs(str(season_stats.get("inningsPitched", "0.0")))
+                    season_k = safe_int(season_stats.get("strikeOuts", 0), 0)
+                    if season_outs < 3:
+                        continue
+                    k9 = (season_k * 9) / (season_outs / 3.0)
+
+                if k9 < LEVERAGE_K9_THRESHOLD:
+                    continue
+
+                seen_pitcher_ids.add(pitcher_id)
+                candidates.append({
+                    "pitcher_id": pitcher_id,
+                    "game_id": game_id,
+                    "name": name,
+                    "team": team,
+                    "side": side,
+                    "game_date": yesterday.isoformat(),
+                })
+
+    log(f"Leverage arm candidates: {len(candidates)} qualifying pitchers from {yesterday}")
+    return candidates
+
+
+def build_leverage_arm_schedule(candidates: list, now_et: datetime) -> list:
+    """
+    Assign each candidate a random scheduled post time within the leverage window.
+    Spread is random (not evenly spaced) so posts feel organic.
+    If the window has already partially elapsed, schedule within the remaining time.
+    """
+    if not candidates:
+        return []
+
+    window_start = now_et.replace(hour=LEVERAGE_HOURS_START, minute=0, second=0, microsecond=0)
+    window_end = now_et.replace(hour=LEVERAGE_HOURS_END, minute=0, second=0, microsecond=0)
+    effective_start = max(now_et, window_start)
+    window_seconds = int((window_end - effective_start).total_seconds())
+
+    if window_seconds <= 0:
+        log("Leverage arm: window already closed, queue not built")
+        return []
+
+    offsets = sorted(random.randint(0, window_seconds) for _ in range(len(candidates)))
+    scheduled = []
+    for candidate, offset in zip(candidates, offsets):
+        scheduled_at = effective_start + timedelta(seconds=offset)
+        scheduled.append({
+            "pitcher_id": candidate["pitcher_id"],
+            "game_id": candidate["game_id"],
+            "name": candidate["name"],
+            "team": candidate["team"],
+            "side": candidate["side"],
+            "game_date": candidate["game_date"],
+            "scheduled_at": scheduled_at.isoformat(),
+            "posted": False,
+        })
+
+    return scheduled
+
+
 # ---------------- CORE ----------------
 
 def _fetch_player_season_stats_sync(player_id: int, season: int) -> dict:
@@ -3161,6 +3328,8 @@ def get_pitchers(feed: dict):
         if not team:
             team = normalize_team_abbr(box.get(side, {}).get("team", {}).get("abbreviation", "UNK"))
 
+        pitchers_order = box.get(side, {}).get("pitchers", [])
+        starter_id = pitchers_order[0] if pitchers_order else None
         players = box.get(side, {}).get("players", {})
 
         for p in players.values():
@@ -3172,14 +3341,16 @@ def get_pitchers(feed: dict):
             # Do NOT read seasonStats from the boxscore — it aggregates all game types including Spring Training
             season_stats = {}
 
-            velo = get_fastball_velocity_summary(feed, p.get("person", {}).get("id"))
+            pid = p.get("person", {}).get("id")
+            velo = get_fastball_velocity_summary(feed, pid)
             player_obj = {
-                "id": p.get("person", {}).get("id"),
+                "id": pid,
                 "name": _fix_name(p.get("person", {}).get("fullName", "Unknown Pitcher")),
                 "team": normalize_team_abbr(team),
                 "side": side,
                 "stats": stats,
                 "season_stats": season_stats,
+                "is_starter": (pid == starter_id),
                 "avg_fastball_velocity": velo.get("avg_fastball_velocity") if velo else None,
                 "fastball_count": velo.get("fastball_count", 0) if velo else 0,
                 "pitch_count": velo.get("total_pitches", safe_int(stats.get("numberOfPitches", 0), 0)) if velo else safe_int(stats.get("numberOfPitches", 0), 0),
@@ -3578,6 +3749,8 @@ async def loop():
                     trend_pitcher_cache = []
                     trend_pitcher_cache_date = None
                     final_feed_cache.clear()
+                    state["leverage_queue"] = []
+                    state["leverage_queue_date"] = None
                     log("Season stats cache cleared for new day")
                     cleanup_closer_caches()
 
@@ -3804,7 +3977,7 @@ async def loop():
                         save_state(state)
 
                         if i < len(to_post) - 1:
-                            await asyncio.sleep(POST_STAGGER_SECONDS)
+                            await asyncio.sleep(random.randint(30, 90))
 
                 # --- trend blurbs ---
                 if can_post_trend_now(state, now_et, games=games):
@@ -3840,6 +4013,109 @@ async def loop():
                         await post_trend_card(channel, candidate["meta"], candidate["trend"], candidate["recent_appearances"])
                         mark_trend_posted(state, pid, candidate["trend"].get("code"), sig, now_et, trend_family=trend_family)
                         break
+
+                # --- leverage arm cards ---
+                if LEVERAGE_HOURS_START <= now_et.hour < LEVERAGE_HOURS_END:
+                    today_key = now_et.strftime("%Y-%m-%d")
+                    if state.get("leverage_queue_date") != today_key:
+                        log("Building leverage arm queue from yesterday's games...")
+                        lev_candidates = await get_leverage_arm_candidates(tracked)
+                        lev_queue = build_leverage_arm_schedule(lev_candidates, now_et)
+                        state["leverage_queue"] = lev_queue
+                        state["leverage_queue_date"] = today_key
+                        save_state(state)
+                        log(f"Leverage arm queue: {len(lev_queue)} posts scheduled")
+
+                    for item in state.get("leverage_queue", []):
+                        if item.get("posted"):
+                            continue
+                        scheduled_at_str = item.get("scheduled_at")
+                        if not scheduled_at_str:
+                            continue
+                        try:
+                            scheduled_dt = datetime.fromisoformat(scheduled_at_str)
+                            if scheduled_dt.tzinfo is None:
+                                scheduled_dt = scheduled_dt.replace(tzinfo=ET)
+                            else:
+                                scheduled_dt = scheduled_dt.astimezone(ET)
+                        except Exception:
+                            continue
+                        if now_et < scheduled_dt:
+                            continue
+
+                        pitcher_id = item.get("pitcher_id")
+                        game_id = item.get("game_id")
+                        side = item.get("side", "home")
+                        game_date_str = item.get("game_date")
+                        try:
+                            game_date_et = datetime.strptime(game_date_str, "%Y-%m-%d").date() if game_date_str else (datetime.now(ET) - timedelta(days=1)).date()
+                        except Exception:
+                            game_date_et = (datetime.now(ET) - timedelta(days=1)).date()
+
+                        try:
+                            feed = await get_feed(game_id)
+                            pitchers = get_pitchers(feed)
+                            p = next((x for x in pitchers if x.get("id") == pitcher_id), None)
+                            if p is None:
+                                log(f"Leverage arm: pitcher {pitcher_id} not found in feed {game_id}, skipping")
+                                item["posted"] = True
+                                save_state(state)
+                                break
+
+                            game_teams = feed.get("gameData", {}).get("teams", {})
+                            away_abbr = normalize_team_abbr(game_teams.get("away", {}).get("abbreviation") or "AWAY")
+                            home_abbr = normalize_team_abbr(game_teams.get("home", {}).get("abbreviation") or "HOME")
+                            away_team_name = game_teams.get("away", {}).get("teamName") or away_abbr
+                            home_team_name = game_teams.get("home", {}).get("teamName") or home_abbr
+                            linescore = feed.get("liveData", {}).get("linescore", {})
+                            away_score = safe_int(linescore.get("teams", {}).get("away", {}).get("runs", 0), 0)
+                            home_score = safe_int(linescore.get("teams", {}).get("home", {}).get("runs", 0), 0)
+                            matchup = f"{away_abbr} @ {home_abbr}"
+                            score = build_score_line(away_abbr, away_score, home_abbr, home_score)
+
+                            context = get_pitcher_entry_context(feed, pitcher_id, side)
+                            recent_appearances = await get_recent_appearances(pitcher_id, game_date_et, limit=5, max_days=21)
+                            streak_count = await get_streak_count(pitcher_id, game_date_et)
+                            usage_note = build_usage_sentence(await get_recent_usage_snapshot(pitcher_id, game_date_et))
+                            current_app = {
+                                "ip": str(p["stats"].get("inningsPitched", "0.0")),
+                                "h": safe_int(p["stats"].get("hits", 0), 0),
+                                "er": safe_int(p["stats"].get("earnedRuns", 0), 0),
+                                "bb": safe_int(p["stats"].get("baseOnBalls", 0), 0),
+                                "k": safe_int(p["stats"].get("strikeOuts", 0), 0),
+                                "saves": safe_int(p["stats"].get("saves", 0), 0),
+                                "holds": safe_int(p["stats"].get("holds", 0), 0),
+                                "blownSaves": safe_int(p["stats"].get("blownSaves", 0), 0),
+                                "avg_fastball_velocity": p.get("avg_fastball_velocity"),
+                                "fastball_count": safe_int(p.get("fastball_count", 0), 0),
+                                "pitch_count": safe_int(p.get("pitch_count", 0), 0),
+                            }
+                            velocity_alert = build_velocity_alert(current_app, [current_app] + recent_appearances)
+
+                            log(f"Leverage arm card: {p['name']} | {p['team']} | {matchup}")
+                            await post_card(
+                                channel,
+                                p,
+                                matchup,
+                                score,
+                                context,
+                                streak_count,
+                                None,  # tracked_info — not a tracked pitcher
+                                recent_appearances,
+                                usage_note=usage_note,
+                                velocity_alert=velocity_alert,
+                                feed=feed,
+                                away_team_name=away_team_name,
+                                home_team_name=home_team_name,
+                                away_score=away_score,
+                                home_score=home_score,
+                            )
+                        except Exception as e:
+                            log(f"Leverage arm post failed for {item.get('name')}: {e}")
+
+                        item["posted"] = True
+                        save_state(state)
+                        break  # one per loop
 
                 state["posted"] = list(posted)
                 save_state(state)
