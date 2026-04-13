@@ -77,9 +77,13 @@ class RecapBot:
         await self.client.wait_until_ready()
         logger.info("RECAP_BOT: Client ready, running startup poll for yesterday's games")
         try:
-            await self._poll_completed_games()
+            await self._poll_completed_games(include_yesterday=True)
         except Exception as exc:
             logger.exception("RECAP_BOT: Error in startup poll: %s", exc)
+
+        # Sleep before the first main-loop iteration so startup and the loop
+        # don't fire back-to-back and double up API calls.
+        await asyncio.sleep(random.uniform(300, 420))
 
         while not self.client.is_closed():
             try:
@@ -91,7 +95,7 @@ class RecapBot:
                     await asyncio.sleep(1800)
                     continue
 
-                # At least one game is final — run the poll
+                # At least one game is final — run the poll (today only; yesterday handled at startup)
                 await self._poll_completed_games()
 
                 if self._is_day_complete(todays_games):
@@ -210,7 +214,7 @@ class RecapBot:
     # Polling
     # ------------------------------------------------------------------
 
-    async def _poll_completed_games(self) -> None:
+    async def _poll_completed_games(self, include_yesterday: bool = False) -> None:
         channel = self.client.get_channel(self.channel_id)
         if channel is None:
             logger.error("RECAP_BOT: Channel %s not found", self.channel_id)
@@ -222,8 +226,10 @@ class RecapBot:
         today_et     = datetime.now(EASTERN).date()
         yesterday_et = today_et - timedelta(days=1)
 
+        scan_dates = [yesterday_et, today_et] if include_yesterday else [today_et]
+
         finished_games = []
-        for scan_date in [yesterday_et, today_et]:
+        for scan_date in scan_dates:
             games = await self._fetch_schedule(scan_date)
             for game in games:
                 status = self._game_status(game)
@@ -239,7 +245,8 @@ class RecapBot:
                         logger.info("RECAP_BOT: Game %s went final, recorded timestamp", game_pk)
                     finished_games.append(game)
 
-        logger.info("RECAP_BOT: %d finished games across yesterday + today", len(finished_games))
+        label = "yesterday + today" if include_yesterday else "today"
+        logger.info("RECAP_BOT: %d finished games across %s", len(finished_games), label)
 
         for game in finished_games:
             try:
