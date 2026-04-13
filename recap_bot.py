@@ -13,6 +13,7 @@ import discord
 
 
 EASTERN = ZoneInfo("America/New_York")
+PACIFIC = ZoneInfo("America/Los_Angeles")
 
 VIDEO_SEARCH_DELAY_MINUTES = 30  # Wait this long after a game goes final before searching YouTube
 MAX_SEARCH_ATTEMPTS = 25         # Give up on a game after this many failed YouTube searches
@@ -50,6 +51,7 @@ class RecapBot:
         self.posted_game_ids: set[str] = set()
         self.checked_no_recap: dict[str, int] = {}   # game_pk -> attempt count
         self.game_final_times: dict[str, str] = {}   # game_pk -> ISO timestamp when first detected final
+        self._quota_exhausted: bool = False
 
         self._load_state()
         self._task: Optional[asyncio.Task] = None
@@ -87,6 +89,16 @@ class RecapBot:
 
         while not self.client.is_closed():
             try:
+                if self._quota_exhausted:
+                    secs = self._seconds_until_quota_reset()
+                    logger.warning(
+                        "RECAP_BOT: YouTube quota exhausted — sleeping %.0f seconds until midnight PT",
+                        secs,
+                    )
+                    self._quota_exhausted = False
+                    await asyncio.sleep(secs)
+                    continue
+
                 today = datetime.now(EASTERN).date()
                 todays_games = await self._fetch_schedule(today)
 
@@ -119,7 +131,9 @@ class RecapBot:
     # ------------------------------------------------------------------
 
     def _load_state(self) -> None:
+        logger.info("RECAP_BOT: State file path: %s", self.state_path)
         if not self.state_path.exists():
+            logger.warning("RECAP_BOT: State file does not exist — starting fresh")
             return
         try:
             data = json.loads(self.state_path.read_text(encoding="utf-8"))
