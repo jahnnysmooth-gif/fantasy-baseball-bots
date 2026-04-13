@@ -15,7 +15,7 @@ import discord
 EASTERN = ZoneInfo("America/New_York")
 PACIFIC = ZoneInfo("America/Los_Angeles")
 
-VIDEO_SEARCH_DELAY_MINUTES = 30  # Wait this long after a game goes final before searching YouTube
+VIDEO_SEARCH_DELAY_MINUTES = 90  # Wait this long after a game goes final before searching YouTube
 MAX_SEARCH_ATTEMPTS = 25         # Give up on a game after this many failed YouTube searches
 
 logger = logging.getLogger("recap_bot")
