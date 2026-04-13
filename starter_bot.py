@@ -2,6 +2,7 @@ import asyncio
 import json
 import os
 import random
+import re
 import time
 import traceback
 from datetime import datetime, date, timedelta, timezone
@@ -495,6 +496,8 @@ def build_starter_pitch_metrics(feed: dict, pitcher_id: int):
     first_pitch_strikes = 0
     first_pitch_total = 0
 
+    k_by_pitch_code = {}  # pitch code -> number of strikeouts recorded on that pitch
+
     for play in plays:
         matchup = play.get("matchup", {}) if isinstance(play, dict) else {}
         pitcher = matchup.get("pitcher", {}) if isinstance(matchup, dict) else {}
@@ -502,7 +505,9 @@ def build_starter_pitch_metrics(feed: dict, pitcher_id: int):
             continue
 
         play_events = play.get("playEvents", [])
+        is_strikeout = str(play.get("result", {}).get("event") or "").strip() == "Strikeout"
         first_pitch_seen = False
+        last_pitch_code = ""
         for event in play_events:
             if not isinstance(event, dict) or not event.get("isPitch"):
                 continue
@@ -529,9 +534,13 @@ def build_starter_pitch_metrics(feed: dict, pitcher_id: int):
 
             if pitch_code:
                 pitch_type_counts[pitch_code] = pitch_type_counts.get(pitch_code, 0) + 1
+                last_pitch_code = pitch_code
 
             if start_speed > 0 and pitch_code in FASTBALL_PITCH_CODES:
                 fastball_velos.append(start_speed)
+
+        if is_strikeout and last_pitch_code:
+            k_by_pitch_code[last_pitch_code] = k_by_pitch_code.get(last_pitch_code, 0) + 1
 
     payload = {
         "pitch_count": total_pitches,
@@ -539,6 +548,7 @@ def build_starter_pitch_metrics(feed: dict, pitcher_id: int):
         "whiffs": whiffs,
         "called_strikes": called_strikes,
         "pitch_type_counts": pitch_type_counts,
+        "k_by_pitch_code": k_by_pitch_code,
         "first_pitch_strikes": first_pitch_strikes,
         "first_pitch_total": first_pitch_total,
     }
@@ -922,6 +932,7 @@ def get_starters(feed: dict):
                 "avg_fastball_velocity": metrics.get("avg_fastball_velocity"),
                 "fastball_count": metrics.get("fastball_count", 0),
                 "pitch_type_counts": metrics.get("pitch_type_counts", {}),
+                "k_by_pitch_code": metrics.get("k_by_pitch_code", {}),
                 "fp_strike_pct": metrics.get("fp_strike_pct"),
                 "first_pitch_total": metrics.get("first_pitch_total", 0),
                 "contact_profile": contact,
@@ -3074,6 +3085,11 @@ def build_starter_subject_line(p: dict, label: str, game_context: dict, seed: in
     team_runs = game_context.get("home_score", 0) if p.get("side") == "home" else game_context.get("away_score", 0)
     opp_runs = game_context.get("away_score", 0) if p.get("side") == "home" else game_context.get("home_score", 0)
     team_name = team_name_from_abbr(p.get("team"))
+    opp_name = (
+        team_name_from_abbr(game_context.get("home_abbr"))
+        if p.get("side") == "away"
+        else team_name_from_abbr(game_context.get("away_abbr"))
+    )
 
     no_decision = (
         wins == 0 and losses_stat == 0 and
@@ -3100,118 +3116,143 @@ def build_starter_subject_line(p: dict, label: str, game_context: dict, seed: in
 
     if outs < 3:
         choices = [
-            f"⚠️ {name} is knocked out in the opening inning",
-            f"⚠️ {name} exits before he can settle in",
-            f"⚠️ {name} never gets the start off the ground",
+            f"⚠️ {name} is knocked out in the opening inning against {opp_name}",
+            f"⚠️ {name} exits before he can record an out",
+            f"⚠️ {name} never gets the start off the ground against {opp_name}",
         ]
     elif label == "GEM":
         choices = [
-            f"🔥 {name} controls the game from the jump",
-            f"🔥 {name} cruises through a gem",
-            f"🔥 {name} barely gives the lineup a pulse",
-            f"🔥 {name} puts a lid on the lineup all night",
-        ]
-    elif label == "DOMINANT":
-        choices = [
-            f"🔥 {name} dominates over {ip_text}",
-            f"🔥 {name} powers through a dominant start",
-            f"🔥 {name} overmatches hitters all night",
-            f"🔥 {name} takes over with swing-and-miss stuff",
+            f"🔥 {name} puts a lid on the {opp_name} lineup all night",
+            f"🔥 {name} barely gives {opp_name} a pulse",
+            f"🔥 {name} controls the game from the first pitch against {opp_name}",
+            f"🔥 {name} silences {opp_name} with a gem",
         ]
         if k >= 8:
             choices.extend([
-                f"🔥 {name} piles up strikeouts in a dominant start",
+                f"🔥 {name} carves up {opp_name} with {number_word(k)} strikeouts",
+                f"🔥 {name} dominates {opp_name} from wire to wire",
             ])
-            if outs >= 21:
-                choices.append(f"🔥 {name} works deep while racking up {number_word(k)} strikeouts")
+        if outs >= 24:
+            choices.append(f"🔥 {name} goes the distance and shuts down {opp_name}")
+    elif label == "DOMINANT":
+        choices = [
+            f"🔥 {name} overpowers {opp_name} over {ip_text}",
+            f"🔥 {name} gives {opp_name} no answers all night",
+            f"🔥 {name} takes over and never lets {opp_name} settle in",
+        ]
+        if k >= 10:
+            choices.extend([
+                f"🔥 {name} reaches double digits against {opp_name}",
+                f"🔥 {name} fans {number_word(k)} and runs the {opp_name} lineup ragged",
+            ])
+        elif k >= 8:
+            choices.extend([
+                f"🔥 {name} punches out {number_word(k)} in a dominant outing against {opp_name}",
+                f"🔥 {name} works deep while racking up {number_word(k)} strikeouts",
+            ])
+        else:
+            choices.append(f"🔥 {name} powers through a dominant start against {opp_name}")
     elif label == "STRIKEOUT":
         choices = [
-            f"🎯 {name} punches out {number_word(k)} in a power outing",
-            f"🎯 {name} misses bats all night in a high-whiff start",
-            f"🎯 {name} leans on swing-and-miss to carry the outing",
-            f"🎯 {name} rides the strikeouts through a lively start",
+            f"🎯 {name} punches out {number_word(k)} against {opp_name}",
+            f"🎯 {name} misses bats all night and makes {opp_name} look overmatched",
+            f"🎯 {name} leans on the swing-and-miss to carry the outing against {opp_name}",
         ]
+        if k >= 10:
+            choices.extend([
+                f"🎯 {name} fans {number_word(k)} and makes {opp_name} look helpless",
+                f"🎯 {name} reaches double digits and takes over the game",
+            ])
         if bb >= 3:
-            choices.append(f"🎯 {name} piles up strikeouts despite the extra traffic")
+            choices.append(f"🎯 {name} piles up strikeouts against {opp_name} despite the extra traffic")
         if no_decision:
-            choices.append(f"🎯 {name} punches out {number_word(k)} and walks away empty-handed")
+            choices.append(f"🎯 {name} punches out {number_word(k)} against {opp_name} and walks away empty-handed")
     elif label in {"QUALITY", "SHARP"}:
         choices = [
-            f"✅ {name} turns in a strong night on the mound",
-            f"✅ {name} gives the {team_name} a steady start",
-            f"✅ {name} keeps the game under control",
-            f"✅ {name} holds the line with a clean effort",
+            f"✅ {name} keeps {opp_name} in check and gives the {team_name} a quality start",
+            f"✅ {name} gives the {team_name} exactly what they needed against {opp_name}",
+            f"✅ {name} handles {opp_name} and hands the bullpen a lead to work with",
+            f"✅ {name} shuts {opp_name} down with a clean, efficient outing",
         ]
         if k >= 7 and outs >= 21:
-            choices.append(f"✅ {name} pairs length with {number_word(k)} strikeouts")
+            choices.append(f"✅ {name} pairs length with {number_word(k)} strikeouts against {opp_name}")
         elif er == 0:
-            choices.append(f"✅ {name} keeps the board clean through {ip_text}")
+            choices.append(f"✅ {name} blanks {opp_name} through {ip_text}")
         elif scoreless_to_start >= 4:
-            choices.append(f"✅ {name} opens with {number_word(scoreless_to_start)} scoreless innings and never loses the feel for it")
+            choices.append(f"✅ {name} rolls through {opp_name} in the early innings and holds on")
         if no_decision:
-            choices.append(f"✅ {name} deals a strong start but leaves empty-handed")
+            choices.append(f"✅ {name} deals well against {opp_name} but leaves without the win")
     elif label == "SOLID":
         choices = [
-            f"📈 {name} gives the {team_name} a useful start",
-            f"📈 {name} steadies things on the mound",
-            f"📈 {name} turns in a workmanlike outing",
-            f"📈 {name} does enough to keep the game in order",
+            f"📈 {name} keeps {opp_name} off the board long enough to matter",
+            f"📈 {name} gives the {team_name} length without drama against {opp_name}",
+            f"📈 {name} holds {opp_name} at bay through {ip_text}",
+            f"📈 {name} does the job against {opp_name} without much margin for error",
         ]
         if k >= 7:
-            choices.append(f"📈 {name} adds punchouts to a solid night")
+            choices.append(f"📈 {name} mixes in the strikeouts through a solid night against {opp_name}")
         elif only_damage_in_one_inning and er <= 3:
-            choices.append(f"📈 {name} keeps things afloat outside of one rough patch")
+            choices.append(f"📈 {name} keeps {opp_name} quiet outside of one rough frame")
         if no_decision:
             if outs >= 21:
-                choices.append(f"📈 {name} goes deep and gets nothing to show for it")
+                choices.append(f"📈 {name} goes deep against {opp_name} and gets nothing to show for it")
             else:
-                choices.append(f"📈 {name} pitches well and gets nothing to show for it")
+                choices.append(f"📈 {name} pitches well enough to win against {opp_name} but walks away empty-handed")
     elif label == "HIT_HARD":
         choices = [
-            f"💥 {name} gets hit hard despite some swing-and-miss",
-            f"💥 {name} pays for too many hittable pitches",
-            f"💥 {name} cannot escape the damage contact",
-            f"💥 {name} loses too many balls over the heart of the plate",
+            f"💥 {name} gets tagged by {opp_name} despite the swing-and-miss",
+            f"💥 {name} leaves too many pitches in the zone and {opp_name} does not miss them",
+            f"💥 {name} pays for the hard contact against {opp_name}",
+            f"💥 {name} cannot keep {opp_name} from squaring the ball up",
         ]
         if k >= 7:
-            choices.append(f"💥 {name} misses bats but gets punished on contact")
+            choices.append(f"💥 {name} misses bats but gets punished on contact by {opp_name}")
     elif label == "NO_COMMAND":
         choices = [
-            f"🧭 {name} never gets the count working for him",
-            f"🧭 {name} fights the zone all night",
-            f"🧭 {name} cannot get comfortable in the strike zone",
+            f"🧭 {name} never gets comfortable in the zone against {opp_name}",
+            f"🧭 {name} puts too many runners on and {opp_name} makes him pay",
+            f"🧭 {name} fights the strike zone all night against {opp_name}",
         ]
+        if bb >= 4:
+            choices.extend([
+                f"🧭 {name} issues {number_word(bb)} free passes and never recovers",
+                f"🧭 {name} walks {opp_name} into trouble all night long",
+            ])
     elif label == "UNEVEN":
         choices = [
-            f"📉 {name} grinds through an uneven outing",
-            f"📉 {name} battles traffic all night",
-            f"📉 {name} gets through it, but not cleanly",
-            f"📉 {name} never quite finds an easy inning",
+            f"📉 {name} has no answer for {opp_name} when it matters most",
+            f"📉 {name} alternates clean innings with trouble all night against {opp_name}",
+            f"📉 {name} never quite settles into a rhythm against {opp_name}",
+            f"📉 {name} gets through it, but one bad frame does all the damage",
         ]
+        if scoreless_to_start >= 3:
+            choices.append(f"📉 {name} cruises early before {opp_name} catches up")
+        elif only_damage_in_one_inning:
+            choices.append(f"📉 {name} looks good until one inning against {opp_name} unravels it")
     else:
+        # ROUGH / SHORT
         choices = [
-            f"⚠️ {name} cannot keep the outing from getting away",
-            f"⚠️ {name} runs into trouble and does not recover",
-            f"⚠️ {name} never finds his footing on the mound",
+            f"⚠️ {name} runs into trouble early and cannot stop {opp_name}",
+            f"⚠️ {name} never finds his footing against {opp_name}",
+            f"⚠️ {name} cannot keep the outing from getting away against {opp_name}",
         ]
         if hits >= 7 and bb <= 1:
-            choices.append(f"⚠️ {name} gets tagged even without many walks")
+            choices.append(f"⚠️ {name} gets tagged for {hits} hits and {opp_name} keeps the pressure on")
         elif bb >= 4:
-            choices.append(f"⚠️ {name} falls behind too often to settle in")
-        elif er >= 4:
-            choices.append(f"⚠️ {name} cannot stop the damage from building")
+            choices.append(f"⚠️ {name} walks {opp_name} into a lead he never recovers from")
+        elif er >= 5:
+            choices.append(f"⚠️ {name} gives up {number_word(er)} runs and hands {opp_name} control early")
 
     if team_runs > opp_runs and label in POSITIVE_STARTER_LABELS:
-        choices.append(f"🏁 {name} helps set up a winning night for the {team_name}")
+        choices.append(f"🏁 {name} sets the {team_name} up right against {opp_name}")
     elif team_runs < opp_runs and label in BAD_STARTER_LABELS | {"UNEVEN"}:
         bad_loss_choices = [
-            f"📉 {name} puts the {team_name} in a hole early",
-            f"📉 {name} hands the {team_name} a tough night to overcome",
-            f"📉 {name} struggles to keep the {team_name} in it",
-            f"📉 {name} cannot stop the {team_name} from falling behind",
-            f"📉 {name} gives the opposition too much room to work",
+            f"📉 {name} puts the {team_name} in a hole against {opp_name}",
+            f"📉 {name} hands {opp_name} an early advantage the {team_name} cannot overcome",
+            f"📉 {name} struggles to keep the {team_name} in it against {opp_name}",
+            f"📉 {name} gives {opp_name} too much room to work with",
             f"📉 {name} lets this one get away from the {team_name}",
-            f"📉 {name} sends the {team_name} to a rough defeat",
+            f"📉 {name} sends the {team_name} to a rough night against {opp_name}",
         ]
         choices.append(bad_loss_choices[seed % len(bad_loss_choices)])
 
@@ -3565,7 +3606,7 @@ def score_field_emoji(game_context: dict) -> str:
     return "⚾"
 
 
-async def build_claude_summary(
+async def build_claude_card(
     p: dict,
     label: str,
     game_context: dict,
@@ -3574,13 +3615,14 @@ async def build_claude_summary(
     next_start: dict | None = None,
     season: int = 0,
     seed: int = 0,
-) -> str | None:
+) -> dict | None:
     """
-    Use the Claude API to write the Summary field.
-    Returns None on any failure so post_card falls back to templates.
+    Use the Claude API to write both the subject line and summary in one call.
+    Returns {"subject": str, "summary": str} or None on any failure so
+    post_card falls back to templates for both fields.
     """
     if not ANTHROPIC_API_KEY:
-        log("Claude summary skipped — STARTER_BOT_SUMMARY env var not set")
+        log("Claude card skipped — STARTER_BOT_SUMMARY env var not set")
         return None
 
     stats   = p.get("stats", {})
@@ -3607,8 +3649,12 @@ async def build_claude_summary(
     pitch_cnt = safe_int(p.get("pitch_count", 0), 0)
     pitch_counts = p.get("pitch_type_counts", {})
 
-    # Dominant pitch type
+    # Dominant pitch type and secondary pitch
     dominant_pitch = ""
+    secondary_pitch = ""
+    COMMON_FASTBALLS = {"FF", "FA"}
+    k_by_pitch = p.get("k_by_pitch_code", {})
+    total_ks = safe_int(p.get("stats", {}).get("strikeOuts", 0), 0)
     if pitch_counts:
         total_pitches = sum(pitch_counts.values())
         if total_pitches >= 30:
@@ -3619,8 +3665,23 @@ async def build_claude_summary(
             }
             top_code = max(pitch_counts, key=pitch_counts.get)
             top_pct  = pitch_counts[top_code] / total_pitches
-            if top_pct >= 0.40:
+            # Only flag a dominant fastball when it's unusually heavy (60%+); any
+            # other pitch type leading the mix is interesting at 30%+.
+            fastball_threshold = 0.60 if top_code in COMMON_FASTBALLS else 0.30
+            if top_pct >= fastball_threshold:
                 dominant_pitch = f"{PITCH_NAMES.get(top_code, top_code.lower())} ({int(top_pct*100)}%)"
+
+            # Secondary pitch: non-fastball at 30%+ usage that also generated
+            # a meaningful share of strikeouts (at least 2 Ks on that pitch).
+            for code, cnt in sorted(pitch_counts.items(), key=lambda x: x[1], reverse=True):
+                if code in COMMON_FASTBALLS:
+                    continue
+                pct = cnt / total_pitches
+                pitch_ks = k_by_pitch.get(code, 0)
+                if pct >= 0.30 and pitch_ks >= 2:
+                    pname = PITCH_NAMES.get(code, code.lower())
+                    secondary_pitch = f"{pname} ({int(pct*100)}%, {pitch_ks} of {total_ks} Ks)"
+                    break
 
     # Opponent quality
     opp_tier = ""
@@ -3739,6 +3800,7 @@ async def build_claude_summary(
     if fp_pct:    facts.append(f"First-pitch strike rate: {int(fp_pct)}%")
     if pitch_cnt: facts.append(f"Pitch count: {pitch_cnt}")
     if dominant_pitch: facts.append(f"Dominant pitch: {dominant_pitch}")
+    if secondary_pitch: facts.append(f"Key secondary pitch: {secondary_pitch}")
 
     # Game flow
     scs = safe_int(flow.get("scoreless_to_start", 0), 0)
@@ -3874,8 +3936,10 @@ Core rules:
 - Lead with something that happened in the game — a specific inning, a sequence, a turning point — not a stat
 - Stats can appear but always as evidence of something that happened, never as the subject of a sentence
 - Do not repeat raw stats already in the Game Line field (IP, H, ER, BB, K) — reference them indirectly
+- ERA may be referenced in the closing only if stated as a complete thought — never write "his ERA sits" or "ERA heading into" without completing the sentence with the actual number; if avoiding the number feels awkward, rephrase the closing entirely
+- Opponent quality from the facts (e.g. "above average offense", "weak lineup") informs your framing but must never appear verbatim in a sentence — do not call a lineup "average" or "above average"; describe what happened against them instead
 - Do not start two consecutive sentences with the same word
-- No em dashes (—) — use commas, periods, or rewrite the sentence instead
+- No dashes of any kind — no em dash (—), no en dash (–), no spaced hyphen ( - ) — use commas, periods, or rewrite the sentence instead
 - Third person, past tense, plain prose — no bullet points, no markdown
 - Output only the summary paragraph, nothing else, with no ellipsis (...)
 - When mentioning the score, write it naturally: "the Twins beat Detroit 8-6" or "Minnesota won 8-6" — winner first, never abbreviations like MIN or DET in a sentence
@@ -3910,6 +3974,7 @@ Innings pitched language rules (strictly follow these):
 Damage inning rules:
 - If the facts mention a specific inning with 3+ runs: discuss that inning specifically — what happened, why it snowballed
 - If key plays are provided: weave the most relevant one naturally into the summary
+- When referencing a hit from the key plays, always preserve the hit type — if the play says "doubles", write double; if it says "homers", write home run; if it says "singles", write single. Never reduce a double or home run to just "a line drive" or "a fly ball"
 - If an error contributed: mention it factually without over-dramatizing
 - Do not use the word "collapse" to describe an inning unless 5 or more runs scored in it
 - Do not use "implode", "meltdown", or similar catastrophic language for 2-3 run innings
@@ -3923,10 +3988,23 @@ Pitch mix shift rules:
 - If the facts include a pitch mix shift: weave it in as something that happened tactically — "he leaned on his slider far more than usual" not "pitch mix data shows a shift"
 - Describe it as an observer would, not as an analyst reading a chart
 
-Ballpark rules:
-- If a hitter-friendly or pitcher-friendly ballpark is noted: use it as natural context for the run total, one mention only
+Pitch naming rules:
+- If the facts include a "Key secondary pitch": you may name it naturally when it fits the story — "the slider was the strikeout pitch tonight" or "he kept hitters honest with the changeup" — but only if it is relevant, not just because it appears in the facts
+- If the facts do not provide a specific secondary pitch, do not invent one or default to mentioning the four-seam fastball
 
-CRITICAL — Do not use any career or experience labels (rookie, veteran, ace, young pitcher, sophomore) that are not explicitly stated in the facts."""
+Ballpark rules:
+- Only use the ballpark fact if it genuinely explains why the run total was higher or lower than expected — a pitcher-friendly park with 7 runs allowed, or a hitter-friendly park with a gem
+- Do not mention it as a side note or "which makes the damage stand out even more" aside — if it does not change how you read the line, leave it out
+
+CRITICAL — Do not use any career or experience labels (rookie, veteran, ace, young pitcher, sophomore) that are not explicitly stated in the facts.
+
+Subject line rules:
+- Write a subject line that reads like a tweet or press-box one-liner — specific, sharp, under 12 words
+- Reference the opponent or a key moment from the game — never write a generic label like "has a strong outing" or "struggles on the mound"
+- The subject line should tell the story of the night in one line, not just categorize it
+- Do not include an emoji in the subject line — it will be added automatically
+- No punctuation at the end of the subject line
+- Examples of the right tone: "deGrom carves up the Dodgers with nine strikeouts", "Cease gives the White Sox six before the bullpen blows it", "Burnes walks four and hands Atlanta the game in the fifth"
 
     # --- Narrative angle: rotate based on seed so each card leads differently ---
     last_name = name.split()[-1] if name else name
@@ -3991,22 +4069,34 @@ CRITICAL — Do not use any career or experience labels (rookie, veteran, ace, y
         f"Find a different subject or construction for each sentence."
     )
 
+    opp_name = (
+        team_name_from_abbr(game_context.get("home_abbr"))
+        if p.get("side") == "away"
+        else team_name_from_abbr(game_context.get("away_abbr"))
+    )
+
     user_message = f"""Facts about the outing:
 {context_block}
+
+Opponent tonight: {opp_name}
 
 {tone_instruction}
 Narrative angle: {angle}
 {opener_ban}
 
-Write exactly {cap} sentences."""
+Write exactly {cap} sentences for the summary.
+
+Respond with valid JSON only, no markdown, no extra text:
+{{"subject": "<subject line here>", "summary": "<summary paragraph here>"}}\
+"""
 
     try:
-        log(f"Calling Claude API for {name} summary...")
+        log(f"Calling Claude API for {name} card...")
         client_ai = anthropic.Anthropic(api_key=ANTHROPIC_API_KEY)
         response = await asyncio.to_thread(
             client_ai.messages.create,
             model=CLAUDE_MODEL,
-            max_tokens=400,
+            max_tokens=550,
             system=[
                 {
                     "type": "text",
@@ -4016,12 +4106,25 @@ Write exactly {cap} sentences."""
             ],
             messages=[{"role": "user", "content": user_message}],
         )
-        text = response.content[0].text.strip()
-        if text:
-            log(f"Claude summary generated for {name} ({len(text)} chars)")
-            return text
+        raw = response.content[0].text.strip()
+        # Strip markdown code fences if present
+        raw = re.sub(r'^```(?:json)?\s*', '', raw, flags=re.IGNORECASE)
+        raw = re.sub(r'\s*```$', '', raw)
+        parsed = json.loads(raw)
+        subject = str(parsed.get("subject") or "").strip().rstrip(".!?:;,-")
+        summary = str(parsed.get("summary") or "").strip()
+        if subject and summary:
+            # Hard strip dash variants from both fields
+            for pattern, repl in [(r'\s*[—–]\s*', ', '), (r'\s+-\s+', ', ')]:
+                subject = re.sub(pattern, repl, subject)
+                summary = re.sub(pattern, repl, summary)
+            subject = subject.strip(', ')
+            summary = summary.strip(', ')
+            log(f"Claude card generated for {name} (subject: {len(subject)} chars, summary: {len(summary)} chars)")
+            return {"subject": subject, "summary": summary}
+        log(f"Claude card for {name} returned incomplete fields — falling back to templates")
     except Exception as e:
-        log(f"Claude summary failed for {name}: {e} — falling back to templates")
+        log(f"Claude card failed for {name}: {e} — falling back to templates")
 
     return None
 
@@ -4040,8 +4143,17 @@ async def post_card(
     label = classify_starter(stats)
     seed = build_starter_summary_seed(p["name"], stats, game_context)
 
-    # Career debut overrides subject line entirely
-    if p.get("is_career_debut"):
+    LABEL_EMOJI = {
+        "GEM": "🔥", "DOMINANT": "🔥", "STRIKEOUT": "🎯",
+        "QUALITY": "✅", "SHARP": "✅", "SOLID": "📈",
+        "UNEVEN": "📉", "HIT_HARD": "💥", "NO_COMMAND": "🧭",
+        "ROUGH": "⚠️", "SHORT": "⚠️",
+    }
+    label_emoji = LABEL_EMOJI.get(label, "📈")
+
+    # Career debut overrides subject line entirely — skip Claude for this
+    is_career_debut = p.get("is_career_debut")
+    if is_career_debut:
         name = p.get("name", "This pitcher")
         team_name = team_name_from_abbr(p.get("team", ""))
         debut_subjects = [
@@ -4050,11 +4162,13 @@ async def post_card(
             f"🌟 {name} debuts for the {team_name}",
         ]
         subject = debut_subjects[seed % len(debut_subjects)]
+        claude_subject = None
     else:
-        subject = build_starter_subject_line(p, label, game_context, seed)
+        claude_subject = None
 
-    # Try Claude API first, fall back to templates on any failure
-    summary = await build_claude_summary(
+    # Try Claude API for both subject and summary in one call.
+    # Career debuts always use the template subject but still get a Claude summary.
+    claude_result = await build_claude_card(
         p, label, game_context,
         recent_appearances=recent_appearances,
         opp_hitting=opp_hitting,
@@ -4062,6 +4176,21 @@ async def post_card(
         season=season,
         seed=seed,
     )
+
+    if claude_result:
+        claude_subject = claude_result.get("subject", "")
+        summary = claude_result.get("summary", "")
+    else:
+        summary = ""
+
+    # Subject line: career debuts always use template; otherwise prefer Claude
+    if not is_career_debut:
+        if claude_subject:
+            subject = f"{label_emoji} {claude_subject}"
+        else:
+            subject = build_starter_subject_line(p, label, game_context, seed)
+
+    # Summary: fall back to templates if Claude did not return one
     if not summary:
         summary = build_starter_summary(
             p, label, game_context,
