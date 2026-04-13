@@ -50,7 +50,6 @@ TREND_FAMILY_COOLDOWN_MINUTES = {
 TREND_RANDOM_INTERVAL_MIN_MINUTES = 6
 TREND_RANDOM_INTERVAL_MAX_MINUTES = 16
 TREND_HOURS_START = 2   # 2 AM ET — trend blurbs + velocity alerts window opens
-TREND_HOURS_END = 14    # 2 PM ET — trend blurbs + velocity alerts window closes
 CARD_HOURS_START = 14   # 2 PM ET — tracked card posting window opens
 CARD_HOURS_END = 2      # 2 AM ET — tracked card posting window closes (crosses midnight)
 TREND_MAX_PER_HOUR = 2
@@ -2583,17 +2582,17 @@ def within_card_hours(now_et: datetime) -> bool:
     return hour >= CARD_HOURS_START or hour < CARD_HOURS_END
 
 
-def within_trend_hours(now_et: datetime) -> bool:
-    """Returns True if current ET hour is within the trend/velocity window (2 AM – 2 PM ET)."""
-    hour = now_et.hour
-    return TREND_HOURS_START <= hour < TREND_HOURS_END
 
-
-def can_post_trend_now(state, now_et: datetime):
-    # Only post trend blurbs between 2 AM and 2 PM ET
-    hour = now_et.hour
-    if not (TREND_HOURS_START <= hour < TREND_HOURS_END):
+def can_post_trend_now(state, now_et: datetime, games: list = None):
+    # Window opens at 2 AM ET
+    if now_et.hour < TREND_HOURS_START:
         return False
+
+    # Window closes as soon as any game on today's slate goes Final
+    if games:
+        for g in games:
+            if g.get("status", {}).get("detailedState") == "Final":
+                return False
 
     # Hourly cap — max 2 trend blurbs per hour
     hour_key = now_et.strftime("%Y-%m-%d-%H")
@@ -3543,7 +3542,24 @@ async def loop():
     last_refresh_date = datetime.now(ET).date()
     trend_pitcher_cache: list = []
     trend_pitcher_cache_date: object = None
+    final_feed_cache: dict = {}  # game_id -> {"feed": ..., "first_seen_at": datetime (UTC)}
     loop_lock = asyncio.Lock()
+
+    async def _get_feed_maybe_cached(g: dict) -> dict:
+        """Fetch a game feed, using the in-memory cache for games settled 60+ minutes ago."""
+        gid = g["gamePk"]
+        cached = final_feed_cache.get(gid)
+        now_utc = datetime.now(timezone.utc)
+        if cached:
+            age_minutes = (now_utc - cached["first_seen_at"]).total_seconds() / 60
+            if age_minutes >= 60:
+                return cached["feed"]
+        feed = await get_feed(gid)
+        if gid not in final_feed_cache:
+            final_feed_cache[gid] = {"feed": feed, "first_seen_at": now_utc}
+        else:
+            final_feed_cache[gid]["feed"] = feed
+        return feed
 
     while True:
         if loop_lock.locked():
@@ -3561,6 +3577,7 @@ async def loop():
                     season_stats_cache.clear()
                     trend_pitcher_cache = []
                     trend_pitcher_cache_date = None
+                    final_feed_cache.clear()
                     log("Season stats cache cleared for new day")
                     cleanup_closer_caches()
 
@@ -3571,14 +3588,14 @@ async def loop():
                 # --- collect all postable candidates ---
                 candidates = []
 
+                # --- filter to eligible Final games ---
+                eligible_games = []
                 for g in games:
                     if g.get("status", {}).get("detailedState") != "Final":
                         continue
-
                     game_id = g.get("gamePk")
                     if not game_id:
                         continue
-
                     # Recency check — skip games that started more than GAME_RECENCY_HOURS ago
                     game_date_str = g.get("gameDate", "")
                     if game_date_str:
@@ -3589,8 +3606,20 @@ async def loop():
                                 continue
                         except Exception:
                             pass
+                    eligible_games.append(g)
 
-                    feed = await get_feed(game_id)
+                # --- fetch all feeds in parallel ---
+                feed_results = await asyncio.gather(
+                    *[_get_feed_maybe_cached(g) for g in eligible_games],
+                    return_exceptions=True,
+                )
+
+                for g, feed in zip(eligible_games, feed_results):
+                    if isinstance(feed, Exception):
+                        log(f"Feed fetch error for game {g.get('gamePk')}: {feed}")
+                        continue
+
+                    game_id = g.get("gamePk")
                     pitchers = get_pitchers(feed)
                     game_date_et = parse_game_date_et(g)
 
@@ -3778,7 +3807,7 @@ async def loop():
                             await asyncio.sleep(POST_STAGGER_SECONDS)
 
                 # --- trend blurbs ---
-                if can_post_trend_now(state, now_et):
+                if can_post_trend_now(state, now_et, games=games):
                     # During the trend window (2 AM–2 PM) today's games haven't started yet.
                     # Fall back to yesterday's final games as the trend data source.
                     # Cache it — yesterday's games are static, no need to refetch every loop.
