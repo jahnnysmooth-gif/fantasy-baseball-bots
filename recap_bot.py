@@ -385,7 +385,7 @@ class RecapBot:
             ) as response:
                 if response.status != 200:
                     body = await response.text()
-                    logger.warning("RECAP_BOT_YT: API error %s — %s", response.status, body)
+                    logger.warning("RECAP_BOT_YT: API error %s — %s", response.status, " ".join(body.split()))
                     return None
 
                 data = await response.json(content_type=None)
