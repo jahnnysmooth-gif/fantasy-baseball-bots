@@ -497,7 +497,7 @@ async def start_recap_bot() -> None:
         await asyncio.sleep(float("inf"))
         return
 
-    state_dir = Path("/opt/render/project/.data")
+    state_dir = Path("/opt/render/project/src/state")
     state_dir.mkdir(parents=True, exist_ok=True)
     state_path = state_dir / "recap_bot_state.json"
 
