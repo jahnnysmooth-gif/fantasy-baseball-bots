@@ -55,8 +55,6 @@ CARD_HOURS_END = 2      # 2 AM ET — tracked card posting window closes (crosse
 TREND_MAX_PER_HOUR = 2
 LEVERAGE_K9_THRESHOLD = 10.0
 LEVERAGE_MIN_APPEARANCES = 5
-LEVERAGE_HOURS_START = 2   # 2 AM ET
-LEVERAGE_HOURS_END = 14    # 2 PM ET
 VELOCITY_DELTA_THRESHOLD = 1.0
 VELOCITY_MIN_PITCHES = 10
 VELOCITY_MIN_FASTBALLS = 3
@@ -3146,40 +3144,27 @@ async def get_leverage_arm_candidates(tracked: dict) -> list:
     return candidates
 
 
-def build_leverage_arm_schedule(candidates: list, now_et: datetime) -> list:
+def build_leverage_arm_schedule(candidates: list) -> list:
     """
-    Assign each candidate a random scheduled post time within the leverage window.
-    Spread is random (not evenly spaced) so posts feel organic.
-    If the window has already partially elapsed, schedule within the remaining time.
+    Shuffle candidates into a randomized queue. Posts fire whenever can_post_trend_now()
+    allows, interleaving naturally with trend blurbs on the same schedule.
     """
     if not candidates:
         return []
-
-    window_start = now_et.replace(hour=LEVERAGE_HOURS_START, minute=0, second=0, microsecond=0)
-    window_end = now_et.replace(hour=LEVERAGE_HOURS_END, minute=0, second=0, microsecond=0)
-    effective_start = max(now_et, window_start)
-    window_seconds = int((window_end - effective_start).total_seconds())
-
-    if window_seconds <= 0:
-        log("Leverage arm: window already closed, queue not built")
-        return []
-
-    offsets = sorted(random.randint(0, window_seconds) for _ in range(len(candidates)))
-    scheduled = []
-    for candidate, offset in zip(candidates, offsets):
-        scheduled_at = effective_start + timedelta(seconds=offset)
-        scheduled.append({
-            "pitcher_id": candidate["pitcher_id"],
-            "game_id": candidate["game_id"],
-            "name": candidate["name"],
-            "team": candidate["team"],
-            "side": candidate["side"],
-            "game_date": candidate["game_date"],
-            "scheduled_at": scheduled_at.isoformat(),
+    shuffled = list(candidates)
+    random.shuffle(shuffled)
+    return [
+        {
+            "pitcher_id": c["pitcher_id"],
+            "game_id": c["game_id"],
+            "name": c["name"],
+            "team": c["team"],
+            "side": c["side"],
+            "game_date": c["game_date"],
             "posted": False,
-        })
-
-    return scheduled
+        }
+        for c in shuffled
+    ]
 
 
 # ---------------- CORE ----------------
@@ -4015,32 +4000,20 @@ async def loop():
                         break
 
                 # --- leverage arm cards ---
-                if LEVERAGE_HOURS_START <= now_et.hour < LEVERAGE_HOURS_END:
-                    today_key = now_et.strftime("%Y-%m-%d")
-                    if state.get("leverage_queue_date") != today_key:
-                        log("Building leverage arm queue from yesterday's games...")
-                        lev_candidates = await get_leverage_arm_candidates(tracked)
-                        lev_queue = build_leverage_arm_schedule(lev_candidates, now_et)
-                        state["leverage_queue"] = lev_queue
-                        state["leverage_queue_date"] = today_key
-                        save_state(state)
-                        log(f"Leverage arm queue: {len(lev_queue)} posts scheduled")
+                # Build the queue once per day (always, so it's ready when the window opens)
+                today_key = now_et.strftime("%Y-%m-%d")
+                if state.get("leverage_queue_date") != today_key:
+                    log("Building leverage arm queue from yesterday's games...")
+                    lev_candidates = await get_leverage_arm_candidates(tracked)
+                    lev_queue = build_leverage_arm_schedule(lev_candidates)
+                    state["leverage_queue"] = lev_queue
+                    state["leverage_queue_date"] = today_key
+                    save_state(state)
+                    log(f"Leverage arm queue: {len(lev_queue)} posts scheduled")
 
+                if can_post_trend_now(state, now_et, games=games):
                     for item in state.get("leverage_queue", []):
                         if item.get("posted"):
-                            continue
-                        scheduled_at_str = item.get("scheduled_at")
-                        if not scheduled_at_str:
-                            continue
-                        try:
-                            scheduled_dt = datetime.fromisoformat(scheduled_at_str)
-                            if scheduled_dt.tzinfo is None:
-                                scheduled_dt = scheduled_dt.replace(tzinfo=ET)
-                            else:
-                                scheduled_dt = scheduled_dt.astimezone(ET)
-                        except Exception:
-                            continue
-                        if now_et < scheduled_dt:
                             continue
 
                         pitcher_id = item.get("pitcher_id")
@@ -4114,6 +4087,7 @@ async def loop():
                             log(f"Leverage arm post failed for {item.get('name')}: {e}")
 
                         item["posted"] = True
+                        mark_trend_posted(state, pitcher_id, "leverage_arm", "", now_et, trend_family="leverage")
                         save_state(state)
                         break  # one per loop
 
