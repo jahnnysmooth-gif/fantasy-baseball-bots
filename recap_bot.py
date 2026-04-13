@@ -335,6 +335,9 @@ class RecapBot:
         youtube_url = await self._search_youtube_highlights(away, home, game_date_raw)
 
         if not youtube_url:
+            if self._quota_exhausted:
+                logger.info("RECAP_BOT: Skipping attempt count for %s at %s — quota exhausted", away, home)
+                return
             attempts = self.checked_no_recap.get(game_pk, 0) + 1
             self.checked_no_recap[game_pk] = attempts
             self._save_state()
