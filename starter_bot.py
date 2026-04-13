@@ -4005,6 +4005,7 @@ Subject line rules:
 - Do not include an emoji in the subject line — it will be added automatically
 - No punctuation at the end of the subject line
 - Examples of the right tone: "deGrom carves up the Dodgers with nine strikeouts", "Cease gives the White Sox six before the bullpen blows it", "Burnes walks four and hands Atlanta the game in the fifth"
+"""
 
     # --- Narrative angle: rotate based on seed so each card leads differently ---
     last_name = name.split()[-1] if name else name
@@ -4087,7 +4088,7 @@ Narrative angle: {angle}
 Write exactly {cap} sentences for the summary.
 
 Respond with valid JSON only, no markdown, no extra text:
-{{"subject": "<subject line here>", "summary": "<summary paragraph here>"}}\
+{{"subject": "<subject line here>", "summary": "<summary paragraph here>"}}
 """
 
     try:
