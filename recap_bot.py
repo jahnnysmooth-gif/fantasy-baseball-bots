@@ -221,6 +221,13 @@ class RecapBot:
         return max(delta, 300)
 
     @staticmethod
+    def _seconds_until_quota_reset() -> float:
+        """Seconds until YouTube quota resets at midnight Pacific."""
+        now = datetime.now(PACIFIC)
+        midnight = (now + timedelta(days=1)).replace(hour=0, minute=0, second=0, microsecond=0)
+        return (midnight - now).total_seconds()
+
+    @staticmethod
     def _game_status(game: dict) -> str:
         return (((game.get("status") or {}).get("detailedState") or "").strip().lower())
 
@@ -393,6 +400,9 @@ class RecapBot:
         if published_after:
             params["publishedAfter"] = published_after
 
+        if self._quota_exhausted:
+            return None
+
         try:
             async with self.http_session.get(
                 "https://www.googleapis.com/youtube/v3/search", params=params
@@ -400,6 +410,9 @@ class RecapBot:
                 if response.status != 200:
                     body = await response.text()
                     logger.warning("RECAP_BOT_YT: API error %s — %s", response.status, " ".join(body.split()))
+                    if "quotaExceeded" in body:
+                        self._quota_exhausted = True
+                        logger.warning("RECAP_BOT_YT: Quota exhausted — stopping all searches until midnight PT")
                     return None
 
                 data = await response.json(content_type=None)
