@@ -2709,7 +2709,8 @@ async def build_trend_summary_via_claude(
             k = safe_int(a.get("k", 0), 0)
             bb = safe_int(a.get("bb", 0), 0)
             ip = a.get("ip", "0.0")
-            recent_form_parts.append(f"{label_str}: {ip} IP, {er} ER, {k} K, {bb} BB")
+            ip_human = format_ip_for_summary(str(ip))
+            recent_form_parts.append(f"{label_str}: {ip_human}, {er} ER, {k} K, {bb} BB")
         recent_form = ", ".join(recent_form_parts) if recent_form_parts else "no recent data"
 
         # Season stats
@@ -2723,11 +2724,12 @@ async def build_trend_summary_via_claude(
 
         # Span stats
         span_ip = span_stats.get("ip", "0.0")
+        span_ip_human = format_ip_for_summary(str(span_ip))
         span_k = span_stats.get("k", 0)
         span_bb = span_stats.get("bb", 0)
         span_er = span_stats.get("er", 0)
         span_window = span_stats.get("window", 3)
-        span_str = f"{span_ip} IP, {span_er} ER, {span_k} K, {span_bb} BB over last {span_window} appearances"
+        span_str = f"{span_ip_human}, {span_er} ER, {span_k} K, {span_bb} BB over last {span_window} appearances"
 
         # Extra detail for specific trends
         extra_detail = ""
@@ -2767,6 +2769,7 @@ Write a 2-3 sentence fantasy baseball trend blurb about this reliever. Be direct
                                 "- Be direct and analytical — this is fantasy baseball analysis, not a hype piece.\n"
                                 "- CRITICAL: Never use the word 'just' to minimize or downplay any statistic, especially walks. State numbers neutrally.\n"
                                 "- CRITICAL: Never invent stats. Only reference numbers explicitly provided in the prompt.\n"
+                                "- Write small whole numbers as words (one through nine). Use numerals only for stats like ERA, WHIP, and velocity.\n"
                                 "- Do not start with 'In' or 'Tonight' or the pitcher's full name as the very first word.\n"
                                 "- Never end with an ellipsis or incomplete thought.\n"
                                 "- Vary your sentence openings across different blurbs.\n"
