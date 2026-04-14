@@ -3964,8 +3964,11 @@ async def loop():
                         if i < len(to_post) - 1:
                             await asyncio.sleep(random.randint(30, 90))
 
-                # --- trend blurbs ---
+                # --- trend blurbs and leverage arm cards ---
                 if can_post_trend_now(state, now_et, games=games):
+                    # Random jitter so posts don't always land on poll-cycle boundaries.
+                    await asyncio.sleep(random.randint(0, (POLL_MINUTES - 1) * 60))
+                    now_et = datetime.now(ET)
                     # During the trend window (2 AM–2 PM) today's games haven't started yet.
                     # Fall back to yesterday's final games as the trend data source.
                     # Cache it — yesterday's games are static, no need to refetch every loop.
