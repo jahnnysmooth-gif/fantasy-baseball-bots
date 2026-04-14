@@ -3937,7 +3937,7 @@ Core rules:
 - Stats can appear but always as evidence of something that happened, never as the subject of a sentence
 - Do not repeat raw stats already in the Game Line field (IP, H, ER, BB, K) — reference them indirectly
 - ERA may be referenced in the closing only if stated as a complete thought — never write "his ERA sits" or "ERA heading into" without completing the sentence with the actual number; if avoiding the number feels awkward, rephrase the closing entirely
-- Opponent quality from the facts (e.g. "above average offense", "weak lineup") informs your framing but must never appear verbatim in a sentence — do not call a lineup "average" or "above average"; describe what happened against them instead
+- Opponent quality from the facts (e.g. "above average offense", "below average offense") informs your framing but the label itself is banned from the prose — never write "a below-average offense", "an above-average lineup", "a weak offense", or any variation; instead describe what the lineup actually did or did not do tonight
 - Do not start two consecutive sentences with the same word
 - No dashes of any kind — no em dash (—), no en dash (–), no spaced hyphen ( - ) — use commas, periods, or rewrite the sentence instead
 - Third person, past tense, plain prose — no bullet points, no markdown
@@ -4004,6 +4004,7 @@ Subject line rules:
 - The subject line should tell the story of the night in one line, not just categorize it
 - Do not include an emoji in the subject line — it will be added automatically
 - No punctuation at the end of the subject line
+- Never include a final score in the subject line — it is already shown in the Score field on the card; writing it risks getting it wrong
 - Examples of the right tone: "deGrom carves up the Dodgers with nine strikeouts", "Cease gives the White Sox six before the bullpen blows it", "Burnes walks four and hands Atlanta the game in the fifth"
 """
 
