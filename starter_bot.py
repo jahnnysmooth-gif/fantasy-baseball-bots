@@ -3970,6 +3970,7 @@ Innings pitched language rules (strictly follow these):
 - 6 innings = "a quality start", "six solid innings", "gave the team six innings" — never "went deep"
 - 5 innings or fewer = "a shortened start", "could not get deep", "did not give the team length" — never "went deep"
 - Never describe any outing under 7 innings as "going deep" or "working deep into the game"
+- CRITICAL: Never use the phrase "quality start" for any outing under 6 innings pitched. A quality start requires exactly 6+ innings with 3 or fewer earned runs — this is a defined stat. 5 innings is never a quality start regardless of runs allowed.
 
 Damage inning rules:
 - If the facts mention a specific inning with 3+ runs: discuss that inning specifically — what happened, why it snowballed
