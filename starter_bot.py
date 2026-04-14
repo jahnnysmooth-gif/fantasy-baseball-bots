@@ -3946,7 +3946,7 @@ Core rules:
 
 Filler and AI-sounding language — never use any of these:
 - Transition phrases: "Digging deeper", "When you look at", "What stands out", "What makes this interesting", "At the end of the day", "All in all", "Make no mistake", "When it was all said and done", "Worth noting", "It is worth mentioning"
-- Hollow openers: "In a night that", "In what was", "On a night when", "In a performance that", "Getting ahead of hitters was the defining problem"
+- Hollow openers: "In a night that", "In what was", "On a night when", "In a performance that", "Getting ahead of hitters was the defining problem", "Getting ahead of hitters was the core problem", "Getting ahead of hitters was the issue"
 - Explanation chains: do not attach "which means", "which suggests", "which explains", "which indicates" to every stat — state the fact and move on. One explained connection per summary is enough
 - No "he showed" or "he demonstrated" — say what happened
 - No "perhaps", "arguably", "it could be said"
@@ -3975,6 +3975,7 @@ Damage inning rules:
 - If the facts mention a specific inning with 3+ runs: discuss that inning specifically — what happened, why it snowballed
 - If key plays are provided: weave the most relevant one naturally into the summary
 - When referencing a hit from the key plays, always preserve the hit type — if the play says "doubles", write double; if it says "homers", write home run; if it says "singles", write single. Never reduce a double or home run to just "a line drive" or "a fly ball"
+- Never attribute a batter's hit to the pitcher — write "gave up a home run to Marte" or "Marte went deep", never "[pitcher] connected on a home run" or "[pitcher] hit a double"; the pitcher is always the one allowing the hit, never the one making contact
 - If an error contributed: mention it factually without over-dramatizing
 - Do not use the word "collapse" to describe an inning unless 5 or more runs scored in it
 - Do not use "implode", "meltdown", or similar catastrophic language for 2-3 run innings
@@ -4004,7 +4005,7 @@ Subject line rules:
 - The subject line should tell the story of the night in one line, not just categorize it
 - Do not include an emoji in the subject line — it will be added automatically
 - No punctuation at the end of the subject line
-- Never include a final score in the subject line — it is already shown in the Score field on the card; writing it risks getting it wrong
+- Never include any score or run total in the subject line — no X-Y format, no single team's run total ("send 16", "plate ten"), no win/loss margin; the score is already shown on the card and writing it risks getting it wrong
 - Examples of the right tone: "deGrom carves up the Dodgers with nine strikeouts", "Cease gives the White Sox six before the bullpen blows it", "Burnes walks four and hands Atlanta the game in the fifth"
 """
 
@@ -4122,6 +4123,9 @@ Respond with valid JSON only, no markdown, no extra text:
                 summary = re.sub(pattern, repl, summary)
             subject = subject.strip(', ')
             summary = summary.strip(', ')
+            # Strip X-Y score patterns from subject line (e.g. "win 8-2", "6-2 victory")
+            subject = re.sub(r'\b\d{1,2}-\d{1,2}\b', '', subject)
+            subject = re.sub(r'\s{2,}', ' ', subject).strip().rstrip('.!?:;,-')
             log(f"Claude card generated for {name} (subject: {len(subject)} chars, summary: {len(summary)} chars)")
             return {"subject": subject, "summary": summary}
         log(f"Claude card for {name} returned incomplete fields — falling back to templates")
