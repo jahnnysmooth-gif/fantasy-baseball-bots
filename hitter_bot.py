@@ -3213,11 +3213,11 @@ async def generate_ai_hitter_summary(
     hitter: dict | None = None,
     opponent_abbr: str = "",
     injury_note: str = "",
-) -> str | None:
-    """Call Claude API to generate a hitter summary. Returns None on failure."""
+) -> tuple[str | None, str | None]:
+    """Call Claude API to generate a hitter summary. Returns (subject, summary) tuple, or (None, None) on failure."""
     if not ANTHROPIC_API_KEY:
         log(f"AI summary skipped for {name}: HITTER_BOT_SUMMARY not set")
-        return None
+        return (None, None)
 
     log(f"AI summary: calling Claude for {name}")
     try:
@@ -3259,7 +3259,7 @@ async def generate_ai_hitter_summary(
                 score_str = f"{team_name} won {team_score}-{opp_score} ({'blowout' if margin >= 6 else 'comfortable win' if margin >= 4 else 'close game'})"
             else:
                 margin = abs(team_score - opp_score)
-                score_str = f"{team_name} lost {team_score}-{opp_score} ({'lopsided loss' if margin >= 6 else 'close loss' if margin <= 2 else 'loss'})"
+                score_str = f"{team_name} lost {opp_score}-{team_score} ({'lopsided loss' if margin >= 6 else 'close loss' if margin <= 2 else 'loss'})"
         else:
             score_str = f"{team_name} {'won' if team_won else 'lost'}"
 
@@ -3407,33 +3407,93 @@ async def generate_ai_hitter_summary(
         if injury_str:
             context_lines.append(f"Injury/IL note: {injury_str}")
 
+        # Recent games raw stat lines — lets Claude reference trends accurately
+        if recent_games:
+            recent_detail_lines = []
+            for i, g in enumerate(recent_games[:5]):
+                h_g = g.get("h", 0)
+                ab_g = g.get("ab", 0)
+                hr_g = g.get("hr", 0)
+                rbi_g = g.get("rbi", 0)
+                r_g = g.get("r", 0)
+                sb_g = g.get("sb", 0)
+                parts_g = [f"{h_g}-for-{ab_g}"]
+                if hr_g:
+                    parts_g.append(f"{hr_g} HR")
+                if rbi_g:
+                    parts_g.append(f"{rbi_g} RBI")
+                if r_g:
+                    parts_g.append(f"{r_g} R")
+                if sb_g:
+                    parts_g.append(f"{sb_g} SB")
+                recent_detail_lines.append(f"  -{i + 1}: {', '.join(parts_g)}")
+            context_lines.append(f"Last {len(recent_detail_lines)} games (most recent first, not counting tonight):")
+            context_lines.extend(recent_detail_lines)
+
         context_block = "\n".join(context_lines)
 
         system_prompt = (
             "You write post-game fantasy baseball hitter cards for a Discord server. "
-            "Your voice is that of a sharp beat reporter who follows fantasy baseball closely — "
-            "confident, natural, and concise. You prioritize fantasy value (HR, RBI, SB, AVG) "
-            "but also capture the human side of the game.\n\n"
-            "Rules:\n"
-            "- Write exactly 3-4 sentences. No more.\n"
-            "- Bold the player's full name on its first mention using **Name**.\n"
-            "- Start with an engaging opener that is NOT just a dry recitation of the stat line. "
-            "Open with the narrative (walkoff, go-ahead hit, hot streak, etc.) and weave in stats.\n"
-            "- Use the player's last name after the first mention, not 'he' every time.\n"
-            "- Vary sentence length. Mix a punchy short sentence with longer ones.\n"
-            "- Be specific: use the actual game context (pitch type, inning, score margin, lineup spot) "
-            "when relevant, but only if it adds something natural. Don't cram everything in.\n"
-            "- Mention fantasy relevance at least once (category impact, multi-cat value, matchup context).\n"
-            "- If a pitcher ERA/quality is provided, mention it briefly when it adds context to the performance.\n"
-            "- Do not use em dashes (—). Use commas or periods instead.\n"
-            "- Do not use the words: 'showcased', 'impressive', 'impressive performance', "
-            "'notable', 'demonstrated', 'incredible', 'amazing', 'fantastic'.\n"
-            "- Do not start sentences with 'Additionally' or 'Furthermore'.\n"
-            "- Do not use the phrase 'on the mound tonight'.\n"
-            "- Output only the summary text. No labels, no preamble, no quotation marks."
+            "Your voice is a sharp beat reporter — direct, specific, never formulaic. "
+            "You follow fantasy baseball closely but write like a human, not a template.\n\n"
+            "OUTPUT FORMAT — two parts separated by a single blank line:\n"
+            "Part 1: SUBJECT LINE — one line, 10-15 words max, no period, no bold. "
+            "Lead with the most interesting angle: a key moment, hot streak, power display, clutch hit, etc. "
+            "Vary the structure. Sometimes start with the player's name, sometimes with the situation or achievement. "
+            "Make it feel like a real headline, not a generic description.\n"
+            "Part 2: SUMMARY — exactly 3-4 sentences. Bold the player's full name on first mention (**Name**).\n\n"
+            "SUMMARY RULES:\n"
+            "- Do NOT open every card with '[Bold Name] went X-for-Y...' — that is the most boring opener. "
+            "Lead with the most interesting thing: the moment it turned, the trend it continued, the matchup that made it count.\n"
+            "- Weave the stat line into a narrative sentence rather than stating it first.\n"
+            "- Use the player's last name after the first mention. Mix in 'he' occasionally for flow.\n"
+            "- Vary sentence length every card. At least one sentence must be short and punchy (under 10 words).\n"
+            "- Every sentence must add new information. No restating what the previous sentence just said.\n"
+            "- Be specific when context is available: inning, pitch type, score margin, opponent quality. "
+            "Only include it if it adds something natural — don't cram it in.\n"
+            "- If recent game data is provided, reference the trend ONLY if it's genuinely interesting "
+            "(active hit streak, power surge, bounce-back from cold stretch). "
+            "Accuracy is mandatory — only cite a streak or trend if the data confirms it.\n"
+            "- Mention fantasy relevance once, tied to something specific in this performance. "
+            "Do not write generic category-value sentences.\n"
+            "- Scores are always written winner first (e.g., a 6-1 win is '6-1', not '1-6').\n\n"
+            "BANNED WORDS AND PHRASES:\n"
+            "- 'showcased', 'impressive', 'notable', 'demonstrated', 'incredible', 'amazing', 'fantastic'\n"
+            "- 'Additionally', 'Furthermore', 'on the mound tonight'\n"
+            "- 'down the stretch', 'as the season winds down', 'late in the season', 'stretch run'\n"
+            "- 'multi-category haul', 'what fantasy managers crave', 'moves the needle in multiple categories', "
+            "'the kind of night that moves the needle', 'adds value in multiple categories'\n"
+            "- Any sentence that could apply to any hitter on any night — force yourself to be specific.\n"
+            "- Em dashes (—)\n\n"
+            "No emojis in the subject line — they are added separately by the system.\n"
+            "Output only the subject line, a blank line, then the summary. No labels, no preamble, no quotes."
         )
 
-        user_message = f"Write a fantasy baseball summary card for this hitter's performance tonight:\n\n{context_block}"
+        # Rotate the structural angle each call — this is what actually drives variety.
+        # Pool is filtered based on what context is actually available, so Claude
+        # isn't steered toward data that doesn't exist.
+        _angle_hints = [
+            "Lead with the single most dramatic moment in the game. Name the inning, the situation, the swing. Let the stat line come after.",
+            "Start with a short punchy sentence (6 words or fewer) that drops you into the moment. Build from there.",
+            "Frame the performance around the team's result. Where did he fit in the game story? Start there.",
+            "Open by burying the stat line inside a narrative. Don't list the numbers up front — let the reader arrive at them.",
+            "Lead with what this means for fantasy owners right now: a specific reason to buy in, a trend to monitor, or a role that is producing.",
+            "Set the scene first — what was the game situation when he did his damage? Make the reader feel the moment before giving the stats.",
+            "Start with the most underrated part of the performance. Not just the obvious number, but what made it count.",
+            "Lead with the biggest single at-bat of the night. Inning, situation, result. Then build the rest of the card around it.",
+        ]
+        # Only offer streak angle when there is real trend data to support it
+        if trend_str:
+            _angle_hints.append(
+                "Open with the recent trend or streak. Frame tonight as the latest chapter in a run that is worth paying attention to."
+            )
+        # Only offer opponent angle when pitcher info is available
+        if pitcher_str:
+            _angle_hints.append(
+                "Lead with the opponent: who was pitching, why it was a tough spot, and how he handled it anyway."
+            )
+        angle_hint = random.choice(_angle_hints)
+        user_message = f"Write a fantasy baseball hitter card for tonight's performance.\n\nAngle for this card: {angle_hint}\n\n{context_block}"
 
         session = _ai_session or aiohttp.ClientSession()
         async with session.post(
@@ -3446,7 +3506,7 @@ async def generate_ai_hitter_summary(
                 },
                 json={
                     "model": "claude-haiku-4-5-20251001",
-                    "max_tokens": 300,
+                    "max_tokens": 400,
                     "system": [
                         {
                             "type": "text",
@@ -3460,20 +3520,29 @@ async def generate_ai_hitter_summary(
             ) as resp:
                 if resp.status != 200:
                     log(f"Anthropic API error {resp.status} for {name}")
-                    return None
+                    return (None, None)
                 data = await resp.json()
-                text = data.get("content", [{}])[0].get("text", "").strip()
-                if not text:
-                    return None
-                # Bold the player's name if the model forgot
-                if name not in text and f"**{name}**" not in text:
-                    text = text.replace(name.split()[-1], f"**{name}**", 1) if name.split()[-1] in text else text
-                log(f"AI summary: got response for {name} ({len(text)} chars)")
-                return text
+                raw = data.get("content", [{}])[0].get("text", "").strip()
+                if not raw:
+                    return (None, None)
+                # Parse subject + summary: split on first blank line
+                parts = raw.split("\n\n", 1)
+                if len(parts) == 2:
+                    ai_subject = parts[0].strip()
+                    ai_summary = parts[1].strip()
+                else:
+                    # Model didn't format correctly — treat entire response as summary only
+                    ai_subject = None
+                    ai_summary = raw
+                # Bold the player's name in the summary if the model forgot
+                if ai_summary and name not in ai_summary and f"**{name}**" not in ai_summary:
+                    ai_summary = ai_summary.replace(name.split()[-1], f"**{name}**", 1) if name.split()[-1] in ai_summary else ai_summary
+                log(f"AI summary: got response for {name} ({len(raw)} chars)")
+                return (ai_subject, ai_summary)
 
     except Exception as exc:
         log(f"AI summary failed for {name}: {exc}")
-        return None
+        return (None, None)
 
 
 def build_hitter_summary(
@@ -3495,307 +3564,42 @@ def build_hitter_summary(
     opponent_abbr: str = "",
     injury_note: str = "",
 ) -> str:
+    """Lean fallback summary used only when the AI call fails.
+    Produces 2-3 clean sentences: opener, key event, pitcher context."""
     team_name = team_name_from_abbr(team)
     opponent_text = opponent or "the opposing club"
-    last_name = _last_name(name)
 
-    hits = safe_int(stats.get("hits", 0), 0)
-    rbi = safe_int(stats.get("rbi", 0), 0)
-    homers = safe_int(stats.get("homeRuns", 0), 0)
-    doubles = safe_int(stats.get("doubles", 0), 0)
-    triples = safe_int(stats.get("triples", 0), 0)
-    walks = safe_int(stats.get("baseOnBalls", 0), 0)
-    steals = safe_int(stats.get("stolenBases", 0), 0)
-    hardest_ev = context.get("hardest_ev")
-    balls_100 = safe_int(context.get("balls_100", 0), 0)
-    pos_phrase = _position_phrase(position)
-    score = score_hitter(stats)
-
-    # --- Quiet night: one-liner only ---
-    if score < 3.5 and homers == 0 and steals == 0:
-        opener = _build_summary_opening(name, stats, context, opponent_text, team_name, team_won, pitcher=pitcher, team_score=team_score, opp_score=opp_score)
-        return opener
-
-    sentences: list[str] = [
-        _build_summary_opening(name, stats, context, opponent_text, team_name, team_won, pitcher=pitcher, team_score=team_score, opp_score=opp_score)
+    # Sentence 1: stat line + result
+    sentences = [
+        _build_summary_opening(
+            name, stats, context, opponent_text, team_name, team_won,
+            pitcher=pitcher, team_score=team_score, opp_score=opp_score,
+        )
     ]
 
-    used_signatures: set[str] = {"opening"}
-
+    # Sentence 2: key in-game moment (go-ahead hit, homer inning, stolen base, etc.)
     event_text, inning_text = _event_text_from_context(context)
-    # inning_short strips "in the " for templates like "That 5th at-bat..."
-    inning_short = inning_text.replace("in the ", "").strip() if inning_text else ""
-    context_pool: list[str] = []
     if event_text:
-        for template in SUMMARY_CONTEXT_FAMILIES:
+        inning_short = inning_text.replace("in the ", "").strip() if inning_text else ""
+        for template in random.sample(SUMMARY_CONTEXT_FAMILIES, len(SUMMARY_CONTEXT_FAMILIES)):
             try:
-                context_pool.append(template.format(
+                sent = template.format(
                     event_text=event_text,
                     inning_text=inning_text or "",
                     inning_short=inning_short or "",
-                ))
+                )
             except KeyError:
-                context_pool.append(template.format(event_text=event_text, inning_text=inning_text or ""))
+                sent = template.format(event_text=event_text, inning_text=inning_text or "")
+            if sent and sent not in sentences:
+                sentences.append(sent)
+                break
 
-    fantasy_key = "general"
-    if homers >= 2:
-        fantasy_key = "two_homer"
-    elif homers == 1 and rbi >= 3:
-        fantasy_key = "impact_homer"
-    elif hits >= 4:
-        fantasy_key = "four_hit"
-    elif hits >= 3 and (doubles + triples) >= 1:
-        fantasy_key = "three_hit_xbh"
-    elif hits >= 3:
-        fantasy_key = "three_hit"
-    elif steals >= 2:
-        fantasy_key = "speed"
-    elif walks >= 2 and hits <= 1:
-        fantasy_key = "walks"
-
-    fantasy_pool = list(FANTASY_FAMILIES[fantasy_key])
-    if pos_phrase and homers >= 1:
-        pos_sentence = _build_position_power_sentence(pos_phrase, stats, hitter, recent_games)
-        fantasy_pool = [pos_sentence] + fantasy_pool
-
-    # --- Pitcher sentence (always included when available) ---
+    # Sentence 3: opposing pitcher context
     pitcher_sentence = _starter_context_sentence(pitcher, stats, context)
+    if pitcher_sentence and pitcher_sentence not in sentences:
+        sentences.append(pitcher_sentence)
 
-    # --- Other meta sentences ---
-    meta_pool: list[str] = []
-    lineup_sentence = _lineup_context_sentence(lineup_spot, stats)
-    if lineup_sentence:
-        meta_pool.append(lineup_sentence)
-    close_game_sentence = _close_game_context(team_score, opp_score, team_won, context, rbi)
-    if close_game_sentence:
-        meta_pool.append(close_game_sentence)
-
-    # Stolen base context — always include for speed nights
-    if steals >= 1:
-        steal_sentence = _steal_context_sentence(context)
-        if steal_sentence:
-            meta_pool.insert(0, steal_sentence)
-
-    # Opponent record sentence (gated to 7 days after opening day)
-    if opponent_abbr:
-        opp_record_phrase = _opponent_record_phrase(opponent_abbr)
-        if opp_record_phrase:
-            meta_pool.append(random.choice([
-                f"The win came against {opp_record_phrase}.",
-                f"That production came against {opp_record_phrase}.",
-                f"Worth noting: the damage was done against {opp_record_phrase}.",
-            ]))
-
-
-    # --- Quality pool (EV / hard contact) ---
-    quality_pool: list[str] = []
-    if hardest_ev and hardest_ev >= 108:
-        quality_pool.append(_event_specific_ev_sentence(context, hardest_ev))
-    elif balls_100 >= 3:
-        quality_pool.extend([s.format(balls_100=balls_100) for s in QUALITY_100_FAMILIES])
-
-    trend_note = _recent_trend_note(recent_games, stats)
-    if trend_note:
-        quality_pool.append(trend_note)
-
-    def _sig(sentence: str) -> str:
-        lowered = sentence.lower()
-        if "lead for good" in lowered or "ultimately decided" in lowered or "proved to be the difference" in lowered or "difference-maker" in lowered:
-            return "decisive"
-        if "walk-off" in lowered:
-            return "walkoff"
-        if "mph" in lowered or "exit velocity" in lowered or "100-plus" in lowered or "triple-digit" in lowered or "exit velo" in lowered:
-            return "ev"
-        if "leadoff" in lowered or "middle of the order" in lowered or "heart of the order" in lowered or "bottom third" in lowered or "lineup" in lowered:
-            return "lineup"
-        if "streak" in lowered or "quiet stretch" in lowered or "straight games" in lowered or "bounce-back" in lowered:
-            return "trend"
-        if "fantasy" in lowered or "category" in lowered or "matchup" in lowered or "season-long" in lowered or "daily leagues" in lowered:
-            return "fantasy"
-        if "against " in lowered or "on the mound" in lowered or "facing " in lowered or " off " in lowered:
-            return "pitcher"
-        if "inning" in lowered or "swing" in lowered or "gap" in lowered or "equalizer" in lowered:
-            return "context"
-        return lowered
-
-    def _pick_unique(pool: list[str], fallback_sig: str | None = None) -> str:
-        shuffled = list(pool)
-        random.shuffle(shuffled)
-        for sentence in shuffled:
-            signature = _sig(sentence) if fallback_sig is None else fallback_sig
-            if sentence and sentence not in sentences and signature not in used_signatures:
-                used_signatures.add(signature)
-                return sentence
-        return ""
-
-    # Build the ordered pool list, randomize where EV lands relative to fantasy/meta
-    # so the hard-hit sentence doesn't always appear last
-    ordered_pools: list[tuple[list[str], str | None]] = [
-        (context_pool, "context"),
-        (fantasy_pool, "fantasy"),
-    ]
-
-    # Insert quality (EV/trend) and meta (lineup/close game) in random order
-    extra_pools = [
-        (meta_pool, None),
-        (quality_pool, None),
-    ]
-    random.shuffle(extra_pools)
-    ordered_pools.extend(extra_pools)
-
-    for pool, forced_sig in ordered_pools:
-        picked = _pick_unique(pool, forced_sig)
-        if picked:
-            sentences.append(picked)
-
-    # --- Inject pitcher sentence at a natural position (not always last) ---
-    if pitcher_sentence and "pitcher" not in used_signatures:
-        used_signatures.add("pitcher")
-        # Insert after sentence 1 (opener) ~50% of the time, otherwise append
-        if len(sentences) >= 2 and random.random() < 0.5:
-            sentences.insert(2, pitcher_sentence)
-        else:
-            sentences.append(pitcher_sentence)
-
-    # --- Injury return note (always append if present) ---
-    if injury_note:
-        sentences.append(injury_note)
-
-    # --- Mid-game exit note ---
-    if feed and hitter:
-        exit_info = get_mid_game_exit(feed, hitter)
-        if exit_info.get("exited"):
-            inning = exit_info.get("inning", 0)
-            reason = exit_info.get("reason", "left the game")
-            if inning:
-                sentences.append(f"{last_name} {reason} in the {_ordinal(inning)} inning — worth monitoring.")
-            else:
-                sentences.append(f"{last_name} {reason} — worth monitoring.")
-
-    # --- Day game note (subtle) ---
-    if feed:
-        time_of_day = get_game_time_of_day(feed)
-        if time_of_day == "day" and hits >= 3 and random.random() < 0.4:
-            sentences.append(random.choice([
-                f"Not bad for a day game.",
-                f"He was locked in early, a day game didn't slow him down.",
-                f"The day game didn't matter to {last_name}.",
-            ]))
-
-    # --- Milestone notes ---
-    if hitter:
-        milestones = get_milestone_notes(hitter, stats)
-        for milestone in milestones[:1]:  # Max one milestone per card
-            sentences.append(random.choice([
-                f"{last_name} also hit his {milestone} tonight.",
-                f"That was his {milestone}.",
-                f"Worth noting: {last_name} hit his {milestone} with that swing.",
-                f"He also knocked in his {milestone} on the night.",
-            ]))
-
-    # --- Next game opponent ---
-    next_opp = get_next_opponent(team)
-    if next_opp and len(sentences) < max_sentences:
-        sentences.append(random.choice([
-            f"He's got a date {next_opp}.",
-            f"Up next for {last_name}: {next_opp}.",
-            f"The {team_name} head {next_opp}.",
-            f"Next up for him is {next_opp}.",
-        ]))
-
-    # --- Use last name to vary pronoun in later sentences ---
-    # Swap "He " at the start of sentence 2 with last name ~40% of the time
-    # Guard: only swap if last_name is a real surname (not a suffix like Jr.)
-    _suffixes = {"jr", "sr", "ii", "iii", "iv", "v"}
-    safe_last = last_name if last_name.lower().rstrip(".") not in _suffixes else ""
-    if safe_last and len(sentences) >= 2 and random.random() < 0.4:
-        s = sentences[1]
-        if s.startswith("He "):
-            sentences[1] = safe_last + " " + s[3:]
-        elif s.startswith("His "):
-            sentences[1] = f"{safe_last}'s " + s[4:]
-
-    standout = homers >= 2 or rbi >= 4 or hits >= 4 or steals >= 2 or (homers >= 1 and rbi >= 3)
-    max_sentences = 5 if standout else 4
-
-
-        # --- Deduplicate key words across sentences ---
-    KEY_SYNONYMS = {
-        "homer": ["long ball", "blast", "shot", "home run"],
-        "swing": ["cut", "at-bat", "knock", "hit"],
-        "damage": ["production", "output", "contribution", "work"],
-        "production": ["output", "contribution", "numbers", "line"],
-        "performance": ["night", "outing", "game", "effort"],
-    }
-    if len(sentences) >= 2:
-        # Find words used in opener
-        opener_lower = sentences[0].lower()
-        for word, synonyms in KEY_SYNONYMS.items():
-            if word in opener_lower:
-                # Replace word in sentences 2+ with a synonym
-                for i in range(1, len(sentences)):
-                    if word in sentences[i].lower():
-                        replacement = random.choice(synonyms)
-                        sentences[i] = sentences[i].replace(word, replacement, 1)
-                        sentences[i] = sentences[i].replace(word.capitalize(), replacement.capitalize(), 1)
-                        break
-
-    # --- Add punchy sentence occasionally (~25% of standout nights) ---
-    if standout and random.random() < 0.25 and len(sentences) < max_sentences:
-        if context.get("walkoff") or context.get("go_ahead_homer"):
-            punchy = random.choice(PUNCHY_SENTENCES["clutch"])
-        elif homers >= 1:
-            punchy = random.choice(PUNCHY_SENTENCES["homer"])
-        elif steals >= 2:
-            punchy = random.choice(PUNCHY_SENTENCES["speed"])
-        elif hits >= 3:
-            punchy = random.choice(PUNCHY_SENTENCES["multi_hit"])
-        else:
-            punchy = random.choice(PUNCHY_SENTENCES["general"])
-        sentences.append(punchy)
-
-    # --- Callback ending — reference opener theme (~30% of the time) ---
-    if len(sentences) >= 3 and random.random() < 0.3 and len(sentences) < max_sentences:
-        opener_lower = sentences[0].lower()
-        callback = ""
-        if "homer" in opener_lower or "deep" in opener_lower or "yard" in opener_lower:
-            callback = random.choice([
-                "One swing was all it took.",
-                "That's the kind of power that changes games.",
-                "When he gets one to hit, he doesn't miss.",
-            ])
-        elif "streak" in " ".join(s.lower() for s in sentences):
-            callback = random.choice([
-                "The hot stretch just keeps going.",
-                "He's been doing this night after night.",
-                "No signs of slowing down.",
-            ])
-        elif "steal" in opener_lower or "speed" in opener_lower or "swipe" in " ".join(s.lower() for s in sentences):
-            callback = random.choice([
-                "The legs make everything more dangerous.",
-                "Speed like that changes how a team plays defense.",
-            ])
-        elif hits >= 3:
-            callback = random.choice([
-                "The bat just wouldn't stop.",
-                "He made it look easy.",
-            ])
-        if callback and callback not in sentences:
-            sentences.append(callback)
-
-    # Only pad with a closing sentence if we need it,
-    # and only ~40% of the time — don't force a generic closer onto every card
-    if len(sentences) < 2:
-        filler = _pick_unique(SUMMARY_FILLER_POOL, "filler")
-        if filler:
-            sentences.append(filler)
-    elif len(sentences) == 2 and random.random() < 0.4:
-        filler = _pick_unique(FANTASY_CLOSING_POOL, "closing")
-        if filler:
-            sentences.append(filler)
-
-    final = " ".join(sentences[:max_sentences]).strip()
-    # Bold the first occurrence of the player's full name in the summary
+    final = " ".join(sentences[:3]).strip()
     if name in final:
         final = final.replace(name, f"**{name}**", 1)
     return final
@@ -4170,43 +3974,56 @@ async def generate_ai_cold_summary(
 
         if card_type == "slump":
             tone_instruction = (
-                "This is a slump card. The tone should be sympathetic but honest. "
-                "Acknowledge the drought and give it brief context (pitcher quality if available, "
-                "total at-bats in the stretch). End with one short forward-looking line. "
-                "Two to three sentences max."
+                "This is a slump card. Tone: sympathetic but honest, never dramatic. "
+                "Acknowledge the hitless stretch, give it one piece of concrete context "
+                "(total at-bats in the drought, pitcher quality if available), "
+                "and end with one short forward-looking line. Two to three sentences max. "
+                "Vary the structure: sometimes lead with the streak number, sometimes with "
+                "the at-bat total, sometimes with the pitcher who shut him down tonight."
             )
         else:
             tone_instruction = (
-                "This is a bad night card. The tone should be matter-of-fact and brief. "
-                "Name what happened (strikeouts, hitless), note if the opposing pitcher made it tough. "
-                "One to two sentences only. No fluff."
+                "This is a bad night card. Tone: matter-of-fact, not piling on. "
+                "Name what happened (strikeouts, hitless), note the opposing pitcher if relevant. "
+                "One to two sentences only. Every card should read differently — "
+                "vary whether you lead with the strikeout total, the at-bat line, or the matchup."
             )
-
-        system_prompt = (
-            "You write post-game fantasy baseball player cards for a Discord server. "
-            "Your voice is sharp, natural, and concise — like a beat reporter who follows fantasy closely.\n\n"
-            f"{tone_instruction}\n\n"
-            "Rules:\n"
-            "- Bold the player's full name on its first mention using **Name**.\n"
-            "- Use the player's last name after the first mention.\n"
-            "- Do not use em dashes (—). Use commas or periods instead.\n"
-            "- Do not use the words: 'showcased', 'impressive', 'notable', 'demonstrated'.\n"
-            "- Do not start sentences with 'Additionally' or 'Furthermore'.\n"
-            "- Output only the summary text. No labels, no preamble, no quotation marks."
-        )
-
-        user_message = f"Write a fantasy baseball summary for this player's performance:\n\n{context_block}"
 
         static_rules = (
             "You write post-game fantasy baseball player cards for a Discord server. "
-            "Your voice is sharp, natural, and concise — like a beat reporter who follows fantasy closely.\n\n"
+            "Your voice is a sharp beat reporter — direct and specific, never generic.\n\n"
             "Rules:\n"
             "- Bold the player's full name on its first mention using **Name**.\n"
             "- Use the player's last name after the first mention.\n"
             "- Do not use em dashes (—). Use commas or periods instead.\n"
-            "- Do not use the words: 'showcased', 'impressive', 'notable', 'demonstrated'.\n"
+            "- Do not use the words: 'showcased', 'impressive', 'notable', 'demonstrated', 'incredible'.\n"
             "- Do not start sentences with 'Additionally' or 'Furthermore'.\n"
+            "- Do not use: 'down the stretch', 'as the season winds down', 'late in the season'.\n"
+            "- Each card must read differently from the last — vary the opening, the angle, the sentence structure.\n"
             "- Output only the summary text. No labels, no preamble, no quotation marks."
+        )
+
+        # Angle hints for cold cards — filtered by available context
+        _cold_angle_hints = [
+            "Lead with the at-bat line. Keep it clean and let the number speak.",
+            "Start with the one at-bat that summed up his night, then give the full picture.",
+            "Open with the simplest possible statement of fact. One sentence. Then add the one thing worth knowing.",
+            "Lead with what fantasy managers should actually do with this information right now.",
+        ]
+        if pitcher_str:
+            _cold_angle_hints.append(
+                "Lead with the pitcher. Frame this as a matchup loss, not a personal failure."
+            )
+        if card_type == "slump":
+            _cold_angle_hints.append(
+                "Open with the streak length and the at-bat total. Make the drought feel concrete, not abstract."
+            )
+        angle_hint = random.choice(_cold_angle_hints)
+
+        user_message = (
+            f"Write a fantasy baseball {card_type.replace('_', ' ')} card for this player.\n\n"
+            f"Angle for this card: {angle_hint}\n\n"
+            f"{context_block}"
         )
 
         session = _ai_session or aiohttp.ClientSession()
@@ -4220,7 +4037,7 @@ async def generate_ai_cold_summary(
                 },
                 json={
                     "model": "claude-haiku-4-5-20251001",
-                    "max_tokens": 120,
+                    "max_tokens": 150,
                     "system": [
                         {
                             "type": "text",
@@ -4368,7 +4185,7 @@ async def post_card(channel: discord.abc.Messageable, hitter: dict, opponent: st
     score_value = score_hitter(stats)
     emoji = _subject_emoji(stats, label, game_context, recent_games)
 
-    summary = await generate_ai_hitter_summary(
+    ai_subject, summary = await generate_ai_hitter_summary(
         name=hitter["name"],
         team=hitter["team"],
         stats=stats,
@@ -4398,7 +4215,7 @@ async def post_card(channel: discord.abc.Messageable, hitter: dict, opponent: st
         timestamp=datetime.now(timezone.utc),
     )
     apply_player_card_chrome(embed, hitter["name"], hitter["team"])
-    subject_text = build_hitter_subject(hitter["name"], stats, label, game_context, recent_games, position=position, lineup_spot=lineup_spot)
+    subject_text = ai_subject if ai_subject else build_hitter_subject(hitter["name"], stats, label, game_context, recent_games, position=position, lineup_spot=lineup_spot)
     embed.add_field(name="", value=f"**{emoji}{subject_text}**", inline=False)
     embed.add_field(name="Summary", value=summary, inline=False)
     embed.add_field(name="Game Line", value=format_hitter_game_line(stats), inline=False)
