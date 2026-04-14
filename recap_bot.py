@@ -100,17 +100,29 @@ class RecapBot:
                     continue
 
                 today = datetime.now(EASTERN).date()
+                yesterday = today - timedelta(days=1)
                 todays_games = await self._fetch_schedule(today)
 
-                if not self._any_games_final(todays_games):
+                # Check for games from yesterday that went final but whose video
+                # was never found (e.g. still uploading when midnight ET rolled over).
+                pending_from_yesterday = any(
+                    self.game_final_times.get(pk, "")[:10] == str(yesterday)
+                    and self.checked_no_recap.get(pk, 0) < MAX_SEARCH_ATTEMPTS
+                    for pk in self.checked_no_recap
+                )
+
+                if not self._any_games_final(todays_games) and not pending_from_yesterday:
                     logger.info("RECAP_BOT: No games final yet today — checking again in 30 min")
                     await asyncio.sleep(1800)
                     continue
 
-                # At least one game is final — run the poll (today only; yesterday handled at startup)
-                await self._poll_completed_games()
+                if pending_from_yesterday:
+                    logger.info("RECAP_BOT: Pending yesterday games detected — including in poll")
 
-                if self._is_day_complete(todays_games):
+                # At least one game is final (or we have carryover from yesterday)
+                await self._poll_completed_games(include_yesterday=pending_from_yesterday)
+
+                if self._is_day_complete(todays_games) and not pending_from_yesterday:
                     sleep_secs = await self._seconds_until_first_game(today + timedelta(days=1))
                     logger.info(
                         "RECAP_BOT: Day complete — sleeping %.0f seconds until tomorrow's first game",
