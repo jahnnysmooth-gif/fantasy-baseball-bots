@@ -49,11 +49,19 @@ THREAD_MAP_FILE = STATE_DIR / "player_threads.json"
 
 MAX_PROFILE_REQUESTS_PER_DAY = 5  # For non-admins
 
-if THREAD_MAP_FILE.exists():
+try:
     with open(THREAD_MAP_FILE) as f:
         PLAYER_THREADS = json.load(f)
-else:
+except (FileNotFoundError, json.JSONDecodeError):
     PLAYER_THREADS = {}
+
+
+def _save_thread_map():
+    tmp = THREAD_MAP_FILE.with_suffix(".tmp")
+    with open(tmp, "w") as f:
+        json.dump(PLAYER_THREADS, f, indent=2)
+    os.replace(tmp, THREAD_MAP_FILE)
+
 
 BOT_TIMEZONE = "America/New_York"
 OUTLOOK_UNLOCK_DATE = date(2026, 4, 15)
@@ -698,7 +706,7 @@ async def find_existing_profile_thread(
             return thread
 
     try:
-        async for thread in forum_channel.archived_threads(limit=200):
+        async for thread in forum_channel.archived_threads(limit=None):
             if await thread_matches(thread):
                 return thread
     except Exception as e:
@@ -2662,8 +2670,7 @@ async def create_profile_for_name(
             PLAYER_THREADS[profile["full_name"]] = created_thread.id
             PLAYER_THREADS[normalize_text(profile["full_name"])] = created_thread.id
             PLAYER_THREADS[f"mlb_id:{override_player_id}"] = created_thread.id
-            with open(THREAD_MAP_FILE, "w") as f:
-                json.dump(PLAYER_THREADS, f, indent=2)
+            _save_thread_map()
 
             return {
                 "status": "created",
@@ -2731,8 +2738,7 @@ async def create_profile_for_name(
     PLAYER_THREADS[profile["full_name"]] = created_thread.id
     PLAYER_THREADS[normalize_text(profile["full_name"])] = created_thread.id
     PLAYER_THREADS[f"mlb_id:{player_id}"] = created_thread.id
-    with open(THREAD_MAP_FILE, "w") as f:
-        json.dump(PLAYER_THREADS, f, indent=2)
+    _save_thread_map()
 
     return {
         "status": "created",
@@ -2924,8 +2930,7 @@ async def backfill_thread_map():
         log_profiles(f"[BACKFILL] Archived thread scan error: {e}")
 
     if added:
-        with open(THREAD_MAP_FILE, "w") as f:
-            json.dump(PLAYER_THREADS, f, indent=2)
+        _save_thread_map()
         log_profiles(f"[BACKFILL] Added {added} threads to map ({len(PLAYER_THREADS)} total)")
     else:
         log_profiles(f"[BACKFILL] Thread map already up to date ({len(PLAYER_THREADS)} entries)")
