@@ -642,6 +642,21 @@ async def find_existing_profile_thread(
     player_name: str,
     player_id: int | None = None,
 ):
+    # Fast path: check persisted thread map by name and by MLB ID
+    id_key = f"mlb_id:{player_id}" if player_id is not None else None
+    for key in ([player_name, id_key] if id_key else [player_name]):
+        if key and key in PLAYER_THREADS:
+            thread_id = PLAYER_THREADS[key]
+            thread = forum_channel.guild.get_thread(thread_id)
+            if thread:
+                return thread
+            try:
+                thread = await bot.fetch_channel(thread_id)
+                if thread:
+                    return thread
+            except Exception:
+                pass
+
     async def thread_matches(thread: discord.Thread):
         if player_id is not None:
             try:
@@ -2611,9 +2626,10 @@ async def create_profile_for_name(
             created_thread = created.thread if hasattr(created, "thread") else created
 
             PLAYER_THREADS[profile["full_name"]] = created_thread.id
+            PLAYER_THREADS[f"mlb_id:{override_player_id}"] = created_thread.id
             with open(THREAD_MAP_FILE, "w") as f:
                 json.dump(PLAYER_THREADS, f, indent=2)
-            
+
             return {
                 "status": "created",
                 "player_name": profile["full_name"],
@@ -2676,6 +2692,12 @@ async def create_profile_for_name(
     )
 
     created_thread = created.thread if hasattr(created, "thread") else created
+
+    PLAYER_THREADS[profile["full_name"]] = created_thread.id
+    PLAYER_THREADS[f"mlb_id:{player_id}"] = created_thread.id
+    with open(THREAD_MAP_FILE, "w") as f:
+        json.dump(PLAYER_THREADS, f, indent=2)
+
     return {
         "status": "created",
         "player_name": profile["full_name"],
@@ -2834,6 +2856,40 @@ async def periodic_statcast_cleanup():
 # =========================
 # BOT EVENTS
 # =========================
+async def backfill_thread_map():
+    await bot.wait_until_ready()
+    forum_channel = bot.get_channel(FORUM_CHANNEL_ID)
+    if forum_channel is None:
+        log_profiles("[BACKFILL] Forum channel not found, skipping backfill")
+        return
+
+    log_profiles("[BACKFILL] Scanning forum threads to populate thread map...")
+    added = 0
+
+    def index_thread(thread: discord.Thread):
+        nonlocal added
+        name = re.sub(r"\s+\([A-Z]{2,4}\)\s*$", "", thread.name.strip())
+        if name and name not in PLAYER_THREADS:
+            PLAYER_THREADS[name] = thread.id
+            added += 1
+
+    for thread in forum_channel.threads:
+        index_thread(thread)
+
+    try:
+        async for thread in forum_channel.archived_threads(limit=None):
+            index_thread(thread)
+    except Exception as e:
+        log_profiles(f"[BACKFILL] Archived thread scan error: {e}")
+
+    if added:
+        with open(THREAD_MAP_FILE, "w") as f:
+            json.dump(PLAYER_THREADS, f, indent=2)
+        log_profiles(f"[BACKFILL] Added {added} threads to map ({len(PLAYER_THREADS)} total)")
+    else:
+        log_profiles(f"[BACKFILL] Thread map already up to date ({len(PLAYER_THREADS)} entries)")
+
+
 @bot.event
 async def on_ready():
     global seeder_task
@@ -2843,12 +2899,14 @@ async def on_ready():
     load_thread_command_state()
     load_user_rate_limit_state()
 
+    asyncio.create_task(backfill_thread_map())
+
     if seed_state.get("completed"):
         log_adp("Seeder already complete. Background seeder will not start.")
     elif seeder_task is None or seeder_task.done():
         seeder_task = asyncio.create_task(background_seeder_loop())
         log_adp("Seeder task started")
-    
+
     # Start periodic Statcast cache cleanup (every 30 minutes)
     asyncio.create_task(periodic_statcast_cleanup())
 
