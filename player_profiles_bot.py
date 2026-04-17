@@ -799,6 +799,11 @@ async def search_player_candidates(player_query: str):
                     continue
 
                 full_name = f"{str(name_first).strip()} {str(name_last).strip()}"
+                last_year = row.get("mlb_played_last")
+                try:
+                    is_active = int(last_year) >= current_local_date().year - 1
+                except Exception:
+                    is_active = False
                 seen_ids.add(player_id)
                 candidates.append(
                     {
@@ -806,7 +811,7 @@ async def search_player_candidates(player_query: str):
                         "full_name": full_name,
                         "full_name_normalized": normalize_text(full_name),
                         "current_age": None,
-                        "active": True,
+                        "active": is_active,
                         "primary_position": None,
                         "position_type": None,
                         "team_name": None,
@@ -826,18 +831,28 @@ def choose_best_candidate(query: str, candidates: list[dict]):
 
     exact = [c for c in candidates if c.get("full_name_normalized") == nq]
     if exact:
-        exact.sort(
-            key=lambda c: (
-                0 if c.get("active") else 1,
-                0 if c.get("team_name") else 1,
-                c.get("full_name", ""),
-            )
-        )
+        active_exact = [c for c in exact if c.get("active")]
+        if active_exact:
+            active_exact.sort(key=lambda c: (0 if c.get("team_name") else 1, c.get("full_name", "")))
+            return active_exact[0], candidates
+        # Exact match exists but is inactive — prefer a single active startswith match instead
+        active_startswith = [
+            c for c in candidates
+            if c.get("active") and c.get("full_name_normalized", "").startswith(nq)
+        ]
+        if len(active_startswith) == 1:
+            return active_startswith[0], candidates
+        # Fall back to the inactive exact match
+        exact.sort(key=lambda c: (0 if c.get("team_name") else 1, c.get("full_name", "")))
         return exact[0], candidates
 
     startswith_matches = [c for c in candidates if c.get("full_name_normalized", "").startswith(nq)]
     if len(startswith_matches) == 1:
         return startswith_matches[0], candidates
+    # Multiple startswith — prefer active
+    active_startswith = [c for c in startswith_matches if c.get("active")]
+    if len(active_startswith) == 1:
+        return active_startswith[0], candidates
 
     contains_matches = [c for c in candidates if nq in c.get("full_name_normalized", "")]
     if len(contains_matches) == 1:
