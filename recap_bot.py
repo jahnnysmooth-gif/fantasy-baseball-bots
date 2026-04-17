@@ -105,10 +105,12 @@ class RecapBot:
 
                 # Check for games from yesterday that went final but whose video
                 # was never found (e.g. still uploading when midnight ET rolled over).
-                pending_from_yesterday = any(
-                    self.game_final_times.get(pk, "")[:10] == str(yesterday)
+                early_morning = datetime.now(EASTERN).hour < 6
+                pending_from_yesterday = early_morning or any(
+                    ts[:10] == str(yesterday)
+                    and pk not in self.posted_game_ids
                     and self.checked_no_recap.get(pk, 0) < MAX_SEARCH_ATTEMPTS
-                    for pk in self.checked_no_recap
+                    for pk, ts in self.game_final_times.items()
                 )
 
                 if not self._any_games_final(todays_games) and not pending_from_yesterday:
@@ -271,9 +273,7 @@ class RecapBot:
                     continue
                 if status in self.FINAL_STATUSES:
                     game_pk = str(game.get("gamePk") or "")
-                    # Only record final time for today's games — yesterday's games
-                    # are already old enough to bypass the 30-min delay
-                    if game_pk and scan_date == today_et and game_pk not in self.game_final_times:
+                    if game_pk and game_pk not in self.game_final_times:
                         self.game_final_times[game_pk] = datetime.now(EASTERN).isoformat()
                         self._save_state()
                         logger.info("RECAP_BOT: Game %s went final, recorded timestamp", game_pk)
