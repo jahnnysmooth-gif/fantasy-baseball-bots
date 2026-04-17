@@ -189,6 +189,7 @@ STATCAST_LAST_ACCESSED = {}
 
 seeder_task = None
 adp_cache = None
+backfill_done = asyncio.Event()
 
 seed_state = {
     "paused": False,
@@ -2800,6 +2801,7 @@ async def seed_next_player_from_state(forum_channel: discord.ForumChannel):
 
 async def background_seeder_loop():
     await bot.wait_until_ready()
+    await backfill_done.wait()
     forum_channel = bot.get_channel(FORUM_CHANNEL_ID)
 
     if forum_channel is None:
@@ -2888,6 +2890,8 @@ async def backfill_thread_map():
         log_profiles(f"[BACKFILL] Added {added} threads to map ({len(PLAYER_THREADS)} total)")
     else:
         log_profiles(f"[BACKFILL] Thread map already up to date ({len(PLAYER_THREADS)} entries)")
+
+    backfill_done.set()
 
 
 @bot.event
