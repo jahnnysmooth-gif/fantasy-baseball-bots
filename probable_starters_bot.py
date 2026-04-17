@@ -561,6 +561,24 @@ async def fetch_hitter_recent_form(session, hitter_id):
     }
 
 
+async def fetch_hitter_season_stats(session, hitter_id):
+    current_year = datetime.now(ZoneInfo(TIMEZONE)).year
+    url = (
+        f'https://statsapi.mlb.com/api/v1/people/{hitter_id}/stats?'
+        f'stats=season&group=hitting&season={current_year}'
+    )
+    data = await fetch_json(session, url, timeout=20)
+    stats = data.get('stats', [])
+    if not stats or not stats[0].get('splits'):
+        return None
+    stat = stats[0]['splits'][0].get('stat', {})
+    return {
+        'ops': stat.get('ops'),
+        'strikeOuts': stat.get('strikeOuts', 0),
+        'plateAppearances': stat.get('plateAppearances', 0),
+    }
+
+
 
 async def fetch_savant_pitcher_metrics(session):
     current_year = datetime.now(ZoneInfo(TIMEZONE)).year
@@ -884,34 +902,66 @@ async def build_hot_cold_hitters(session, opponent_id):
 
     async def load(h):
         async with sem:
-            form = await fetch_hitter_recent_form(session, h['id'])
+            form, season = await asyncio.gather(
+                fetch_hitter_recent_form(session, h['id']),
+                fetch_hitter_season_stats(session, h['id']),
+            )
         if not form:
             return None
         pa = int(form.get('plateAppearances', 0) or 0)
-        if pa < 8:
+        if pa < 12:
             return None
-        ops_val = None
+
         try:
-            ops_val = float(form.get('ops', 0) or 0)
+            ops_recent = float(form.get('ops') or 0)
         except Exception:
-            ops_val = 0.0
+            ops_recent = 0.0
+
+        try:
+            ops_season = float((season or {}).get('ops') or 0)
+        except Exception:
+            ops_season = ops_recent
+
+        try:
+            season_pa = float((season or {}).get('plateAppearances') or 0)
+            season_k = float((season or {}).get('strikeOuts') or 0)
+            k_pct_season = (season_k / season_pa) if season_pa > 0 else 0.25
+        except Exception:
+            k_pct_season = 0.25
+
+        hr_recent = int(form.get('homeRuns', 0) or 0)
+        trend = ops_recent - ops_season
+
+        # Scale trend weight by sample size: full weight at 20+ PA, tapers to 0.5x at 12 PA
+        trend_weight = 1.5 * min(1.0, (pa - 12) / 8 * 0.5 + 0.5)
+
+        # Composite: recent production + trend vs baseline + power + contact
+        composite = (
+            ops_recent
+            + (trend * trend_weight)
+            + (hr_recent * 0.075)
+            - (k_pct_season * 0.3)
+        )
+
         return {
             'name': h['name'],
             'avg': form.get('avg'),
             'ops': form.get('ops'),
-            'hr': int(form.get('homeRuns', 0) or 0),
+            'ops_season': f'{ops_season:.3f}' if ops_season else None,
+            'hr': hr_recent,
             'k': int(form.get('strikeOuts', 0) or 0),
             'pa': pa,
-            'ops_value': ops_val,
+            'trend': round(trend, 3),
+            'composite': composite,
         }
 
     loaded = [x for x in await asyncio.gather(*(load(h) for h in hitters)) if x]
-    hot = sorted(loaded, key=lambda x: x['ops_value'], reverse=True)[:3]
-    cold = sorted(loaded, key=lambda x: x['ops_value'])[:3]
+    hot = sorted(loaded, key=lambda x: x['composite'], reverse=True)[:3]
+    cold = sorted(loaded, key=lambda x: x['composite'])[:3]
     return {'hot': hot, 'cold': cold}
 
 
-async def enrich_starter(session, starter, ownership_map, savant_map):
+async def enrich_starter(session, starter, ownership_map, savant_map, hot_cold_cache=None):
     own = ownership_map.get(starter['pitcher_name'].lower())
     if not own:
         return None
@@ -923,14 +973,23 @@ async def enrich_starter(session, starter, ownership_map, savant_map):
     if espn_id:
         headshot_url = f"https://a.espncdn.com/i/headshots/mlb/players/full/{espn_id}.png"
 
+    opp_id = starter['opponent_id']
+
+    async def get_hot_cold():
+        if hot_cold_cache is not None:
+            if opp_id not in hot_cold_cache:
+                hot_cold_cache[opp_id] = await build_hot_cold_hitters(session, opp_id)
+            return hot_cold_cache[opp_id]
+        return await build_hot_cold_hitters(session, opp_id)
+
     try:
         (season_stat, recent_offense), recent_form, season_pitching, hot_cold, pitcher_hand, opponent_splits = await asyncio.gather(
-            fetch_team_recent_offense(session, starter['opponent_id']),
+            fetch_team_recent_offense(session, opp_id),
             build_recent_form(session, starter['pitcher_id']),
             fetch_pitcher_season_stats(session, starter['pitcher_id']),
-            build_hot_cold_hitters(session, starter['opponent_id']),
+            get_hot_cold(),
             fetch_pitcher_handedness(session, starter['pitcher_id']),
-            fetch_team_splits(session, starter['opponent_id']),
+            fetch_team_splits(session, opp_id),
         )
     except Exception as e:
         import traceback
@@ -1068,8 +1127,8 @@ async def generate_summaries(starters):
                 'K%': s['opponent_metrics'].get('k_pct_season'),
                 'RPG_last14': s['opponent_metrics'].get('runs_per_game_last14'),
             },
-            'hot_hitters': [{'name': h['name'], 'ops': h['ops'], 'avg': h['avg'], 'hr': h['hr']} for h in s['hot_hitters']],
-            'cold_hitters': [{'name': h['name'], 'ops': h['ops'], 'avg': h['avg'], 'hr': h['hr']} for h in s['cold_hitters']],
+            'hot_hitters': [{'name': h['name'], 'ops': h['ops'], 'avg': h['avg'], 'hr': h['hr'], 'trend': h.get('trend')} for h in s['hot_hitters']],
+            'cold_hitters': [{'name': h['name'], 'ops': h['ops'], 'avg': h['avg'], 'hr': h['hr'], 'trend': h.get('trend')} for h in s['cold_hitters']],
             'park': {'label': s['park_label'], 'run': s['park_factor']['run'], 'hr': s['park_factor']['hr']},
             'pitcher_hand': s.get('pitcher_hand'),
             'opponent_splits': s.get('opponent_splits', {}),
@@ -1084,6 +1143,9 @@ async def generate_summaries(starters):
         "- When the most recent start was notable — a gem, a blowup, a strong outing cut short by pitch count — mention it specifically.\n"
         "- If a pitcher has been on a hot stretch, say so. Reward recent sustained excellence with real enthusiasm.\n"
         "- Reference stuff, command, sequencing, or approach when relevant, not just leaderboard metrics.\n"
+        "- hot_hitters and cold_hitters each include a 'trend' field: the difference between the hitter's OPS over the last 7 days and their season OPS. "
+        "A positive trend means they're heating up above their baseline; negative means they're scuffling. "
+        "When the trend is meaningful (e.g. above +.080 or below -.080), weave it into the narrative naturally — don't just recite the number.\n"
         "- End every blurb with a clear, confident verdict. No hedging. Tell them to start him, fade him, or what to expect.\n"
         "- Vary length based on the story. A compelling pitcher with a hot streak and a great matchup earns 4-5 sentences. "
         "A fringe streamer with nothing interesting going on gets 2. Never pad a blurb just to fill space.\n"
@@ -1396,10 +1458,16 @@ async def run_cycle(target_date):
                     save_state(state)
                 return False
 
+            enrich_sem = asyncio.Semaphore(4)
+            hot_cold_cache = {}
+
+            async def limited_enrich(s):
+                async with enrich_sem:
+                    return await enrich_starter(session, s, ownership_map, savant_map, hot_cold_cache)
+
             enriched = [
-                x for x in await asyncio.gather(*(
-                    enrich_starter(session, s, ownership_map, savant_map) for s in new_probable
-                )) if x
+                x for x in await asyncio.gather(*(limited_enrich(s) for s in new_probable))
+                if x
             ]
 
         if not enriched:
