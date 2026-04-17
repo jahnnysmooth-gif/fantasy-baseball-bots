@@ -643,20 +643,38 @@ async def find_existing_profile_thread(
     player_name: str,
     player_id: int | None = None,
 ):
-    # Fast path: check persisted thread map by name and by MLB ID
+    # Fast path: check persisted thread map by name (exact + normalized) and MLB ID
     id_key = f"mlb_id:{player_id}" if player_id is not None else None
-    for key in ([player_name, id_key] if id_key else [player_name]):
-        if key and key in PLAYER_THREADS:
-            thread_id = PLAYER_THREADS[key]
-            thread = forum_channel.guild.get_thread(thread_id)
+    norm_name = normalize_text(player_name)
+
+    async def try_thread_id(thread_id: int):
+        thread = forum_channel.guild.get_thread(thread_id)
+        if thread:
+            return thread
+        try:
+            thread = await bot.fetch_channel(thread_id)
             if thread:
                 return thread
-            try:
-                thread = await bot.fetch_channel(thread_id)
-                if thread:
-                    return thread
-            except Exception:
-                pass
+        except Exception:
+            pass
+        return None
+
+    # Exact key checks first (mlb_id: and raw name)
+    for key in ([id_key, player_name] if id_key else [player_name]):
+        if key and key in PLAYER_THREADS:
+            result = await try_thread_id(PLAYER_THREADS[key])
+            if result:
+                return result
+
+    # Normalized name scan — catches accent mismatches (e.g. "Julio Rodriguez" vs "Julio Rodríguez")
+    for key, thread_id in PLAYER_THREADS.items():
+        if key.startswith("mlb_id:"):
+            continue
+        if normalize_text(key) == norm_name:
+            result = await try_thread_id(thread_id)
+            if result:
+                return result
+            break
 
     async def thread_matches(thread: discord.Thread):
         if player_id is not None:
@@ -2627,6 +2645,7 @@ async def create_profile_for_name(
             created_thread = created.thread if hasattr(created, "thread") else created
 
             PLAYER_THREADS[profile["full_name"]] = created_thread.id
+            PLAYER_THREADS[normalize_text(profile["full_name"])] = created_thread.id
             PLAYER_THREADS[f"mlb_id:{override_player_id}"] = created_thread.id
             with open(THREAD_MAP_FILE, "w") as f:
                 json.dump(PLAYER_THREADS, f, indent=2)
@@ -2695,6 +2714,7 @@ async def create_profile_for_name(
     created_thread = created.thread if hasattr(created, "thread") else created
 
     PLAYER_THREADS[profile["full_name"]] = created_thread.id
+    PLAYER_THREADS[normalize_text(profile["full_name"])] = created_thread.id
     PLAYER_THREADS[f"mlb_id:{player_id}"] = created_thread.id
     with open(THREAD_MAP_FILE, "w") as f:
         json.dump(PLAYER_THREADS, f, indent=2)
@@ -2871,9 +2891,13 @@ async def backfill_thread_map():
     def index_thread(thread: discord.Thread):
         nonlocal added
         name = re.sub(r"\s+\([A-Z]{2,4}\)\s*$", "", thread.name.strip())
-        if name and name not in PLAYER_THREADS:
-            PLAYER_THREADS[name] = thread.id
-            added += 1
+        if not name:
+            return
+        norm = normalize_text(name)
+        for key in (name, norm):
+            if key not in PLAYER_THREADS:
+                PLAYER_THREADS[key] = thread.id
+                added += 1
 
     for thread in forum_channel.threads:
         index_thread(thread)
