@@ -3,7 +3,7 @@ PROSPECT WATCH BOT — ENVIRONMENT VARIABLES
 
 REQUIRED
 --------
-ANALYTIC_BOT_TOKEN              Discord bot token
+PROSPECT_BOT_TOKEN              Discord bot token
 PROSPECT_WATCH_CHANNEL_ID       Discord channel ID to post cards to
 
 

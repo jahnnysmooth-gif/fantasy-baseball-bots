@@ -30,7 +30,7 @@ _sys.path.pop(0)
 
 # ── CONFIG ───────────────────────────────────────────────────────────────────
 
-TOKEN      = os.getenv("ANALYTIC_BOT_TOKEN", "")
+TOKEN      = os.getenv("PROSPECT_BOT_TOKEN", "")
 CHANNEL_ID = int(os.getenv("PROSPECT_WATCH_CHANNEL_ID", "0"))
 ANTHROPIC_API_KEY   = os.getenv("PROSPECT_BOT_SUMMARY", "")
 PROSPECTS_FILE      = os.getenv("PROSPECT_WATCH_PROSPECTS_FILE", "prospects/top_prospects.json")
@@ -287,23 +287,32 @@ def extract_player_plays(feed: dict, player_id: int, perf_type: str) -> str:
         return ""
 
 
-def fetch_season_stats(player_id: int, group: str, sport_id: int) -> dict | None:
+_SPORT_ID_TO_LEVEL = {11: "AAA", 12: "AA", 13: "A+", 14: "A", 16: "ROK"}
+
+def fetch_season_stats(player_id: int, group: str, sport_id: int) -> list[tuple[str, dict]]:
+    """Return a list of (level_label, stat_dict) for every level the player appeared at this season."""
     season = date.today().year
-    # Try the player's current level first, then fall back to all MiLB levels combined
-    for sid_param in [str(sport_id), "11,12,13,14,16"]:
-        try:
-            data = _get_json(f"{BASE_URL}/people/{player_id}/stats", params={
-                "stats": "season",
-                "group": group,
-                "season": season,
-                "sportId": sid_param,
-            })
-            splits = (data.get("stats") or [{}])[0].get("splits", [])
-            if splits:
-                return splits[0].get("stat")
-        except Exception as exc:
-            log(f"Season stats fetch failed for player {player_id} sportId={sid_param}: {exc}")
-    return None
+    try:
+        data = _get_json(f"{BASE_URL}/people/{player_id}/stats", params={
+            "stats": "season",
+            "group": group,
+            "season": season,
+            "sportId": "11,12,13,14,16",
+        })
+        splits = (data.get("stats") or [{}])[0].get("splits", [])
+        results = []
+        for split in splits:
+            stat = split.get("stat")
+            if not stat:
+                continue
+            sid = safe_int((split.get("sport") or {}).get("id") or sport_id)
+            label = _SPORT_ID_TO_LEVEL.get(sid, LEVEL_CONFIG.get(sid, {}).get("label", "MiLB"))
+            results.append((label, stat))
+        if results:
+            return results
+    except Exception as exc:
+        log(f"Season stats fetch failed for player {player_id}: {exc}")
+    return []
 
 
 def fetch_recent_stats(player_id: int, group: str, sport_id: int, games: int = 7) -> dict | None:
@@ -635,30 +644,59 @@ def format_pitcher_game_line(stats: dict) -> str:
     return ", ".join(parts)
 
 
-def format_hitter_season_line(season: dict) -> str | None:
-    if not season:
+def format_hitter_season_line(splits: list[tuple[str, dict]]) -> str | None:
+    if not splits:
         return None
-    avg  = season.get("avg", "-.---")
-    hr   = safe_int(season.get("homeRuns"))
-    rbi  = safe_int(season.get("rbi"))
-    ops  = season.get("ops", "-.---")
-    sb   = safe_int(season.get("stolenBases"))
-    parts = [f"{avg} AVG", f"{hr} HR", f"{rbi} RBI", f"{ops} OPS"]
-    if sb:
-        parts.append(f"{sb} SB")
-    return " • ".join(parts)
+    lines = []
+    for label, s in splits:
+        avg = s.get("avg", "-.---")
+        hr  = safe_int(s.get("homeRuns"))
+        rbi = safe_int(s.get("rbi"))
+        ops = s.get("ops", "-.---")
+        sb  = safe_int(s.get("stolenBases"))
+        parts = [f"{avg} AVG", f"{hr} HR", f"{rbi} RBI", f"{ops} OPS"]
+        if sb:
+            parts.append(f"{sb} SB")
+        lines.append(f"**{label}:** " + " • ".join(parts))
+    return "\n".join(lines)
 
 
-def format_pitcher_season_line(season: dict) -> str | None:
-    if not season:
+def format_pitcher_season_line(splits: list[tuple[str, dict]]) -> str | None:
+    if not splits:
         return None
-    era  = season.get("era", "-.--")
-    w    = safe_int(season.get("wins"))
-    l    = safe_int(season.get("losses"))
-    k    = safe_int(season.get("strikeOuts"))
-    ip   = season.get("inningsPitched", "0.0")
-    whip = season.get("whip", "-.--")
-    return f"{w}-{l}, {era} ERA, {whip} WHIP, {k} K, {ip} IP"
+    lines = []
+    for label, s in splits:
+        era  = s.get("era", "-.--")
+        w    = safe_int(s.get("wins"))
+        l    = safe_int(s.get("losses"))
+        k    = safe_int(s.get("strikeOuts"))
+        ip   = s.get("inningsPitched", "0.0")
+        whip = s.get("whip", "-.--")
+        lines.append(f"**{label}:** {w}-{l}, {era} ERA, {whip} WHIP, {k} K, {ip} IP")
+    return "\n".join(lines)
+
+
+_LEVEL_RANK = {"AAA": 1, "AA": 2, "A+": 3, "A": 4, "ROK": 5}
+
+def detect_level_movement(splits: list[tuple[str, dict]], current_level: str) -> str:
+    """Return a movement note if the player changed levels this season, else empty string."""
+    if len(splits) <= 1:
+        return ""
+    levels = [label for label, _ in splits]
+    if current_level not in levels:
+        return ""
+    other_levels = [l for l in levels if l != current_level]
+    if not other_levels:
+        return ""
+    # Use the most recent prior level (last in the list before current)
+    prior_level = other_levels[-1]
+    current_rank = _LEVEL_RANK.get(current_level, 99)
+    prior_rank   = _LEVEL_RANK.get(prior_level, 99)
+    if current_rank < prior_rank:
+        return f"promoted from {prior_level} to {current_level} this season"
+    elif current_rank > prior_rank:
+        return f"demoted from {prior_level} to {current_level} this season"
+    return ""
 
 
 def game_score_string(game: dict) -> str:
@@ -681,7 +719,7 @@ def game_score_string(game: dict) -> str:
 
 # ── CLAUDE BLURB ──────────────────────────────────────────────────────────────
 
-def _generate_blurb_sync(perf: dict, score_str: str, play_context: str, recent_line: str) -> tuple[str, str]:
+def _generate_blurb_sync(perf: dict, score_str: str, play_context: str, recent_line: str, movement_note: str) -> tuple[str, str]:
     """Returns (headline, blurb). Both empty strings if no API key or on error."""
     if not ANTHROPIC_API_KEY:
         return "", ""
@@ -708,6 +746,10 @@ def _generate_blurb_sync(perf: dict, score_str: str, play_context: str, recent_l
             f"Recent form: {recent_line}\n"
             if recent_line else ""
         )
+        movement_section = (
+            f"Level movement: {movement_note}\n"
+            if movement_note else ""
+        )
 
         if perf["type"] == "hitter":
             line = format_hitter_game_line(perf["stats"])
@@ -716,6 +758,7 @@ def _generate_blurb_sync(perf: dict, score_str: str, play_context: str, recent_l
                 f"Respond with exactly two parts, each separated by a blank line.\n\n"
                 f"{play_section}"
                 f"{recent_section}"
+                f"{movement_section}"
                 f"Part 1: A punchy 6-10 word headline for {name} (#{rank} overall MLB prospect, {org} {level}) "
                 f"who just went {line} (final: {score_str}). No quotes, no colons. {banned}\n\n"
                 f"Part 2: 2 to 3 sentences in beat-writer voice. Use the situational details and recent "
@@ -730,6 +773,7 @@ def _generate_blurb_sync(perf: dict, score_str: str, play_context: str, recent_l
                 f"Respond with exactly two parts, each separated by a blank line.\n\n"
                 f"{play_section}"
                 f"{recent_section}"
+                f"{movement_section}"
                 f"Part 1: A punchy 6-10 word headline for {name} (#{rank} overall MLB prospect, {org} {level}) "
                 f"who just threw {line} (final: {score_str}). No quotes, no colons. {banned}\n\n"
                 f"Part 2: 2 to 3 sentences in beat-writer voice. Use the situational details and recent "
@@ -753,15 +797,15 @@ def _generate_blurb_sync(perf: dict, score_str: str, play_context: str, recent_l
         return "", ""
 
 
-async def generate_blurb(perf: dict, score_str: str, play_context: str, recent_line: str) -> tuple[str, str]:
+async def generate_blurb(perf: dict, score_str: str, play_context: str, recent_line: str, movement_note: str) -> tuple[str, str]:
     loop = asyncio.get_event_loop()
-    return await loop.run_in_executor(None, _generate_blurb_sync, perf, score_str, play_context, recent_line)
+    return await loop.run_in_executor(None, _generate_blurb_sync, perf, score_str, play_context, recent_line, movement_note)
 
 
 # ── EMBED BUILDER ─────────────────────────────────────────────────────────────
 
 def build_embed(perf: dict, score_str: str, headline: str, blurb: str,
-                season_stats: dict | None) -> discord.Embed:
+                season_stats: list[tuple[str, dict]]) -> discord.Embed:
     prospect = perf["prospect"]
     rank     = prospect.get("rank", "?")
     name     = perf["name"]
@@ -970,7 +1014,9 @@ async def scan_and_post(state: dict, channel, date_str: str | None = None) -> in
             else:
                 recent_line = format_recent_pitcher_line(recent_stat)
 
-            headline, blurb = await generate_blurb(perf, score_str, play_context, recent_line)
+            movement_note = detect_level_movement(season_stats, perf["level"])
+
+            headline, blurb = await generate_blurb(perf, score_str, play_context, recent_line, movement_note)
             embed = build_embed(perf, score_str, headline, blurb, season_stats)
 
             await channel.send(embed=embed)
@@ -1047,7 +1093,7 @@ async def on_ready() -> None:
 async def start_prospect_watch_bot() -> None:
     global client, background_task
     if not TOKEN:
-        raise RuntimeError("ANALYTIC_BOT_TOKEN is required")
+        raise RuntimeError("PROSPECT_BOT_TOKEN is required")
     if CHANNEL_ID <= 0:
         raise RuntimeError("PROSPECT_WATCH_CHANNEL_ID is required")
 
