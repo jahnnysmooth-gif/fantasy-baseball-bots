@@ -292,46 +292,48 @@ _SPORT_ID_TO_LEVEL = {11: "AAA", 12: "AA", 13: "A+", 14: "A", 16: "ROK"}
 def fetch_season_stats(player_id: int, group: str, sport_id: int) -> list[tuple[str, dict]]:
     """Return a list of (level_label, stat_dict) for every level the player appeared at this season."""
     season = date.today().year
-    try:
-        data = _get_json(f"{BASE_URL}/people/{player_id}/stats", params={
-            "stats": "season",
-            "group": group,
-            "season": season,
-            "sportId": "11,12,13,14,16",
-        })
-        splits = (data.get("stats") or [{}])[0].get("splits", [])
-        results = []
-        for split in splits:
-            stat = split.get("stat")
-            if not stat:
-                continue
-            sid = safe_int((split.get("sport") or {}).get("id") or sport_id)
-            label = _SPORT_ID_TO_LEVEL.get(sid, LEVEL_CONFIG.get(sid, {}).get("label", "MiLB"))
-            results.append((label, stat))
-        if results:
-            return results
-    except Exception as exc:
-        log(f"Season stats fetch failed for player {player_id}: {exc}")
-    return []
+    results = []
+    seen_labels: set[str] = set()
+    # Query each level individually — comma-separated sportId gets URL-encoded and rejected
+    for sid in (11, 12, 13, 14, 16):
+        try:
+            data = _get_json(f"{BASE_URL}/people/{player_id}/stats", params={
+                "stats": "season",
+                "group": group,
+                "season": season,
+                "sportId": sid,
+            })
+            splits = (data.get("stats") or [{}])[0].get("splits", [])
+            for split in splits:
+                stat = split.get("stat")
+                if not stat:
+                    continue
+                label = _SPORT_ID_TO_LEVEL.get(sid, LEVEL_CONFIG.get(sid, {}).get("label", "MiLB"))
+                if label not in seen_labels:
+                    seen_labels.add(label)
+                    results.append((label, stat))
+        except Exception as exc:
+            log(f"Season stats fetch failed for player {player_id} sportId={sid}: {exc}")
+    return results
 
 
 def fetch_recent_stats(player_id: int, group: str, sport_id: int, games: int = 7) -> dict | None:
     """Return lastXGames stats for hitters (7 games) or pitchers (3 starts)."""
     limit = games if group == "hitting" else 3
-    for sid_param in [str(sport_id), "11,12,13,14,16"]:
+    for sid in [sport_id] + [s for s in (11, 12, 13, 14, 16) if s != sport_id]:
         try:
             data = _get_json(f"{BASE_URL}/people/{player_id}/stats", params={
                 "stats": "lastXGames",
                 "group": group,
                 "season": date.today().year,
-                "sportId": sid_param,
+                "sportId": sid,
                 "limit": limit,
             })
             splits = (data.get("stats") or [{}])[0].get("splits", [])
             if splits:
                 return splits[0].get("stat")
         except Exception as exc:
-            log(f"Recent stats fetch failed for player {player_id} sportId={sid_param}: {exc}")
+            log(f"Recent stats fetch failed for player {player_id} sportId={sid}: {exc}")
     return None
 
 
