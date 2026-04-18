@@ -32,8 +32,10 @@ try:
     import sys as _sys
     _sys.path.insert(0, "prospects")
     from milb_prospect_watch_bot import start_prospect_watch_bot
+    from prospect_news_bot import start_prospect_news_bot
     _sys.path.pop(0)
     print("Loaded milb_prospect_watch_bot", flush=True)
+    print("Loaded prospect_news_bot", flush=True)
 
 except Exception as e:
     print("IMPORT CRASH:", repr(e), flush=True)
@@ -120,6 +122,9 @@ async def main() -> None:
     await asyncio.sleep(3)
 
     tasks.append(asyncio.create_task(run_forever("prospect_watch_bot", start_prospect_watch_bot)))
+    await asyncio.sleep(3)
+
+    tasks.append(asyncio.create_task(run_forever("prospect_news_bot", start_prospect_news_bot)))
 
     await asyncio.gather(*tasks, return_exceptions=True)
 
