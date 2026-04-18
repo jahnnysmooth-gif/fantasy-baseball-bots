@@ -1,0 +1,36 @@
+PROSPECT WATCH BOT — ENVIRONMENT VARIABLES
+==========================================
+
+REQUIRED
+--------
+ANALYTIC_BOT_TOKEN              Discord bot token
+PROSPECT_WATCH_CHANNEL_ID       Discord channel ID to post cards to
+
+
+OPTIONAL — TUNING
+-----------------
+PROSPECT_WATCH_MIN_HITTER_SCORE     5.0     Minimum hitter score to post a card
+PROSPECT_WATCH_MIN_PITCHER_SCORE    12.0    Minimum pitcher score to post a card
+PROSPECT_WATCH_MIN_PA               2       Minimum plate appearances for a hitter to qualify
+PROSPECT_WATCH_MIN_IP               3.0     Minimum innings pitched for a pitcher to qualify
+PROSPECT_WATCH_MAX_POSTS            15      Max cards posted per scan
+PROSPECT_WATCH_POLL_MINUTES         15      Minutes between scans
+PROSPECT_WATCH_POST_DELAY           1.5     Seconds between Discord posts
+PROSPECT_WATCH_SLEEP_START          3       Hour (ET) to stop scanning (3am)
+PROSPECT_WATCH_SLEEP_END            11      Hour (ET) to resume scanning (11am)
+PROSPECT_WATCH_TIMEOUT              30      MLB API request timeout in seconds
+
+
+OPTIONAL — PATHS
+----------------
+PROSPECT_WATCH_PROSPECTS_FILE       prospects/top_prospects.json                Path to the prospects list
+PROSPECT_WATCH_STATE_FILE           state/prospect_watch/state.json             Path to the state file
+ESPN_PLAYER_IDS_PATH                shared/player_ids/espn_player_ids.json      Path to the ESPN headshot index
+HITTER_BOT_SUMMARY                  (none)                                      Anthropic API key for Claude blurbs
+                                                                                Cards still post without it, just no summary
+
+
+RESET
+-----
+RESET_PROSPECT_STATE            true    Set to clear posted state on next boot so all cards are eligible to repost
+                                        Remove or set to false after the reset to resume normal tracking
