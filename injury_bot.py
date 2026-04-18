@@ -170,6 +170,9 @@ def load_allowed_players() -> set[str]:
             player_list = raw.get("players", [])
         elif isinstance(raw.get("allowed_players"), list):
             player_list = raw.get("allowed_players", [])
+        else:
+            # Plain dict with player names as keys (e.g. top_300_players.json)
+            player_list = list(raw.keys())
 
     for item in player_list:
         if isinstance(item, str):
