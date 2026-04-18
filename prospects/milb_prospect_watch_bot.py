@@ -23,6 +23,11 @@ import anthropic
 import discord
 import requests
 
+import sys as _sys
+_sys.path.insert(0, str(Path(__file__).parent.parent))
+from utils.team_data import get_logo as _get_team_logo_espn
+_sys.path.pop(0)
+
 # ── CONFIG ───────────────────────────────────────────────────────────────────
 
 TOKEN      = os.getenv("ANALYTIC_BOT_TOKEN", "")
@@ -490,8 +495,10 @@ def get_headshot(name: str) -> str | None:
 
 
 def get_team_logo(org: str) -> str | None:
-    tid = TEAM_ABBREV_TO_ID.get(org.upper())
-    return f"https://www.mlbstatic.com/team-logos/{tid}.svg" if tid else None
+    try:
+        return _get_team_logo_espn(org)
+    except Exception:
+        return None
 
 
 # ── FORMAT HELPERS ────────────────────────────────────────────────────────────
@@ -574,9 +581,10 @@ def game_score_string(game: dict) -> str:
 
 # ── CLAUDE BLURB ──────────────────────────────────────────────────────────────
 
-def _generate_blurb_sync(perf: dict, score_str: str) -> str:
+def _generate_blurb_sync(perf: dict, score_str: str) -> tuple[str, str]:
+    """Returns (headline, blurb). Both empty strings if no API key or on error."""
     if not ANTHROPIC_API_KEY:
-        return ""
+        return "", ""
     try:
         ai = anthropic.Anthropic(api_key=ANTHROPIC_API_KEY)
         name  = perf["name"]
@@ -587,41 +595,47 @@ def _generate_blurb_sync(perf: dict, score_str: str) -> str:
         if perf["type"] == "hitter":
             line = format_hitter_game_line(perf["stats"])
             prompt = (
-                f"Write exactly 2 sentences in beat-writer voice about {name}, "
-                f"the #{rank} prospect in baseball (playing for {org} at the {level} level), "
-                f"who just went {line} today. Final score: {score_str}. "
-                f"Be specific and vivid. Do not use em dashes. "
-                f"Naturally reference his prospect pedigree or upside."
+                f"You are writing for a fantasy baseball Discord. "
+                f"Respond with exactly two parts separated by a blank line.\n\n"
+                f"Part 1: A punchy 6-10 word headline for {name} (#{rank} prospect, {org} {level}) "
+                f"who just went {line} (final: {score_str}). No quotes, no colons, no em dashes.\n\n"
+                f"Part 2: Exactly 2 sentences in beat-writer voice expanding on the performance. "
+                f"Be specific and vivid. Naturally reference his prospect pedigree or upside. No em dashes."
             )
         else:
             line = format_pitcher_game_line(perf["stats"])
             prompt = (
-                f"Write exactly 2 sentences in beat-writer voice about {name}, "
-                f"the #{rank} prospect in baseball (pitching for {org} at the {level} level), "
-                f"who just threw {line} today. Final score: {score_str}. "
-                f"Be specific and vivid. Do not use em dashes. "
-                f"Naturally reference his prospect pedigree or stuff."
+                f"You are writing for a fantasy baseball Discord. "
+                f"Respond with exactly two parts separated by a blank line.\n\n"
+                f"Part 1: A punchy 6-10 word headline for {name} (#{rank} prospect, {org} {level}) "
+                f"who just threw {line} (final: {score_str}). No quotes, no colons, no em dashes.\n\n"
+                f"Part 2: Exactly 2 sentences in beat-writer voice expanding on the performance. "
+                f"Be specific and vivid. Naturally reference his prospect pedigree or stuff. No em dashes."
             )
 
         msg = ai.messages.create(
             model=CLAUDE_MODEL,
-            max_tokens=150,
+            max_tokens=200,
             messages=[{"role": "user", "content": prompt}],
         )
-        return msg.content[0].text.strip()
+        text = msg.content[0].text.strip()
+        parts = text.split("\n\n", 1)
+        headline = parts[0].strip() if parts else ""
+        blurb    = parts[1].strip() if len(parts) > 1 else ""
+        return headline, blurb
     except Exception as exc:
         log(f"Claude blurb failed for {perf['name']}: {exc}")
-        return ""
+        return "", ""
 
 
-async def generate_blurb(perf: dict, score_str: str) -> str:
+async def generate_blurb(perf: dict, score_str: str) -> tuple[str, str]:
     loop = asyncio.get_event_loop()
     return await loop.run_in_executor(None, _generate_blurb_sync, perf, score_str)
 
 
 # ── EMBED BUILDER ─────────────────────────────────────────────────────────────
 
-def build_embed(perf: dict, score_str: str, blurb: str,
+def build_embed(perf: dict, score_str: str, headline: str, blurb: str,
                 season_stats: dict | None) -> discord.Embed:
     prospect = perf["prospect"]
     rank     = prospect.get("rank", "?")
@@ -646,13 +660,21 @@ def build_embed(perf: dict, score_str: str, blurb: str,
     except Exception:
         embed.set_author(name=f"{name} | {org} {level}")
 
-    headshot = get_headshot(name)
+    player_id = perf.get("player_id")
+    mlb_headshot = (
+        f"https://img.mlbstatic.com/mlb-photos/image/upload/"
+        f"d_people:generic:headshot:67:current.png/w_213,q_auto:best/"
+        f"v1/people/{player_id}/headshot/67/current"
+        if player_id else None
+    )
+    headshot = mlb_headshot or get_headshot(name) or logo_url
     try:
-        embed.set_thumbnail(url=headshot or logo_url)
+        embed.set_thumbnail(url=headshot)
     except Exception:
         pass
 
-    embed.add_field(name="", value=f"**✅ {game_line}**", inline=False)
+    display_headline = headline if headline else game_line
+    embed.add_field(name="", value=f"**✅ {display_headline}**", inline=False)
 
     if blurb:
         embed.add_field(name="Summary", value=blurb, inline=False)
@@ -661,9 +683,6 @@ def build_embed(perf: dict, score_str: str, blurb: str,
 
     if season_line:
         embed.add_field(name="Season", value=season_line, inline=False)
-
-    if score_str:
-        embed.add_field(name="Score", value=score_str, inline=False)
 
     now_et = datetime.now(ET)
     embed.set_footer(
@@ -782,8 +801,8 @@ async def scan_and_post(state: dict, channel, date_str: str | None = None) -> in
             score_str    = game_score_string(game)
             group        = "hitting" if perf["type"] == "hitter" else "pitching"
             season_stats = fetch_season_stats(perf["player_id"], group, perf["sport_id"])
-            blurb        = await generate_blurb(perf, score_str)
-            embed        = build_embed(perf, score_str, blurb, season_stats)
+            headline, blurb = await generate_blurb(perf, score_str)
+            embed           = build_embed(perf, score_str, headline, blurb, season_stats)
 
             await channel.send(embed=embed)
             mark_posted(state, date_str, game_pk, perf["player_id"])
