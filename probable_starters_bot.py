@@ -1435,6 +1435,10 @@ async def run_cycle(target_date):
                 fetch_savant_pitcher_metrics(session),
             )
 
+            # Trim savant_map to only today's starters — releases ~450 unused entries immediately
+            needed_ids = {s['pitcher_id'] for s in probable}
+            savant_map = {pid: data for pid, data in savant_map.items() if pid in needed_ids}
+
             # Scratch verification: pitchers we previously posted who are no longer in the API
             current_ids = {s['pitcher_id'] for s in probable}
             possibly_scratched = posted_ids - current_ids - confirmed_scratches
