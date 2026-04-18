@@ -26,7 +26,7 @@ OPTIONAL — PATHS
 PROSPECT_WATCH_PROSPECTS_FILE       prospects/top_prospects.json                Path to the prospects list
 PROSPECT_WATCH_STATE_FILE           state/prospect_watch/state.json             Path to the state file
 ESPN_PLAYER_IDS_PATH                shared/player_ids/espn_player_ids.json      Path to the ESPN headshot index
-HITTER_BOT_SUMMARY                  (none)                                      Anthropic API key for Claude blurbs
+PROSPECT_BOT_SUMMARY                (none)                                      Anthropic API key for Claude blurbs
                                                                                 Cards still post without it, just no summary
 
 

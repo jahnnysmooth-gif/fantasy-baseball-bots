@@ -32,7 +32,7 @@ _sys.path.pop(0)
 
 TOKEN      = os.getenv("ANALYTIC_BOT_TOKEN", "")
 CHANNEL_ID = int(os.getenv("PROSPECT_WATCH_CHANNEL_ID", "0"))
-ANTHROPIC_API_KEY   = os.getenv("HITTER_BOT_SUMMARY", "")
+ANTHROPIC_API_KEY   = os.getenv("PROSPECT_BOT_SUMMARY", "")
 PROSPECTS_FILE      = os.getenv("PROSPECT_WATCH_PROSPECTS_FILE", "prospects/top_prospects.json")
 ESPN_PLAYER_IDS_PATH = os.getenv("ESPN_PLAYER_IDS_PATH", "shared/player_ids/espn_player_ids.json")
 STATE_FILE  = os.getenv("PROSPECT_WATCH_STATE_FILE", "state/prospect_watch/state.json")
@@ -229,6 +229,62 @@ def fetch_schedule(sport_id: int, date_str: str) -> list[dict]:
 
 def fetch_boxscore(game_pk: int) -> dict:
     return _get_json(f"{BASE_URL}/game/{game_pk}/boxscore")
+
+
+def fetch_live_feed(game_pk: int) -> dict:
+    return _get_json(f"https://statsapi.mlb.com/api/v1.1/game/{game_pk}/feed/live")
+
+
+def extract_player_plays(feed: dict, player_id: int, perf_type: str) -> str:
+    """Return a compact situational summary of the player's key moments from the live feed."""
+    try:
+        all_plays = feed.get("liveData", {}).get("plays", {}).get("allPlays", [])
+        moments: list[str] = []
+
+        for play in all_plays:
+            matchup = play.get("matchup", {})
+            result  = play.get("result", {})
+            about   = play.get("about", {})
+
+            if perf_type == "hitter":
+                batter_id = safe_int((matchup.get("batter") or {}).get("id"))
+                if batter_id != player_id:
+                    continue
+                event = result.get("event", "")
+                desc  = result.get("description", "")
+                inning = about.get("inning", "?")
+                half   = "top" if about.get("isTopInning") else "bottom"
+                rbi    = safe_int(result.get("rbi"))
+                runners_text = ""
+                runners = play.get("runners", [])
+                on_base = [r.get("movement", {}).get("originBase") for r in runners
+                           if r.get("movement", {}).get("originBase")]
+                if on_base:
+                    runners_text = f", runners on {', '.join(on_base)}"
+                if event in ("Home Run", "Triple", "Double", "Single", "Walk",
+                             "Stolen Base", "Hit By Pitch"):
+                    rbi_text = f", {rbi} RBI" if rbi else ""
+                    moments.append(
+                        f"{half} {inning}: {event}{rbi_text}{runners_text}"
+                    )
+
+            else:
+                pitcher_id = safe_int((matchup.get("pitcher") or {}).get("id"))
+                if pitcher_id != player_id:
+                    continue
+                event  = result.get("event", "")
+                inning = about.get("inning", "?")
+                half   = "top" if about.get("isTopInning") else "bottom"
+                if event in ("Strikeout", "Home Run", "Walk"):
+                    moments.append(f"{half} {inning}: {event}")
+
+        if not moments:
+            return ""
+        # Cap to avoid blowing out the prompt
+        return "; ".join(moments[:12])
+    except Exception as exc:
+        log(f"extract_player_plays failed for player {player_id}: {exc}")
+        return ""
 
 
 def fetch_season_stats(player_id: int, group: str, sport_id: int) -> dict | None:
@@ -581,10 +637,10 @@ def game_score_string(game: dict) -> str:
 
 # ── CLAUDE BLURB ──────────────────────────────────────────────────────────────
 
-def _generate_blurb_sync(perf: dict, score_str: str) -> tuple[str, str]:
-    """Returns (headline, blurb). Both empty strings if no API key or on error."""
+def _generate_blurb_sync(perf: dict, score_str: str, play_context: str) -> tuple[str, str, str]:
+    """Returns (headline, blurb, fantasy_angle). All empty strings if no API key or on error."""
     if not ANTHROPIC_API_KEY:
-        return "", ""
+        return "", "", ""
     try:
         ai = anthropic.Anthropic(api_key=ANTHROPIC_API_KEY)
         name  = perf["name"]
@@ -592,51 +648,73 @@ def _generate_blurb_sync(perf: dict, score_str: str) -> tuple[str, str]:
         org   = perf["org"]
         level = perf["level"]
 
+        banned = (
+            "Do not use em dashes, the phrase 'down the stretch', "
+            "'late in the season', 'playoff push', or any language implying late-season context. "
+            "It is early April. "
+            "When referencing his rank, always make clear it is his overall MLB prospect ranking, "
+            "not his team rank (e.g. 'the #49 overall prospect in baseball', not 'the 49th-ranked prospect in the Dodgers system')."
+        )
+
+        play_section = (
+            f"Key situational moments from the game: {play_context}\n"
+            if play_context else ""
+        )
+
         if perf["type"] == "hitter":
             line = format_hitter_game_line(perf["stats"])
             prompt = (
                 f"You are writing for a fantasy baseball Discord. "
-                f"Respond with exactly two parts separated by a blank line.\n\n"
-                f"Part 1: A punchy 6-10 word headline for {name} (#{rank} prospect, {org} {level}) "
-                f"who just went {line} (final: {score_str}). No quotes, no colons, no em dashes.\n\n"
-                f"Part 2: Exactly 2 sentences in beat-writer voice expanding on the performance. "
-                f"Be specific and vivid. Naturally reference his prospect pedigree or upside. No em dashes."
+                f"Respond with exactly three parts, each separated by a blank line.\n\n"
+                f"{play_section}"
+                f"Part 1: A punchy 6-10 word headline for {name} (#{rank} overall MLB prospect, {org} {level}) "
+                f"who just went {line} (final: {score_str}). No quotes, no colons. {banned}\n\n"
+                f"Part 2: Exactly 2 sentences in beat-writer voice. Use the situational details above to be "
+                f"specific — reference the inning, the game situation, what the hit meant. "
+                f"Naturally reference his prospect pedigree or upside. {banned}\n\n"
+                f"Part 3: Exactly 1 sentence written for fantasy baseball managers — should this player be "
+                f"on their radar, added, or held? Be direct and actionable."
             )
         else:
             line = format_pitcher_game_line(perf["stats"])
             prompt = (
                 f"You are writing for a fantasy baseball Discord. "
-                f"Respond with exactly two parts separated by a blank line.\n\n"
-                f"Part 1: A punchy 6-10 word headline for {name} (#{rank} prospect, {org} {level}) "
-                f"who just threw {line} (final: {score_str}). No quotes, no colons, no em dashes.\n\n"
-                f"Part 2: Exactly 2 sentences in beat-writer voice expanding on the performance. "
-                f"Be specific and vivid. Naturally reference his prospect pedigree or stuff. No em dashes."
+                f"Respond with exactly three parts, each separated by a blank line.\n\n"
+                f"{play_section}"
+                f"Part 1: A punchy 6-10 word headline for {name} (#{rank} overall MLB prospect, {org} {level}) "
+                f"who just threw {line} (final: {score_str}). No quotes, no colons. {banned}\n\n"
+                f"Part 2: Exactly 2 sentences in beat-writer voice. Use the situational details above to be "
+                f"specific — reference key strikeout sequences, how he worked through the order, or when "
+                f"he was tested. Naturally reference his prospect pedigree or stuff. {banned}\n\n"
+                f"Part 3: Exactly 1 sentence written for fantasy baseball managers — should this pitcher be "
+                f"on their radar, added, or held? Be direct and actionable."
             )
 
         msg = ai.messages.create(
             model=CLAUDE_MODEL,
-            max_tokens=200,
+            max_tokens=300,
             messages=[{"role": "user", "content": prompt}],
         )
-        text = msg.content[0].text.strip()
-        parts = text.split("\n\n", 1)
-        headline = parts[0].strip() if parts else ""
-        blurb    = parts[1].strip() if len(parts) > 1 else ""
-        return headline, blurb
+        text  = msg.content[0].text.strip()
+        parts = text.split("\n\n", 2)
+        headline      = parts[0].strip() if len(parts) > 0 else ""
+        blurb         = parts[1].strip() if len(parts) > 1 else ""
+        fantasy_angle = parts[2].strip() if len(parts) > 2 else ""
+        return headline, blurb, fantasy_angle
     except Exception as exc:
         log(f"Claude blurb failed for {perf['name']}: {exc}")
-        return "", ""
+        return "", "", ""
 
 
-async def generate_blurb(perf: dict, score_str: str) -> tuple[str, str]:
+async def generate_blurb(perf: dict, score_str: str, play_context: str) -> tuple[str, str, str]:
     loop = asyncio.get_event_loop()
-    return await loop.run_in_executor(None, _generate_blurb_sync, perf, score_str)
+    return await loop.run_in_executor(None, _generate_blurb_sync, perf, score_str, play_context)
 
 
 # ── EMBED BUILDER ─────────────────────────────────────────────────────────────
 
 def build_embed(perf: dict, score_str: str, headline: str, blurb: str,
-                season_stats: dict | None) -> discord.Embed:
+                fantasy_angle: str, season_stats: dict | None) -> discord.Embed:
     prospect = perf["prospect"]
     rank     = prospect.get("rank", "?")
     name     = perf["name"]
@@ -674,7 +752,30 @@ def build_embed(perf: dict, score_str: str, headline: str, blurb: str,
         pass
 
     display_headline = headline if headline else game_line
-    embed.add_field(name="", value=f"**✅ {display_headline}**", inline=False)
+    stats = perf.get("stats", {})
+    if perf["type"] == "hitter":
+        if stats.get("hr", 0):
+            emoji = "💣"
+        elif stats.get("sb", 0) and stats.get("h", 0) >= 2:
+            emoji = "⚡"
+        elif stats.get("sb", 0):
+            emoji = "🏃"
+        elif stats.get("rbi", 0) >= 3:
+            emoji = "🔥"
+        elif stats.get("h", 0) >= 3:
+            emoji = "🌡️"
+        else:
+            emoji = "✅"
+    else:
+        if stats.get("er", 1) == 0 and float(stats.get("ip", 0)) >= 6:
+            emoji = "🔒"
+        elif stats.get("so", 0) >= 8:
+            emoji = "🔥"
+        elif stats.get("so", 0) >= 6:
+            emoji = "⚡"
+        else:
+            emoji = "✅"
+    embed.add_field(name="", value=f"**{emoji} {display_headline}**", inline=False)
 
     if blurb:
         embed.add_field(name="Summary", value=blurb, inline=False)
@@ -683,6 +784,9 @@ def build_embed(perf: dict, score_str: str, headline: str, blurb: str,
 
     if season_line:
         embed.add_field(name="Season", value=season_line, inline=False)
+
+    if fantasy_angle:
+        embed.add_field(name="Fantasy Angle", value=fantasy_angle, inline=False)
 
     now_et = datetime.now(ET)
     embed.set_footer(
@@ -795,14 +899,28 @@ async def scan_and_post(state: dict, channel, date_str: str | None = None) -> in
     cards = cards[:MAX_POSTS_PER_SCAN]
     log(f"Cards to post: {len(cards)}")
 
+    # Cache live feeds per game_pk so multiple prospects from same game share one fetch
+    feed_cache: dict[int, dict] = {}
+
     posted_count = 0
     for game, game_pk, perf in cards:
         try:
             score_str    = game_score_string(game)
             group        = "hitting" if perf["type"] == "hitter" else "pitching"
             season_stats = fetch_season_stats(perf["player_id"], group, perf["sport_id"])
-            headline, blurb = await generate_blurb(perf, score_str)
-            embed           = build_embed(perf, score_str, headline, blurb, season_stats)
+
+            if game_pk not in feed_cache:
+                try:
+                    feed_cache[game_pk] = fetch_live_feed(game_pk)
+                except Exception as exc:
+                    log(f"Live feed fetch failed game={game_pk}: {exc}")
+                    feed_cache[game_pk] = {}
+            play_context = extract_player_plays(
+                feed_cache[game_pk], perf["player_id"], perf["type"]
+            )
+
+            headline, blurb, fantasy_angle = await generate_blurb(perf, score_str, play_context)
+            embed = build_embed(perf, score_str, headline, blurb, fantasy_angle, season_stats)
 
             await channel.send(embed=embed)
             mark_posted(state, date_str, game_pk, perf["player_id"])
