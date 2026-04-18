@@ -29,6 +29,12 @@ try:
     from recap_bot import start_recap_bot
     print("Loaded recap_bot", flush=True)
 
+    import sys as _sys
+    _sys.path.insert(0, "prospects")
+    from milb_prospect_watch_bot import start_prospect_watch_bot
+    _sys.path.pop(0)
+    print("Loaded milb_prospect_watch_bot", flush=True)
+
 except Exception as e:
     print("IMPORT CRASH:", repr(e), flush=True)
     import traceback
@@ -111,6 +117,9 @@ async def main() -> None:
     await asyncio.sleep(3)
 
     tasks.append(asyncio.create_task(run_forever("recap_bot", start_recap_bot)))
+    await asyncio.sleep(3)
+
+    tasks.append(asyncio.create_task(run_forever("prospect_watch_bot", start_prospect_watch_bot)))
 
     await asyncio.gather(*tasks, return_exceptions=True)
 
