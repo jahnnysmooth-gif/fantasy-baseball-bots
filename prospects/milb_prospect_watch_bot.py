@@ -25,7 +25,7 @@ import requests
 
 import sys as _sys
 _sys.path.insert(0, str(Path(__file__).parent.parent))
-from utils.team_data import get_logo as _get_team_logo_espn
+from utils.team_data import get_logo as _get_team_logo_espn, TEAM_COLORS as _TEAM_COLORS, normalize_team_abbr as _normalize_team_abbr
 _sys.path.pop(0)
 
 # ── CONFIG ───────────────────────────────────────────────────────────────────
@@ -819,7 +819,7 @@ def build_embed(perf: dict, score_str: str, headline: str, blurb: str,
     org      = perf["org"]
     level    = perf["level"]
     sport_id = perf["sport_id"]
-    color    = LEVEL_CONFIG[sport_id]["color"]
+    color    = _TEAM_COLORS.get(_normalize_team_abbr(org), LEVEL_CONFIG[sport_id]["color"])
 
     if perf["type"] == "hitter":
         game_line   = format_hitter_game_line(perf["stats"])
