@@ -312,7 +312,7 @@ async def fetch_recent_stats(player_names, merged_data=None):
     stats = {}
 
     async with aiohttp.ClientSession() as session:
-        # Hitter Savant leaderboard
+        # Hitter Savant leaderboard — expected statistics (xBA, xSLG, xwOBA)
         hitter_savant = {}
         try:
             url = "https://baseballsavant.mlb.com/leaderboard/expected_statistics?type=batter&year=2026&position=&team=&min=5&csv=true"
@@ -330,19 +330,15 @@ async def fetch_recent_stats(player_names, merged_data=None):
                             pid = row.get('player_id', '')
                             if pid:
                                 hitter_savant[pid] = {
-                                    'xba':          row.get('est_ba', 'N/A'),
-                                    'xslg':         row.get('est_slg', 'N/A'),
-                                    'xwoba':        row.get('est_woba', 'N/A'),
-                                    'barrel_rate':  row.get('barrel_batted_rate', 'N/A'),
-                                    'hard_hit_pct': row.get('hard_hit_percent', 'N/A'),
-                                    'k_pct':        row.get('strikeout', 'N/A'),
-                                    'bb_pct':       row.get('walk', 'N/A'),
+                                    'xba':   row.get('est_ba', 'N/A'),
+                                    'xslg':  row.get('est_slg', 'N/A'),
+                                    'xwoba': row.get('est_woba', 'N/A'),
                                 }
             print(f"[Savant] {len(hitter_savant)} hitters loaded")
         except Exception as e:
             print(f"[Savant] Hitter fetch failed: {e}")
 
-        # Pitcher Savant leaderboard
+        # Pitcher Savant leaderboard — expected statistics (xERA)
         pitcher_savant = {}
         try:
             url = "https://baseballsavant.mlb.com/leaderboard/expected_statistics?type=pitcher&year=2026&position=&team=&min=5&csv=true"
@@ -360,14 +356,48 @@ async def fetch_recent_stats(player_names, merged_data=None):
                             pid = row.get('player_id', '')
                             if pid:
                                 pitcher_savant[pid] = {
-                                    'xera':   row.get('est_woba', 'N/A'),
-                                    'k_pct':  row.get('strikeout', 'N/A'),
-                                    'bb_pct': row.get('walk', 'N/A'),
-                                    'gb_pct': row.get('groundballs_percent', 'N/A'),
+                                    'xera': row.get('xera', 'N/A'),
                                 }
             print(f"[Savant] {len(pitcher_savant)} pitchers loaded")
         except Exception as e:
             print(f"[Savant] Pitcher fetch failed: {e}")
+
+        # Statcast leaderboard — barrel%, hard hit%, GB%
+        for player_type, target in [('batter', hitter_savant), ('pitcher', pitcher_savant)]:
+            try:
+                url = f"https://baseballsavant.mlb.com/leaderboard/statcast?type={player_type}&year=2026&position=&team=&min=5&csv=true"
+                async with session.get(url, timeout=15) as r:
+                    if r.status == 200:
+                        text = await r.text()
+                        lines = text.strip().split("\n")
+                        if len(lines) >= 2:
+                            headers = [h.strip().strip('"') for h in lines[0].split(",")]
+                            for line in lines[1:]:
+                                parts = [p.strip().strip('"') for p in line.split(",")]
+                                if len(parts) < len(headers):
+                                    continue
+                                row = dict(zip(headers, parts))
+                                pid = row.get('player_id', '')
+                                if not pid:
+                                    continue
+                                try:
+                                    attempts = int(row.get('attempts', 0) or 0)
+                                    gb = int(row.get('gb', 0) or 0)
+                                    gb_pct = round(gb / attempts * 100, 1) if attempts > 0 else 'N/A'
+                                except Exception:
+                                    gb_pct = 'N/A'
+                                sc = {
+                                    'barrel_rate':  row.get('brl_percent', 'N/A'),
+                                    'hard_hit_pct': row.get('ev95percent', 'N/A'),
+                                    'gb_pct':       gb_pct,
+                                }
+                                if pid in target:
+                                    target[pid].update(sc)
+                                else:
+                                    target[pid] = sc
+                print(f"[Savant] Statcast {player_type} leaderboard merged")
+            except Exception as e:
+                print(f"[Savant] Statcast {player_type} fetch failed: {e}")
 
         for player in player_names:
             try:
@@ -380,11 +410,37 @@ async def fetch_recent_stats(player_names, merged_data=None):
 
                 pos        = (merged_data or {}).get(player, {}).get('position', 'OF')
                 is_pitcher = pos in PITCHERS
-                savant     = pitcher_savant.get(str(player_id), {}) if is_pitcher else hitter_savant.get(str(player_id), {})
+                savant     = dict(pitcher_savant.get(str(player_id), {}) if is_pitcher else hitter_savant.get(str(player_id), {}))
+
+                # Compute K% and BB% from last14 splits
+                try:
+                    if is_pitcher:
+                        bf = int(last14.get('battersFaced', 0) or 0)
+                        k  = int(last14.get('strikeOuts', 0) or 0)
+                        bb = int(last14.get('baseOnBalls', 0) or 0)
+                        if bf > 0:
+                            savant['k_pct']  = round(k / bf * 100, 1)
+                            savant['bb_pct'] = round(bb / bf * 100, 1)
+                    else:
+                        pa = int(last14.get('plateAppearances', 0) or last14.get('atBats', 0) or 0)
+                        k  = int(last14.get('strikeOuts', 0) or 0)
+                        bb = int(last14.get('baseOnBalls', 0) or 0)
+                        if pa > 0:
+                            savant['k_pct']  = round(k / pa * 100, 1)
+                            savant['bb_pct'] = round(bb / pa * 100, 1)
+                except Exception:
+                    pass
 
                 team        = (merged_data or {}).get(player, {}).get('team', '')
                 schedule    = await fetch_schedule(session, team) if team else []
-                starts_next_7 = len(schedule) if is_pitcher else 0
+                # SPs get at most 1-2 starts in a 7-day window (5-man rotation);
+                # RPs can appear in most team games.
+                if not is_pitcher:
+                    starts_next_7 = 0
+                elif pos == 'SP':
+                    starts_next_7 = min(2, max(1, len(schedule) // 5)) if schedule else 0
+                else:  # RP
+                    starts_next_7 = len(schedule)
 
                 stats[player] = {
                     'last7':         last7,
