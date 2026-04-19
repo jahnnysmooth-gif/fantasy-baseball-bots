@@ -580,7 +580,7 @@ def fmt_multi_sb(items):
 
     lines = []
     for p in items:
-        lines.append(f'• {p["name"]} | {p["team"]}: {p["sb"]} SB')
+        lines.append(f'• **{p["name"]} | {p["team"]}**: {p["sb"]} SB')
 
     return trim_field_text("\n".join(lines))
 
@@ -706,7 +706,7 @@ def build_embeds(summary_data):
     thumbnail = {"url": "attachment://our_logo_1.png"}
 
     hitting_embed = {
-        "title": "⚾⚾ Daily Hitting Recap ⚾⚾",
+        "title": "⚾⚾ Fantasy Baseball Daily Hitting Recap ⚾⚾",
         "description": f"**{pretty_date}**",
         "color": embed_color,
         "thumbnail": thumbnail,
@@ -737,7 +737,7 @@ def build_embeds(summary_data):
     }
 
     pitching_embed = {
-        "title": "⚾⚾ Daily Pitching Recap ⚾⚾",
+        "title": "⚾⚾ Fantasy Baseball Daily Pitching Recap ⚾⚾",
         "description": f"**{pretty_date}**",
         "color": embed_color,
         "thumbnail": thumbnail,
