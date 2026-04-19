@@ -80,6 +80,9 @@ def innings_to_outs(ip):
 
 def collect_statcast_notes(feed):
     plays = feed.get("liveData", {}).get("plays", {}).get("allPlays", [])
+    gd_teams = feed.get("gameData", {}).get("teams", {})
+    away_abbr = gd_teams.get("away", {}).get("abbreviation", "")
+    home_abbr = gd_teams.get("home", {}).get("abbreviation", "")
 
     hardest_hits = []
     fastest_pitches = []
@@ -91,6 +94,10 @@ def collect_statcast_notes(feed):
 
         batter_name = batter.get("fullName", "Unknown Player")
         pitcher_name = pitcher.get("fullName", "Unknown Player")
+
+        about = play.get("about", {}) or {}
+        half_inning = about.get("halfInning", "")
+        batter_team = away_abbr if half_inning == "top" else home_abbr
 
         play_events = play.get("playEvents", []) or []
         last_event = play_events[-1] if play_events else {}
@@ -105,6 +112,7 @@ def collect_statcast_notes(feed):
             hardest_hits.append(
                 {
                     "name": batter_name,
+                    "team": batter_team,
                     "ev": launch_speed,
                     "hit_type": hit_type,
                 }
@@ -138,7 +146,7 @@ def collect_statcast_notes(feed):
     unique_hardest_hits = []
     seen_hard_hits = set()
     for item in hardest_hits:
-        key = (item["name"], round(item["ev"], 1), item["hit_type"])
+        key = (item["name"], item["team"], round(item["ev"], 1), item["hit_type"])
         if key not in seen_hard_hits:
             seen_hard_hits.add(key)
             unique_hardest_hits.append(item)
@@ -475,7 +483,7 @@ def build_summary_data(date_str):
     unique_hardest_hits = []
     seen_hard_hits = set()
     for item in all_hardest_hits:
-        key = (item["name"], round(item["ev"], 1), item["hit_type"])
+        key = (item["name"], item["team"], round(item["ev"], 1), item["hit_type"])
         if key not in seen_hard_hits:
             seen_hard_hits.add(key)
             unique_hardest_hits.append(item)
@@ -490,7 +498,7 @@ def build_summary_data(date_str):
 
     return {
         "date": date_str,
-        "top_hitters": all_hitters[:5],
+        "top_hitters": all_hitters[:7],
         "multi_hr": all_multi_hr,
         "multi_sb": all_multi_sb,
         "saves": all_saves,
@@ -572,7 +580,7 @@ def fmt_multi_sb(items):
 
     lines = []
     for p in items:
-        lines.append(f'• **{p["name"]} | {p["team"]}** {p["sb"]} SB')
+        lines.append(f'• {p["name"]} | {p["team"]}: {p["sb"]} SB')
 
     return trim_field_text("\n".join(lines))
 
@@ -583,7 +591,7 @@ def fmt_hardest_hits(items):
 
     lines = []
     for item in items:
-        lines.append(f'• **{item["name"]}**: {item["ev"]:.1f} mph EV {item["hit_type"]}')
+        lines.append(f'• **{item["name"]} | {item["team"]}**\n{item["ev"]:.1f} mph EV {item["hit_type"]}')
 
     return trim_field_text("\n".join(lines))
 
@@ -711,11 +719,6 @@ def build_embeds(summary_data):
             {
                 "name": "🔥 TOP HITTERS",
                 "value": fmt_top_hitters(summary_data["top_hitters"]),
-                "inline": False,
-            },
-            {
-                "name": "💣 MULTI-HR GAMES",
-                "value": fmt_multi_hr(summary_data["multi_hr"]),
                 "inline": False,
             },
             {
