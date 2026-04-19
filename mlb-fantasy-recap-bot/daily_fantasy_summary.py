@@ -497,7 +497,7 @@ def build_summary_data(date_str):
         "blown_saves": all_blown_saves,
         "dominant_relief": all_dominant_relief[:5],
         "holds": all_holds[:5],
-        "best_pitchers": all_pitchers[:3],
+        "best_pitchers": [p for p in all_pitchers if p["score"] >= 10][:7],
         "hardest_hits": unique_hardest_hits[:5],
         "fastest_pitches": unique_fastest_pitches[:5],
     }
@@ -698,7 +698,7 @@ def build_embeds(summary_data):
     thumbnail = {"url": "attachment://our_logo_1.png"}
 
     hitting_embed = {
-        "title": "⚾⚾ Fantasy Baseball Daily Hitting Recap ⚾⚾",
+        "title": "⚾⚾ Daily Hitting Recap ⚾⚾",
         "description": f"**{pretty_date}**",
         "color": embed_color,
         "thumbnail": thumbnail,
@@ -734,7 +734,7 @@ def build_embeds(summary_data):
     }
 
     pitching_embed = {
-        "title": "⚾⚾ Fantasy Baseball Daily Pitching Recap ⚾⚾",
+        "title": "⚾⚾ Daily Pitching Recap ⚾⚾",
         "description": f"**{pretty_date}**",
         "color": embed_color,
         "thumbnail": thumbnail,
