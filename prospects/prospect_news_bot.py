@@ -385,13 +385,15 @@ def build_tx_embed(tx: Transaction, headline: str, blurb: str) -> discord.Embed:
     org  = tx.prospect.get("team") or tx.to_team or ""
     pos  = tx.prospect.get("position", "")
 
-    embed = discord.Embed(color=cfg_entry["color"], timestamp=datetime.now(timezone.utc))
+    team_color = TEAM_META.get(org, {}).get("color", cfg_entry["color"])
+    embed = discord.Embed(color=team_color, timestamp=datetime.now(timezone.utc))
 
     logo = get_team_logo(org)
+    author_name = f"{tx.player_name} | {org}" + (f" | {pos}" if pos else "")
     try:
-        embed.set_author(name=f"{tx.player_name} | {org}", icon_url=logo)
+        embed.set_author(name=author_name, icon_url=logo)
     except Exception:
-        embed.set_author(name=f"{tx.player_name} | {org}")
+        embed.set_author(name=author_name)
 
     headshot = get_headshot(tx.player_id or None, tx.player_name)
     if headshot:
@@ -417,7 +419,8 @@ def build_tx_embed(tx: Transaction, headline: str, blurb: str) -> discord.Embed:
     elif tx.from_team:
         team_str = f" • {tx.from_team}"
 
-    embed.set_footer(text=f"#{rank} Prospect • {pos}{team_str} • {cfg_entry['label']}")
+    now_et = datetime.now(ET).strftime("%-I:%M %p ET")
+    embed.set_footer(text=f"Board Regs Fantasy Baseball • #{rank} Prospect • {cfg_entry['label']} • {now_et}")
     return embed
 
 
