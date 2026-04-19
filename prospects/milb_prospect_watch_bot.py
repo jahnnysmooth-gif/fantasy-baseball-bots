@@ -884,9 +884,8 @@ def build_embed(perf: dict, score_str: str, headline: str, blurb: str,
         embed.add_field(name="Season", value=season_line, inline=False)
 
 
-    now_et = datetime.now(ET)
     embed.set_footer(
-        text=f"#{rank} Prospect • {org} {level} • {now_et.strftime('%-I:%M %p ET')}"
+        text=f"Board Regs Fantasy Baseball #{rank} Prospect • {org} {level}"
     )
     return embed
 
