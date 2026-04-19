@@ -601,7 +601,7 @@ def fmt_hardest_hits(items):
 
     lines = []
     for item in items:
-        lines.append(f'• **{item["name"]}**: {item["ev"]:.1f} mph EV — {item["hit_type"]}')
+        lines.append(f'• **{item["name"]}**: {item["ev"]:.1f} mph EV {item["hit_type"]}')
 
     return trim_field_text("\n".join(lines))
 
@@ -673,7 +673,7 @@ def fmt_fastest_pitches(items):
 
     lines = []
     for item in items:
-        lines.append(f'• **{item["name"]}**: {item["velo"]:.1f} mph — {item["pitch_type"]}')
+        lines.append(f'• **{item["name"]}**: {item["velo"]:.1f} mph {item["pitch_type"]}')
 
     return trim_field_text("\n".join(lines))
 
@@ -707,7 +707,9 @@ def estimate_embed_size(embed):
 
 def build_embeds(summary_data):
     date_obj = datetime.strptime(summary_data["date"], "%Y-%m-%d")
-    pretty_date = date_obj.strftime("%A, %B %d, %Y").replace(" 0", " ")
+    day = date_obj.day
+    suffix = "th" if 11 <= day <= 13 else {1: "st", 2: "nd", 3: "rd"}.get(day % 10, "th")
+    pretty_date = date_obj.strftime(f"%A %B {day}{suffix} Games")
     timestamp = datetime.now(timezone.utc).isoformat()
     embed_color = DAY_COLORS[date_obj.weekday()]
 
@@ -720,27 +722,27 @@ def build_embeds(summary_data):
         "thumbnail": thumbnail,
         "fields": [
             {
-                "name": "🏆 Fantasy Player of the Day",
+                "name": "🏆 FANTASY PLAYER OF THE DAY",
                 "value": fmt_player_of_the_day(summary_data["top_hitters"]),
                 "inline": False,
             },
             {
-                "name": "🔥 Top Hitters",
+                "name": "🔥 TOP HITTERS",
                 "value": fmt_top_hitters(summary_data["top_hitters"]),
                 "inline": False,
             },
             {
-                "name": "💣 Multi-HR Games",
+                "name": "💣 MULTI-HR GAMES",
                 "value": fmt_multi_hr(summary_data["multi_hr"]),
                 "inline": False,
             },
             {
-                "name": "💨 Multi-SB Games",
+                "name": "💨 MULTI-SB GAMES",
                 "value": fmt_multi_sb(summary_data["multi_sb"]),
                 "inline": False,
             },
             {
-                "name": "🚀 Hardest-Hit Balls",
+                "name": "🚀 HARDEST-HIT BALLS",
                 "value": fmt_hardest_hits(summary_data["hardest_hits"]),
                 "inline": False,
             },
@@ -756,22 +758,22 @@ def build_embeds(summary_data):
         "thumbnail": thumbnail,
         "fields": [
             {
-                "name": "🎯 Pitcher of the Day",
+                "name": "🎯 PITCHER OF THE DAY",
                 "value": fmt_pitcher_of_the_day(summary_data["best_pitchers"]),
                 "inline": False,
             },
             {
-                "name": "🔥 Best Pitching Performances",
+                "name": "🔥 BEST PITCHING PERFORMANCES",
                 "value": fmt_best_pitchers(summary_data["best_pitchers"]),
                 "inline": False,
             },
             {
-                "name": "💪 Dominant Relief Outings",
+                "name": "💪 DOMINANT RELIEF OUTINGS",
                 "value": fmt_dominant_relief(summary_data["dominant_relief"]),
                 "inline": False,
             },
             {
-                "name": "⚡ Fastest Pitches Thrown",
+                "name": "⚡ FASTEST PITCHES THROWN",
                 "value": fmt_fastest_pitches(summary_data["fastest_pitches"]),
                 "inline": False,
             },
