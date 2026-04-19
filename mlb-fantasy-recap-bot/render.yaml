@@ -1,0 +1,11 @@
+services:
+  - type: cron
+    name: mlb-fantasy-recap-bot
+    runtime: python
+    plan: starter
+    buildCommand: "pip install -r requirements.txt"
+    startCommand: "python daily_fantasy_summary.py"
+    schedule: "0 6 * * *"
+    envVars:
+      - key: DISCORD_WEBHOOK_URL
+        sync: false
