@@ -116,6 +116,8 @@ def collect_statcast_notes(feed):
             start_speed = safe_float(pitch_data.get("startSpeed"))
             pitch_type = details.get("type", {}) or {}
             pitch_name = pitch_type.get("description") or details.get("description") or "Pitch"
+            if "seam fastball" in pitch_name.lower():
+                pitch_name = "Fastball"
 
             if start_speed > 0:
                 fastest_pitches.append(
@@ -204,10 +206,12 @@ def collect_game_notes(feed):
         pitching = stats.get("pitching", {})
 
         hits = safe_int(batting.get("hits"))
+        at_bats = safe_int(batting.get("atBats"))
         hr = safe_int(batting.get("homeRuns"))
         rbi = safe_int(batting.get("rbi"))
         runs = safe_int(batting.get("runs"))
         sb = safe_int(batting.get("stolenBases"))
+        bb = safe_int(batting.get("baseOnBalls"))
 
         score = (hr * 10) + (rbi * 3) + (runs * 2) + (sb * 5) + hits
 
@@ -221,6 +225,8 @@ def collect_game_notes(feed):
                     "runs": runs,
                     "sb": sb,
                     "hits": hits,
+                    "ab": at_bats,
+                    "bb": bb,
                     "score": score,
                 }
             )
@@ -514,25 +520,27 @@ def trim_field_text(text, limit=FIELD_LIMIT):
     return cutoff + "\n• ...and more"
 
 
+def fmt_hitter_statline(p):
+    parts = [f'{p["hits"]} for {p["ab"]}']
+    if p["bb"] > 0:
+        parts.append(f'{p["bb"]} BB')
+    if p["runs"] > 0:
+        parts.append(f'{p["runs"]} R')
+    if p["hr"] > 0:
+        parts.append(f'{p["hr"]} HR')
+    if p["rbi"] > 0:
+        parts.append(f'{p["rbi"]} RBI')
+    if p["sb"] > 0:
+        parts.append(f'{p["sb"]} SB')
+    return " • ".join(parts)
+
+
 def fmt_player_of_the_day(items):
     if not items:
         return "No standout hitter performance found."
 
     p = items[0]
-
-    parts = []
-    if p["hr"] > 0:
-        parts.append(f'{p["hr"]} HR')
-    if p["rbi"] > 0:
-        parts.append(f'{p["rbi"]} RBI')
-    if p["runs"] > 0:
-        parts.append(f'{p["runs"]} R')
-    if p["sb"] > 0:
-        parts.append(f'{p["sb"]} SB')
-    if p["hits"] > 0:
-        parts.append(f'{p["hits"]} H')
-
-    line = f'• **{p["name"]} | {p["team"]}**\n{", ".join(parts)}'
+    line = f'• **{p["name"]} | {p["team"]}**\n{fmt_hitter_statline(p)}'
     return trim_field_text(line)
 
 
@@ -542,19 +550,7 @@ def fmt_top_hitters(items):
 
     lines = []
     for p in items:
-        parts = []
-        if p["hr"] > 0:
-            parts.append(f'{p["hr"]} HR')
-        if p["rbi"] > 0:
-            parts.append(f'{p["rbi"]} RBI')
-        if p["runs"] > 0:
-            parts.append(f'{p["runs"]} R')
-        if p["sb"] > 0:
-            parts.append(f'{p["sb"]} SB')
-        if p["hits"] > 0:
-            parts.append(f'{p["hits"]} H')
-
-        lines.append(f'• **{p["name"]} | {p["team"]}**\n{", ".join(parts)}')
+        lines.append(f'• **{p["name"]} | {p["team"]}**\n{fmt_hitter_statline(p)}')
 
     return trim_field_text("\n".join(lines))
 
@@ -565,15 +561,7 @@ def fmt_multi_hr(items):
 
     lines = []
     for p in items:
-        parts = [f'{p["hr"]} HR']
-        if p["rbi"] > 0:
-            parts.append(f'{p["rbi"]} RBI')
-        if p["runs"] > 0:
-            parts.append(f'{p["runs"]} R')
-        if p["hits"] > 0:
-            parts.append(f'{p["hits"]} H')
-
-        lines.append(f'• **{p["name"]} | {p["team"]}**\n{", ".join(parts)}')
+        lines.append(f'• **{p["name"]} | {p["team"]}** {p["hr"]} HR')
 
     return trim_field_text("\n".join(lines))
 
@@ -584,13 +572,7 @@ def fmt_multi_sb(items):
 
     lines = []
     for p in items:
-        parts = [f'{p["sb"]} SB']
-        if p["runs"] > 0:
-            parts.append(f'{p["runs"]} R')
-        if p["hits"] > 0:
-            parts.append(f'{p["hits"]} H')
-
-        lines.append(f'• **{p["name"]} | {p["team"]}**\n{", ".join(parts)}')
+        lines.append(f'• **{p["name"]} | {p["team"]}** {p["sb"]} SB')
 
     return trim_field_text("\n".join(lines))
 
@@ -611,7 +593,7 @@ def fmt_pitcher_of_the_day(items):
         return "No standout pitching performance found."
 
     p = items[0]
-    line = f'• **{p["name"]} | {p["team"]}**\n{p["ip"]} IP, {p["k"]} K, {p["er"]} ER, {p["h"]} H, {p["bb"]} BB'
+    line = f'• **{p["name"]} | {p["team"]}**\n{p["ip"]} IP • {p["k"]} K • {p["er"]} ER • {p["h"]} H • {p["bb"]} BB'
     return trim_field_text(line)
 
 
@@ -623,7 +605,7 @@ def fmt_best_pitchers(items):
     for p in items:
         lines.append(
             f'• **{p["name"]} | {p["team"]}**\n'
-            f'{p["ip"]} IP, {p["k"]} K, {p["er"]} ER, {p["h"]} H, {p["bb"]} BB'
+            f'{p["ip"]} IP • {p["k"]} K • {p["er"]} ER • {p["h"]} H • {p["bb"]} BB'
         )
     return trim_field_text("\n".join(lines))
 
@@ -634,7 +616,7 @@ def fmt_saves(items):
 
     lines = []
     for p in items:
-        lines.append(f'• **{p["name"]} | {p["team"]}**\n{p["ip"]} IP, {p["k"]} K')
+        lines.append(f'• **{p["name"]} | {p["team"]}**\n{p["ip"]} IP • {p["k"]} K')
 
     return trim_field_text("\n".join(lines))
 
@@ -647,7 +629,7 @@ def fmt_holds(items):
     for p in items:
         lines.append(
             f'• **{p["name"]} | {p["team"]}**\n'
-            f'{p["ip"]} IP, {p["k"]} K, {p["h"]} H, {p["bb"]} BB'
+            f'{p["ip"]} IP • {p["k"]} K • {p["h"]} H • {p["bb"]} BB'
         )
 
     return trim_field_text("\n".join(lines))
@@ -661,7 +643,7 @@ def fmt_dominant_relief(items):
     for p in items:
         lines.append(
             f'• **{p["name"]} | {p["team"]}**\n'
-            f'{p["ip"]} IP, {p["k"]} K, {p["h"]} H, {p["bb"]} BB'
+            f'{p["ip"]} IP • {p["k"]} K • {p["h"]} H • {p["bb"]} BB'
         )
 
     return trim_field_text("\n".join(lines))
@@ -686,7 +668,7 @@ def fmt_blown_saves(items):
     for p in items:
         lines.append(
             f'• **{p["name"]} | {p["team"]}**\n'
-            f'{p["ip"]} IP, {p["er"]} ER, {p["h"]} H, {p["bb"]} BB, {p["k"]} K'
+            f'{p["ip"]} IP • {p["er"]} ER • {p["h"]} H • {p["bb"]} BB • {p["k"]} K'
         )
 
     return trim_field_text("\n".join(lines))
