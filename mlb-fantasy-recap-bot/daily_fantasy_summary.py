@@ -459,10 +459,7 @@ def build_summary_data(date_str):
         reverse=True,
     )
 
-    all_hardest_hits.sort(
-        key=lambda x: (x["ev"], x["distance"], x["angle"]),
-        reverse=True,
-    )
+    all_hardest_hits.sort(key=lambda x: x["ev"], reverse=True)
 
     all_fastest_pitches.sort(
         key=lambda x: x["velo"],
@@ -472,7 +469,7 @@ def build_summary_data(date_str):
     unique_hardest_hits = []
     seen_hard_hits = set()
     for item in all_hardest_hits:
-        key = (item["name"], round(item["ev"], 1), round(item["distance"], 0), round(item["angle"], 0))
+        key = (item["name"], round(item["ev"], 1), item["hit_type"])
         if key not in seen_hard_hits:
             seen_hard_hits.add(key)
             unique_hardest_hits.append(item)
