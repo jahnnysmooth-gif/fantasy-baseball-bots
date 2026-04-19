@@ -150,8 +150,8 @@ def collect_statcast_notes(feed):
             unique_fastest_pitches.append(item)
 
     return {
-        "hardest_hits": unique_hardest_hits[:3],
-        "fastest_pitches": unique_fastest_pitches[:3],
+        "hardest_hits": unique_hardest_hits[:5],
+        "fastest_pitches": unique_fastest_pitches[:5],
     }
 
 
@@ -492,8 +492,8 @@ def build_summary_data(date_str):
         "dominant_relief": all_dominant_relief[:5],
         "holds": all_holds[:5],
         "best_pitchers": all_pitchers[:3],
-        "hardest_hits": unique_hardest_hits[:3],
-        "fastest_pitches": unique_fastest_pitches[:3],
+        "hardest_hits": unique_hardest_hits[:5],
+        "fastest_pitches": unique_fastest_pitches[:5],
     }
 
 
@@ -532,7 +532,7 @@ def fmt_player_of_the_day(items):
     if p["hits"] > 0:
         parts.append(f'{p["hits"]} H')
 
-    line = f'• **{p["name"]}** | {p["team"]}: {", ".join(parts)}'
+    line = f'• **{p["name"]} | {p["team"]}**\n{", ".join(parts)}'
     return trim_field_text(line)
 
 
@@ -554,7 +554,7 @@ def fmt_top_hitters(items):
         if p["hits"] > 0:
             parts.append(f'{p["hits"]} H')
 
-        lines.append(f'• **{p["name"]}** | {p["team"]}: {", ".join(parts)}')
+        lines.append(f'• **{p["name"]} | {p["team"]}**\n{", ".join(parts)}')
 
     return trim_field_text("\n".join(lines))
 
@@ -573,7 +573,7 @@ def fmt_multi_hr(items):
         if p["hits"] > 0:
             parts.append(f'{p["hits"]} H')
 
-        lines.append(f'• **{p["name"]}** | {p["team"]}: {", ".join(parts)}')
+        lines.append(f'• **{p["name"]} | {p["team"]}**\n{", ".join(parts)}')
 
     return trim_field_text("\n".join(lines))
 
@@ -590,7 +590,7 @@ def fmt_multi_sb(items):
         if p["hits"] > 0:
             parts.append(f'{p["hits"]} H')
 
-        lines.append(f'• **{p["name"]}** | {p["team"]}: {", ".join(parts)}')
+        lines.append(f'• **{p["name"]} | {p["team"]}**\n{", ".join(parts)}')
 
     return trim_field_text("\n".join(lines))
 
@@ -611,10 +611,7 @@ def fmt_pitcher_of_the_day(items):
         return "No standout pitching performance found."
 
     p = items[0]
-    line = (
-        f'• **{p["name"]}** | {p["team"]}: '
-        f'{p["ip"]} IP, {p["k"]} K, {p["er"]} ER, {p["h"]} H, {p["bb"]} BB'
-    )
+    line = f'• **{p["name"]} | {p["team"]}**\n{p["ip"]} IP, {p["k"]} K, {p["er"]} ER, {p["h"]} H, {p["bb"]} BB'
     return trim_field_text(line)
 
 
@@ -625,7 +622,7 @@ def fmt_best_pitchers(items):
     lines = []
     for p in items:
         lines.append(
-            f'• **{p["name"]}** | {p["team"]}: '
+            f'• **{p["name"]} | {p["team"]}**\n'
             f'{p["ip"]} IP, {p["k"]} K, {p["er"]} ER, {p["h"]} H, {p["bb"]} BB'
         )
     return trim_field_text("\n".join(lines))
@@ -637,7 +634,7 @@ def fmt_saves(items):
 
     lines = []
     for p in items:
-        lines.append(f'• **{p["name"]}** | {p["team"]}: {p["ip"]} IP, {p["k"]} K')
+        lines.append(f'• **{p["name"]} | {p["team"]}**\n{p["ip"]} IP, {p["k"]} K')
 
     return trim_field_text("\n".join(lines))
 
@@ -649,7 +646,7 @@ def fmt_holds(items):
     lines = []
     for p in items:
         lines.append(
-            f'• **{p["name"]}** | {p["team"]}: '
+            f'• **{p["name"]} | {p["team"]}**\n'
             f'{p["ip"]} IP, {p["k"]} K, {p["h"]} H, {p["bb"]} BB'
         )
 
@@ -663,7 +660,7 @@ def fmt_dominant_relief(items):
     lines = []
     for p in items:
         lines.append(
-            f'• **{p["name"]}** | {p["team"]}: '
+            f'• **{p["name"]} | {p["team"]}**\n'
             f'{p["ip"]} IP, {p["k"]} K, {p["h"]} H, {p["bb"]} BB'
         )
 
@@ -676,9 +673,7 @@ def fmt_fastest_pitches(items):
 
     lines = []
     for item in items:
-        lines.append(
-            f'• **{item["name"]}**: {item["velo"]:.1f} mph ({item["pitch_type"]})'
-        )
+        lines.append(f'• **{item["name"]}**: {item["velo"]:.1f} mph — {item["pitch_type"]}')
 
     return trim_field_text("\n".join(lines))
 
@@ -690,7 +685,7 @@ def fmt_blown_saves(items):
     lines = []
     for p in items:
         lines.append(
-            f'• **{p["name"]}** | {p["team"]}: '
+            f'• **{p["name"]} | {p["team"]}**\n'
             f'{p["ip"]} IP, {p["er"]} ER, {p["h"]} H, {p["bb"]} BB, {p["k"]} K'
         )
 
@@ -719,7 +714,7 @@ def build_embeds(summary_data):
     thumbnail = {"url": "attachment://our_logo_1.png"}
 
     hitting_embed = {
-        "title": "⚾ Fantasy Baseball Daily Hitting Recap",
+        "title": "⚾⚾ Fantasy Baseball Daily Hitting Recap ⚾⚾",
         "description": f"**{pretty_date}**",
         "color": embed_color,
         "thumbnail": thumbnail,
@@ -755,7 +750,7 @@ def build_embeds(summary_data):
     }
 
     pitching_embed = {
-        "title": "🎯 Fantasy Baseball Daily Pitching Recap",
+        "title": "⚾⚾ Fantasy Baseball Daily Pitching Recap ⚾⚾",
         "description": f"**{pretty_date}**",
         "color": embed_color,
         "thumbnail": thumbnail,
