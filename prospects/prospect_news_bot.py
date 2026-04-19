@@ -508,15 +508,18 @@ async def on_ready() -> None:
     global _bg_task
     assert client is not None
     log(f"Logged in as {client.user}")
-    await client.change_presence(status=discord.Status.invisible)
-
-    channel = client.get_channel(CHANNEL_ID)
-    if channel is None:
-        log(f"Channel {CHANNEL_ID} not found — aborting")
-        return
-
-    if _bg_task is None or _bg_task.done():
-        _bg_task = asyncio.create_task(transactions_loop(channel))
+    try:
+        await client.change_presence(status=discord.Status.invisible)
+        log(f"Looking for channel {CHANNEL_ID}")
+        channel = client.get_channel(CHANNEL_ID)
+        if channel is None:
+            log(f"Channel {CHANNEL_ID} not found — aborting")
+            return
+        log(f"Found channel: {channel}")
+        if _bg_task is None or _bg_task.done():
+            _bg_task = asyncio.create_task(transactions_loop(channel))
+    except Exception as exc:
+        log_exception(f"on_ready error: {exc}")
 
 
 async def start_prospect_news_bot() -> None:
