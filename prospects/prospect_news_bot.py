@@ -448,8 +448,8 @@ async def transactions_loop(channel: discord.abc.Messageable) -> None:
     posted_ids: Set[int] = set(_state.get("tx_ids", []))
     log("Transactions loop started")
 
-    # On first boot, look back 2 days to catch recent moves
-    start_dt = date.today() - timedelta(days=2)
+    # On first boot, look back 7 days to catch recent moves
+    start_dt = date.today() - timedelta(days=7)
 
     while True:
         if is_sleep_window():
@@ -510,12 +510,10 @@ async def on_ready() -> None:
     log(f"Logged in as {client.user}")
     try:
         await client.change_presence(status=discord.Status.invisible)
-        log(f"Looking for channel {CHANNEL_ID}")
         channel = client.get_channel(CHANNEL_ID)
         if channel is None:
             log(f"Channel {CHANNEL_ID} not found — aborting")
             return
-        log(f"Found channel: {channel}")
         if _bg_task is None or _bg_task.done():
             _bg_task = asyncio.create_task(transactions_loop(channel))
     except Exception as exc:
