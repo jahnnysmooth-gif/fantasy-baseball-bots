@@ -419,8 +419,7 @@ def build_tx_embed(tx: Transaction, headline: str, blurb: str) -> discord.Embed:
     elif tx.from_team:
         team_str = f" • {tx.from_team}"
 
-    now_et = datetime.now(ET).strftime("%-I:%M %p ET")
-    embed.set_footer(text=f"Board Regs Fantasy Baseball • #{rank} Prospect • {cfg_entry['label']} • {now_et}")
+    embed.set_footer(text=f"Board Regs Fantasy Baseball #{rank} Prospect • {cfg_entry['label']}")
     return embed
 
 
