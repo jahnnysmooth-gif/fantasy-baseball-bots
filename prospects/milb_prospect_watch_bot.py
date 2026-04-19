@@ -721,7 +721,7 @@ def game_score_string(game: dict) -> str:
 
 # ── CLAUDE BLURB ──────────────────────────────────────────────────────────────
 
-def _generate_blurb_sync(perf: dict, score_str: str, play_context: str, recent_line: str, movement_note: str) -> tuple[str, str]:
+def _generate_blurb_sync(perf: dict, score_str: str, play_context: str, recent_line: str, movement_note: str, game_date: str) -> tuple[str, str]:
     """Returns (headline, blurb). Both empty strings if no API key or on error."""
     if not ANTHROPIC_API_KEY:
         return "", ""
@@ -732,10 +732,15 @@ def _generate_blurb_sync(perf: dict, score_str: str, play_context: str, recent_l
         org   = perf["org"]
         level = perf["level"]
 
+        try:
+            game_day = datetime.strptime(game_date, "%Y-%m-%d").strftime("%A, %B %-d")
+        except Exception:
+            game_day = game_date
+
         banned = (
+            f"The game was played on {game_day}. Use the correct day name when referencing it. "
             "Do not use em dashes, the phrase 'down the stretch', "
             "'late in the season', 'playoff push', or any language implying late-season context. "
-            "It is early April. "
             "When referencing his rank, always make clear it is his overall MLB prospect ranking, "
             "not his team rank (e.g. 'the #49 overall prospect in baseball', not 'the 49th-ranked prospect in the Dodgers system')."
         )
@@ -799,9 +804,9 @@ def _generate_blurb_sync(perf: dict, score_str: str, play_context: str, recent_l
         return "", ""
 
 
-async def generate_blurb(perf: dict, score_str: str, play_context: str, recent_line: str, movement_note: str) -> tuple[str, str]:
+async def generate_blurb(perf: dict, score_str: str, play_context: str, recent_line: str, movement_note: str, game_date: str) -> tuple[str, str]:
     loop = asyncio.get_event_loop()
-    return await loop.run_in_executor(None, _generate_blurb_sync, perf, score_str, play_context, recent_line, movement_note)
+    return await loop.run_in_executor(None, _generate_blurb_sync, perf, score_str, play_context, recent_line, movement_note, game_date)
 
 
 # ── EMBED BUILDER ─────────────────────────────────────────────────────────────
@@ -1018,7 +1023,7 @@ async def scan_and_post(state: dict, channel, date_str: str | None = None) -> in
 
             movement_note = detect_level_movement(season_stats, perf["level"])
 
-            headline, blurb = await generate_blurb(perf, score_str, play_context, recent_line, movement_note)
+            headline, blurb = await generate_blurb(perf, score_str, play_context, recent_line, movement_note, date_str)
             embed = build_embed(perf, score_str, headline, blurb, season_stats)
 
             await channel.send(embed=embed)
