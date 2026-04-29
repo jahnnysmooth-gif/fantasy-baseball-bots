@@ -1368,11 +1368,14 @@ def compute_pitch_mix_shift(tonight_counts: dict, season_mix: dict) -> list[dict
     shifts = []
     all_codes = set(tonight_pcts) | set(season_mix)
 
+    FASTBALL_CODES = {"FF", "FA", "FT", "SI"}
     for code in all_codes:
         tonight = tonight_pcts.get(code, 0.0)
         season  = season_mix.get(code, 0.0)
         delta   = tonight - season
-        if abs(delta) >= 0.15 and (tonight >= 0.10 or season >= 0.10):
+        # Fastball shifts require a larger delta to be noteworthy
+        threshold = 0.25 if code in FASTBALL_CODES else 0.15
+        if abs(delta) >= threshold and (tonight >= 0.10 or season >= 0.10):
             shifts.append({
                 "code":        code,
                 "tonight_pct": round(tonight * 100),
@@ -3989,10 +3992,13 @@ Season debut rules:
 Pitch mix shift rules:
 - If the facts include a pitch mix shift: weave it in as something that happened tactically — "he leaned on his slider far more than usual" not "pitch mix data shows a shift"
 - Describe it as an observer would, not as an analyst reading a chart
+- A four-seam fastball shift is only worth mentioning if it is the single most important story of the outing. If other things happened — damage innings, strikeout sequences, a gem — lead with those instead and leave the fastball usage out entirely
+- Do not write more than one sentence about any pitch mix shift, regardless of pitch type
 
 Pitch naming rules:
 - If the facts include a "Key secondary pitch": you may name it naturally when it fits the story — "the slider was the strikeout pitch tonight" or "he kept hitters honest with the changeup" — but only if it is relevant, not just because it appears in the facts
 - If the facts do not provide a specific secondary pitch, do not invent one or default to mentioning the four-seam fastball
+- Vary pitch language across summaries — do not fall back on "four-seam fastball" in card after card; if a more interesting pitch story exists, tell that one
 
 Ballpark rules:
 - Only use the ballpark fact if it genuinely explains why the run total was higher or lower than expected — a pitcher-friendly park with 7 runs allowed, or a hitter-friendly park with a gem
