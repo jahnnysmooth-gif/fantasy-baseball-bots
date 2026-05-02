@@ -260,7 +260,7 @@ async def fetch_splits(session, player_id, days):
     end_date   = datetime.now().strftime('%Y-%m-%d')
     start_date = (datetime.now() - timedelta(days=days)).strftime('%Y-%m-%d')
     url = (f"https://statsapi.mlb.com/api/v1/people/{player_id}/stats"
-           f"?stats=statsSingleSeason&season=2026&startDate={start_date}&endDate={end_date}")
+           f"?stats=byDateRange&season=2026&startDate={start_date}&endDate={end_date}")
     try:
         async with session.get(url, timeout=10) as r:
             if r.status != 200:
