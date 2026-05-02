@@ -3563,15 +3563,28 @@ def build_starter_next_start_sentence(p: dict, label: str, seed: int, next_start
     return choices[(seed // 101) % len(choices)]
 
 def get_games():
-    today = datetime.now(ET).date()
+    now_et = datetime.now(ET)
+    today = now_et.date()
     games = []
 
-    data = fetch_with_retry(f"{SCHEDULE_URL}&date={today.isoformat()}")
-    if data is None:
-        log(f"Schedule fetch failed for {today}")
-        return games
-    for date_block in data.get("dates", []):
-        games.extend(date_block.get("games", []))
+    dates_to_fetch = [today]
+    # After midnight but before sleep window, late games from the prior calendar
+    # day may still be finishing — include yesterday so they aren't missed.
+    if now_et.hour < SLEEP_START_HOUR_ET:
+        dates_to_fetch.append(today - timedelta(days=1))
+
+    seen_pks = set()
+    for fetch_date in dates_to_fetch:
+        data = fetch_with_retry(f"{SCHEDULE_URL}&date={fetch_date.isoformat()}")
+        if data is None:
+            log(f"Schedule fetch failed for {fetch_date}")
+            continue
+        for date_block in data.get("dates", []):
+            for game in date_block.get("games", []):
+                pk = game.get("gamePk")
+                if pk not in seen_pks:
+                    seen_pks.add(pk)
+                    games.append(game)
 
     return games
 
@@ -4273,9 +4286,16 @@ async def loop():
             # Clear next_start_cache each cycle so stale probable data doesn't persist
             next_start_cache.clear()
 
-            # Count how many cards already posted today to enforce daily cap
+            # Count how many cards already posted today to enforce daily cap.
+            # Only count games actually scheduled for today (ET) so that overnight
+            # inclusion of prior-day late games doesn't inflate the cap counter.
             MAX_POSTS_PER_DAY = 30
-            today_game_ids = {str(g.get("gamePk")) for g in games if g.get("gamePk")}
+            today_et_date = datetime.now(ET).date()
+            today_game_ids = {
+                str(g.get("gamePk"))
+                for g in games
+                if g.get("gamePk") and parse_game_date_et(g) == today_et_date
+            }
             posted_today = sum(
                 1 for key in posted
                 if key.split("_")[0] in today_game_ids
